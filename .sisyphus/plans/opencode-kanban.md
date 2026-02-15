@@ -35,9 +35,11 @@ A TUI program for managing multiple git repo/worktree and related OpenCode sessi
 - **Status detection**: Tmux pane content parsing (AoE-style). Capture last 50 lines, pattern match.
 - **Task lifecycle**: DONE = label only (worktree persists). Deletion has confirmation + cleanup options.
 - **Crash recovery**: Detect dead sessions, show "dead" status, auto-recreate on user attach.
-- **Navigation**: Both vim (hjkl) and arrow keys.
+- **Navigation**: Both vim (hjkl) and arrow keys + **full mouse support** (click-to-select, wheel scroll).
 - **Testing**: TDD approach with `cargo test`.
 - **Rust edition**: 2024.
+- **TUI library**: Ratatui 0.30 confirmed after exhaustive research (vs cursive, r3bl_tui, iocraft, tui-realm). All kanban TUIs, all reference projects use ratatui.
+- **Mouse support**: Click-to-select (no drag-and-drop), mouse wheel scroll (hover-based: column under cursor), click outside modal to dismiss, one-time tmux mouse hint.
 
 **Research Findings**:
 - **Agent of Empires** (650 stars): Closest prior art. Rust + ratatui + tmux + worktree. Has proven OpenCode status detection patterns. Uses list/tree view, not kanban. Reference: `src/tmux/status_detection.rs`.
@@ -47,7 +49,7 @@ A TUI program for managing multiple git repo/worktree and related OpenCode sessi
 - **Ratatui 0.30.0**: Industry standard TUI framework. Immediate-mode rendering. `Widget`/`StatefulWidget` traits.
 - **OpenCode sessions**: Stored in SQLite, ID format = UUID v4, resume via `-s <session_id>` flag.
 
-### Metis Review
+### Metis Review (Round 1 — Original Plan)
 **Identified Gaps** (addressed in plan):
 1. **Tmux server isolation**: Use dedicated socket `-L opencode-kanban` to avoid collision with user's existing sessions. → Addressed in Task 4.
 2. **Stable identifiers**: Use UUID `task_id` + stable `repo_id` in DB, separate from display names. Don't rely on `repo-branch` alone. → Addressed in Task 2.
@@ -57,6 +59,19 @@ A TUI program for managing multiple git repo/worktree and related OpenCode sessi
 6. **Edge cases**: Duplicate branch names across repos, non-ASCII chars, missing repos, worktree conflicts. → Addressed in Task 3 acceptance criteria.
 7. **Polling performance**: Backoff/jitter for status detection when many tasks. → Addressed in Task 6.
 8. **Outside-tmux behavior**: Fail fast with actionable error if run outside tmux. → Addressed in Task 1.
+
+### Metis Review (Round 2 — Mouse Support + TUI Library)
+**Identified Gaps** (addressed in plan update):
+9. **Mouse z-order routing**: Modals must receive events first; underlying board must not get clicks. → Added to Must NOT Have guardrails + Task 5 hit-test map.
+10. **Hover-based scroll**: Mouse wheel scrolls column under cursor (not focused column). → Added to Task 5 mouse support + QA tests.
+11. **Modal dismiss on outside click**: Click outside modal = Esc. → Added to Task 5 mouse behavior + QA tests.
+12. **Tmux mouse hint**: Mouse events need `tmux set -g mouse on`. No config modification — one-time hint only. → Added to Task 10 polish.
+13. **Keyboard+mouse focus consistency**: After mouse click, keyboard must continue from mouse-selected position. → Added test to Task 5 QA.
+14. **Scope creep locks**: No drag-and-drop, hover effects, context menus, double-click, mouse resize. → All added to Must NOT Have.
+15. **Border clicks inert**: Clicks on Block borders must not activate items. → Added to guardrails + Task 5 hit-test logic.
+16. **Scroll clamping**: Touchpad burst events must not cause underflow/overflow. → Added to Task 5 + QA tests.
+
+**TUI Library Confirmed**: Ratatui 0.30 validated via exhaustive research (18K stars, all kanban TUIs use it, TEA alignment, polling model fit, fulsomenko/kanban as direct prior art). No change needed.
 
 ---
 
@@ -90,6 +105,15 @@ Build a Rust TUI kanban board (`opencode-kanban`) that enables developers to man
 - Keyboard help panel
 - Configurable categories (add/rename/remove columns)
 - Task reordering within columns
+- **Mouse support**: all interactable elements must be clickable
+  - Click task cards to select (focus column + highlight card)
+  - Click column headers to focus column
+  - Click dialog buttons (Create, Cancel, Delete, etc.)
+  - Click checkbox items in delete confirmation dialog
+  - Click list items in repo/branch selectors
+  - Mouse wheel scrolls card list in the column **under the cursor** (hover-based)
+  - Click outside modal dialog to dismiss it (same as Esc)
+  - One-time hint if mouse events not received: "Enable tmux mouse: `tmux set -g mouse on`"
 
 ### Must NOT Have (Guardrails)
 - No PR creation or git push operations (v2+)
@@ -101,9 +125,19 @@ Build a Rust TUI kanban board (`opencode-kanban`) that enables developers to man
 - No Docker sandboxing
 - No `sh -c` or string-interpolated shell commands — always `Command::new().args([])`
 - No implicit network operations without user action (fetch is explicit in task creation flow)
-- No modifications to user's git config or tmux config
+- No modifications to user's git config or tmux config (no `tmux set-option` — only show hints)
 - No hardcoded "main" as default branch — detect repo's HEAD
 - No Windows support (Linux/macOS only; fail fast with error on unsupported OS)
+- **Mouse guardrails** (from Metis review):
+  - No drag-and-drop (`MouseEventKind::Drag` ignored entirely) — v2+
+  - No double-click semantics — single `Down(Left)` only
+  - No right-click context menus — v2+
+  - No hover effects, tooltips, or mouseover previews — v2+
+  - No mouse-driven resize of columns/panels
+  - All hit-testing must be deterministic from layout `Rect`s, not buffer content parsing
+  - Mouse actions must route through same TEA update pipeline as keyboard (keyboard parity)
+  - Clicks on `Block` borders are inert (only inner content is clickable)
+  - z-order: modals receive mouse events first; clicks do NOT pass through to underlying board
 
 ---
 
@@ -246,8 +280,11 @@ Critical Path: Task 1 → Task 2 → Task 5 → Task 8 → Task 10
   - Implement `main.rs`:
     - Check if running inside tmux (`$TMUX` env var). If not, print error with instructions and exit.
     - Check platform is Linux/macOS. Fail fast on unsupported OS.
-    - Initialize terminal (crossterm alternate screen, raw mode)
+    - Initialize terminal (crossterm alternate screen, raw mode, **`EnableMouseCapture`**)
+    - On exit: restore terminal with **`DisableMouseCapture`** (also in panic hook)
     - Create basic event loop (TEA pattern): poll crossterm events → update state → render
+    - Handle `Event::Key` for keyboard, `Event::Mouse` for mouse (both route to same `update()`)
+    - Handle `Event::Resize` to invalidate/regenerate layout
     - Render a placeholder kanban board with 3 empty columns (TODO | IN PROGRESS | DONE)
     - Handle `q` to quit cleanly (restore terminal)
   - Write initial test: `cargo test` runs and passes (even if just a trivial assertion)
@@ -256,7 +293,7 @@ Critical Path: Task 1 → Task 2 → Task 5 → Task 8 → Task 10
   **Must NOT do**:
   - Don't implement any actual DB, git, tmux, or OpenCode functionality yet
   - Don't add CLI arguments (TUI-only)
-  - Don't add mouse support
+  - Don't implement mouse click handlers (just enable capture + forward events; Task 5 adds handlers)
   - Don't use `sh -c` for any command execution
 
   **Recommended Agent Profile**:
@@ -326,6 +363,20 @@ Critical Path: Task 1 → Task 2 → Task 5 → Task 8 → Task 10
       3. Assert: stderr contains "tmux" (instructional error message)
     Expected Result: Clear error message about needing tmux
     Evidence: stderr output captured
+
+  Scenario: Mouse capture enabled on startup
+    Tool: interactive_bash (tmux)
+    Preconditions: Binary built, tmux has `set -g mouse on`
+    Steps:
+      1. tmux -L opencode-kanban-test new-session -d -s test-mouse -x 80 -y 24
+      2. tmux -L opencode-kanban-test send-keys -t test-mouse "cd /home/cc/codes/opencode-kanban && ./target/release/opencode-kanban" Enter
+      3. sleep 2
+      4. tmux -L opencode-kanban-test capture-pane -t test-mouse -p
+      5. Assert: board renders (contains "TODO")
+      6. tmux -L opencode-kanban-test send-keys -t test-mouse "q"
+      7. tmux -L opencode-kanban-test kill-session -t test-mouse
+    Expected Result: App starts with mouse capture enabled, exits cleanly restoring mouse state
+    Evidence: Terminal output captured
   ```
 
   **Commit**: YES
@@ -760,6 +811,23 @@ Critical Path: Task 1 → Task 2 → Task 5 → Task 8 → Task 10
     - Task cards inside columns: `List` widget with `ListState` for selection
     - Focused column has double border (`.border_type(BorderType::Double)`) or colored border
     - Selected card has highlighted background via `Style::new().bg(Color::DarkGray)`
+    - **Hit-test map**: Store each rendered widget's `Rect` in `AppState` per frame (column rects, card rects, button rects). Mouse events do coordinate lookup against this map.
+  - Implement mouse support in `src/input.rs`:
+    - `MouseEventKind::Down(MouseButton::Left)` + hit-test:
+      - Click inside task card `Rect` → `SelectTask(column_idx, task_idx)` (focuses column AND selects card)
+      - Click inside column header `Rect` → `FocusColumn(column_idx)`
+      - Click inside dialog button `Rect` → activate button action
+      - Click inside checkbox `Rect` → toggle checkbox
+      - Click inside list item `Rect` → select list item
+      - Click outside modal `Rect` (when modal open) → `DismissDialog` (same as Esc)
+      - Click on `Block` borders or empty space → no-op (inert)
+    - `MouseEventKind::ScrollUp` / `ScrollDown`:
+      - Determine which column the cursor `(column, row)` falls in
+      - Scroll that column's card list up/down (hover-based, not focus-based)
+      - Clamp scroll offset to valid range (handle touchpad burst events)
+    - Ignore: `MouseEventKind::Drag`, `MouseEventKind::Moved`, `Down(Right)`, `Down(Middle)`
+    - **All mouse actions route through the same `Message` enum as keyboard** (keyboard parity)
+    - If no mouse events received for 10s after app start, show one-time hint: "Tip: `tmux set -g mouse on` enables mouse support"
   - Implement keyboard navigation in `src/input.rs`:
     - `h`/`←`: Move focus to left column
     - `l`/`→`: Move focus to right column
@@ -785,8 +853,9 @@ Critical Path: Task 1 → Task 2 → Task 5 → Task 8 → Task 10
   - Don't implement actual git/tmux operations in task creation (just DB + UI). Wire to real ops in Task 8.
   - Don't implement status polling yet (Task 6)
   - Don't implement configurable categories yet (Task 9)
-  - Don't add mouse support
+  - Don't implement drag-and-drop, hover effects, context menus, or double-click
   - Don't add scrollbar widgets (simple list scrolling is enough)
+  - Don't scatter ad-hoc mouse handlers — use single event-routing + hit-test map approach
 
   **Recommended Agent Profile**:
   - **Category**: `visual-engineering`
@@ -827,6 +896,7 @@ Critical Path: Task 1 → Task 2 → Task 5 → Task 8 → Task 10
 
   **TDD:**
   - [ ] Tests for: navigation state transitions, task move logic, reorder logic, dialog state machine
+  - [ ] Tests for mouse: hit-test routing (click coord → correct action), scroll offset clamping, modal z-order blocking, keyboard+mouse focus consistency
   - [ ] `cargo test ui` → PASS (using ratatui `TestBackend` for render assertions)
 
   **Agent-Executed QA Scenarios:**
@@ -871,6 +941,54 @@ Critical Path: Task 1 → Task 2 → Task 5 → Task 8 → Task 10
       4. tmux capture-pane → Assert: new task appears in TODO column
     Expected Result: Task creation flow completes
     Evidence: Pane captures at each step
+
+  Scenario: Mouse click selects task card and focuses column
+    Tool: Bash (cargo test)
+    Preconditions: UI module with hit-test map implemented
+    Steps:
+      1. cargo test test_mouse_click_selects_task
+      2. Assert: clicking at coordinates inside a task card Rect produces SelectTask action
+      3. Assert: focused_column updated to the clicked column
+      4. Assert: selected_task_per_column updated to the clicked card index
+    Expected Result: Mouse click and keyboard selection produce identical state
+    Evidence: Test output
+
+  Scenario: Mouse click on border is inert
+    Tool: Bash (cargo test)
+    Steps:
+      1. cargo test test_mouse_click_border_inert
+      2. Assert: clicking at coordinates on Block border produces no action
+      3. Assert: focus state unchanged
+    Expected Result: Borders don't trigger actions
+    Evidence: Test output
+
+  Scenario: Mouse wheel scrolls column under cursor
+    Tool: Bash (cargo test)
+    Steps:
+      1. cargo test test_mouse_wheel_scrolls_hovered_column
+      2. Assert: ScrollDown at coords inside column 2 scrolls column 2 (not focused column 0)
+      3. Assert: scroll offset clamps at 0 (top) and max (bottom), no underflow
+    Expected Result: Hover-based scroll works, clamped correctly
+    Evidence: Test output
+
+  Scenario: Click outside modal dismisses it
+    Tool: Bash (cargo test)
+    Steps:
+      1. cargo test test_mouse_click_outside_modal_dismisses
+      2. Assert: with dialog open, clicking outside modal Rect produces DismissDialog
+      3. Assert: clicking inside modal does NOT dismiss
+      4. Assert: clicking where a task card WOULD be (but under modal) does NOT select the card
+    Expected Result: Modal z-order enforced, outside click = Esc
+    Evidence: Test output
+
+  Scenario: Mouse and keyboard focus stay consistent
+    Tool: Bash (cargo test)
+    Steps:
+      1. cargo test test_mouse_keyboard_focus_consistency
+      2. Assert: after mouse click selects column 2 task 1, pressing 'j' moves to column 2 task 2
+      3. Assert: after keyboard moves to column 0, mouse click on column 1 updates focus to column 1
+    Expected Result: No split-brain between input modalities
+    Evidence: Test output
   ```
 
   **Commit**: YES
@@ -1184,7 +1302,9 @@ Critical Path: Task 1 → Task 2 → Task 5 → Task 8 → Task 10
   **What to do**:
   - Implement category management UI:
     - New keybind: `C` to open category management dialog
-    - Dialog allows: add new category, rename existing, delete (only if empty), reorder (drag up/down)
+    - Dialog allows: add new category, rename existing, delete (only if empty), reorder (keyboard up/down)
+    - All dialog items clickable: click category name to select, click action buttons (Add, Rename, Delete)
+    - Click outside category dialog dismisses it
     - Categories stored in SQLite `categories` table with `position` field
     - When category deleted: must be empty (no tasks). Show error if tasks exist.
   - Implement task reordering:
@@ -1199,7 +1319,7 @@ Critical Path: Task 1 → Task 2 → Task 5 → Task 8 → Task 10
   **Must NOT do**:
   - Don't allow deleting the last remaining category
   - Don't allow category names longer than 30 chars
-  - Don't implement drag-and-drop (keyboard only)
+  - Don't implement drag-and-drop for reordering (keyboard J/K only; click to select is fine)
 
   **Recommended Agent Profile**:
   - **Category**: `quick`
@@ -1253,14 +1373,15 @@ Critical Path: Task 1 → Task 2 → Task 5 → Task 8 → Task 10
 
   **What to do**:
   - Implement help panel overlay:
-    - `?` toggles a transparent overlay showing all keybindings
-    - Organized by section: Navigation, Task Actions, Category Management, General
-    - Press `?` again or `Esc` to dismiss
+    - `?` toggles a transparent overlay showing all keybindings + mouse actions
+    - Organized by section: Navigation, Task Actions, Category Management, Mouse, General
+    - Press `?` again or `Esc` or **click outside** to dismiss
   - Polish and edge cases:
     - Graceful handling of very narrow terminals (show message if too narrow for columns)
     - Empty state: show welcome message with instructions when no tasks exist
     - Loading indicator during git fetch
     - Confirmation before quit if there are active sessions
+    - **Mouse polish**: tmux mouse hint (one-time, if no mouse events received after 10s), scroll offset clamping for touchpad bursts, resize invalidates hit-test map
   - Write integration tests that exercise the full pipeline:
     - Create test git repos in temp dirs
     - Run full task creation → status detection → move → delete pipeline
@@ -1329,6 +1450,17 @@ Critical Path: Task 1 → Task 2 → Task 5 → Task 8 → Task 10
       2. Start opencode-kanban
       3. tmux capture-pane → Assert: message about minimum terminal size
     Expected Result: Graceful degradation
+    Evidence: Pane capture
+
+  Scenario: Help panel lists mouse actions and click-to-dismiss works
+    Tool: interactive_bash (tmux)
+    Steps:
+      1. Start opencode-kanban in tmux session
+      2. Press '?'
+      3. tmux capture-pane → Assert: help overlay visible with "Mouse" section
+      4. Assert: help text mentions "Click" and "Scroll" actions
+      5. Press 'Esc' → help dismissed
+    Expected Result: Help includes mouse documentation
     Evidence: Pane capture
   ```
 
