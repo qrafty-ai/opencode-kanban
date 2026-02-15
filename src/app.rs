@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
+use ratatui::widgets::ScrollbarState;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -366,6 +367,7 @@ pub struct App {
     pub focused_column: usize,
     pub selected_task_per_column: HashMap<usize, usize>,
     pub scroll_offset_per_column: HashMap<usize, usize>,
+    pub column_scroll_states: Vec<ScrollbarState>,
     pub active_dialog: ActiveDialog,
     pub footer_notice: Option<String>,
     pub hit_test_map: Vec<(Rect, Message)>,
@@ -394,6 +396,7 @@ impl App {
             focused_column: 0,
             selected_task_per_column: HashMap::new(),
             scroll_offset_per_column: HashMap::new(),
+            column_scroll_states: Vec::new(),
             active_dialog: ActiveDialog::None,
             footer_notice: None,
             hit_test_map: Vec::new(),
@@ -432,6 +435,17 @@ impl App {
             self.scroll_offset_per_column
                 .entry(self.focused_column)
                 .or_insert(0);
+            
+            // Initialize scroll states for each column
+            let num_columns = self.categories.len();
+            self.column_scroll_states = (0..num_columns)
+                .map(|i| {
+                    let task_count = self.tasks.iter()
+                        .filter(|t| t.category_id == self.categories[i].id)
+                        .count();
+                    ScrollbarState::new(task_count.saturating_sub(1))
+                })
+                .collect();
         }
 
         Ok(())

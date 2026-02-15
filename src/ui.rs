@@ -1,11 +1,11 @@
 use std::path::Path;
 
 use ratatui::{
-    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation},
+    Frame,
 };
 
 use crate::app::{
@@ -218,6 +218,28 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 Paragraph::new("No tasks in this category").alignment(Alignment::Center),
                 inner_area,
             );
+        } else {
+            // Render scrollbar if there are more tasks than visible
+            let total_tasks = tasks_sorted.len() as u16;
+            let visible_tasks = inner_area.height / 3;
+            if total_tasks > visible_tasks {
+                let mut scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .thumb_style(Style::default().fg(Color::Gray).bg(Color::DarkGray));
+                scrollbar = scrollbar
+                    .track_symbol(Some("│"))
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓"));
+                frame.render_stateful_widget(
+                    scrollbar,
+                    Rect {
+                        x: column_chunks[i].x + column_chunks[i].width - 1,
+                        y: inner_area.y,
+                        height: inner_area.height,
+                        width: 1,
+                    },
+                    &mut app.column_scroll_states[i],
+                );
+            }
         }
     }
 }
@@ -245,7 +267,20 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
-    let area = centered_rect(60, 20, frame.area());
+    // Use larger dialog for forms that need more space
+    let (percent_x, percent_y) = match &app.active_dialog {
+        ActiveDialog::NewTask(_) => (80, 70),
+        ActiveDialog::DeleteTask(_) => (50, 50),
+        ActiveDialog::CategoryInput(_) => (50, 50),
+        ActiveDialog::DeleteCategory(_) => (50, 40),
+        ActiveDialog::WorktreeNotFound(_) => (50, 40),
+        ActiveDialog::RepoUnavailable(_) => (50, 40),
+        ActiveDialog::ConfirmQuit(_) => (50, 30),
+        ActiveDialog::Error(_) => (60, 40),
+        _ => (60, 20),
+    };
+
+    let area = centered_rect(percent_x, percent_y, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
