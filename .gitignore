@@ -3,3 +3,5 @@
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+.sisyphus/*
+!.sisyphus/rules/
