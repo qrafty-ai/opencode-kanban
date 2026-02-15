@@ -273,7 +273,6 @@ trait CreateTaskRuntime {
         command: Option<&str>,
     ) -> Result<()>;
     fn tmux_kill_session(&self, session_name: &str) -> Result<()>;
-    fn tmux_switch_client(&self, session_name: &str) -> Result<()>;
 }
 
 struct RealCreateTaskRuntime;
@@ -343,10 +342,6 @@ impl CreateTaskRuntime for RealCreateTaskRuntime {
 
     fn tmux_kill_session(&self, session_name: &str) -> Result<()> {
         tmux_kill_session(session_name)
-    }
-
-    fn tmux_switch_client(&self, session_name: &str) -> Result<()> {
-        tmux_switch_client(session_name)
     }
 }
 
@@ -435,12 +430,14 @@ impl App {
             self.scroll_offset_per_column
                 .entry(self.focused_column)
                 .or_insert(0);
-            
+
             // Initialize scroll states for each column
             let num_columns = self.categories.len();
             self.column_scroll_states = (0..num_columns)
                 .map(|i| {
-                    let task_count = self.tasks.iter()
+                    let task_count = self
+                        .tasks
+                        .iter()
                         .filter(|t| t.category_id == self.categories[i].id)
                         .count();
                     ScrollbarState::new(task_count.saturating_sub(1))
@@ -1464,7 +1461,6 @@ fn attach_task_with_runtime(
         task.worktree_path.clone(),
     )?;
     db.update_task_status(task.id, Status::Unknown.as_str())?;
-    runtime.switch_client(&session_name)?;
 
     Ok(AttachTaskResult::Attached)
 }
@@ -1541,9 +1537,6 @@ fn create_task_pipeline_with_runtime(
         db.update_task_status(task.id, Status::Unknown.as_str())
             .context("failed to save task runtime status")?;
 
-        runtime
-            .tmux_switch_client(&session_name)
-            .context("failed to switch tmux client")?;
         Ok(())
     };
 
@@ -1839,7 +1832,7 @@ mod tests {
         assert_eq!(created[0].2, format!("opencode -s {session_id}"));
 
         let switched = runtime.switched_sessions.borrow();
-        assert_eq!(switched.as_slice(), &["ok-attach-recreate".to_string()]);
+        assert!(switched.is_empty());
         Ok(())
     }
 
@@ -1905,7 +1898,7 @@ mod tests {
 
         assert_eq!(runtime.created_worktrees.borrow().len(), 1);
         assert_eq!(runtime.created_sessions.borrow().len(), 1);
-        assert_eq!(runtime.switched_sessions.borrow().len(), 1);
+        assert!(runtime.switched_sessions.borrow().is_empty());
         Ok(())
     }
 
@@ -2031,17 +2024,6 @@ mod tests {
                 .borrow_mut()
                 .push(session_name.to_string());
             self.sessions.borrow_mut().remove(session_name);
-            Ok(())
-        }
-
-        fn tmux_switch_client(&self, session_name: &str) -> Result<()> {
-            if *self.fail_switch.borrow() {
-                anyhow::bail!("switch failed")
-            }
-
-            self.switched_sessions
-                .borrow_mut()
-                .push(session_name.to_string());
             Ok(())
         }
     }
