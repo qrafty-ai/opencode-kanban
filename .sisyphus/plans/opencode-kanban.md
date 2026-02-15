@@ -3,7 +3,7 @@
 ## TL;DR
 
 > **Quick Summary**: Build a Rust TUI kanban board for managing git worktrees and OpenCode sessions across multiple repositories, orchestrated via tmux sessions. Each "task" on the board corresponds to a worktree/branch with a dedicated tmux session running OpenCode.
-> 
+>
 > **Deliverables**:
 > - `opencode-kanban` binary: Rust TUI with horizontal kanban columns
 > - SQLite-backed persistence for tasks, repos, categories, session mappings
@@ -11,7 +11,7 @@
 > - Tmux session orchestration (create/attach/detect/recover)
 > - OpenCode integration (launch, resume by session ID, status detection via pane capture)
 > - Crash recovery with lazy re-spawn
-> 
+>
 > **Estimated Effort**: Large
 > **Parallel Execution**: YES - 3 waves
 > **Critical Path**: Task 1 (scaffold) → Task 2 (DB) → Task 3 (git) → Task 4 (tmux) → Tasks 5-7 (parallel UI + OpenCode + recovery) → Tasks 8-10 (polish)

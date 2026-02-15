@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-const TMUX_SOCKET: &str = "opencode-kanban";
+const TMUX_SOCKET: &str = "";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TmuxSession {
@@ -81,11 +81,59 @@ pub fn tmux_kill_session(session_name: &str) -> Result<()> {
 }
 
 pub fn tmux_switch_client(session_name: &str) -> Result<()> {
-    let output = tmux_command()
-        .args(["switch-client", "-t", session_name])
+    // Try to get current client from default socket (not our dedicated socket)
+    // because the kanban runs in the user's regular tmux
+    let current_client = get_current_client_from_default_socket();
+    let output = if let Some(client) = current_client {
+        // Switch using the client we found
+        Command::new("tmux")
+            .args(["switch-client", "-c", &client, "-t", session_name])
+            .output()
+            .context("failed to run tmux switch-client")?
+    } else {
+        // Fallback: try direct switch (will fail if no current client)
+        Command::new("tmux")
+            .args(["switch-client", "-t", session_name])
+            .output()
+            .context("failed to run tmux switch-client")?
+    };
+    ensure_success_with_output(&output, "switch-client")
+}
+
+fn get_current_client_from_default_socket() -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "#{client_name}"])
         .output()
-        .context("failed to run tmux switch-client")?;
-    ensure_success(&output, "switch-client")
+        .ok()?;
+    if output.status.success() {
+        let client = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if client.is_empty() {
+            None
+        } else {
+            Some(client)
+        }
+    } else {
+        None
+    }
+}
+
+fn ensure_success_with_output(output: &std::process::Output, command: &str) -> Result<()> {
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!(
+            "tmux {} failed: {}{}",
+            command,
+            stderr.trim(),
+            if stdout.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", stdout.trim())
+            }
+        )
+    }
 }
 
 pub fn tmux_list_sessions() -> Vec<TmuxSession> {
