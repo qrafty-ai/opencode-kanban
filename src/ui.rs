@@ -4,7 +4,9 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation},
+    widgets::{
+        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, Wrap,
+    },
     Frame,
 };
 
@@ -272,11 +274,11 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::NewTask(_) => (80, 70),
         ActiveDialog::DeleteTask(_) => (50, 50),
         ActiveDialog::CategoryInput(_) => (50, 50),
-        ActiveDialog::DeleteCategory(_) => (50, 40),
-        ActiveDialog::WorktreeNotFound(_) => (50, 40),
-        ActiveDialog::RepoUnavailable(_) => (50, 40),
+        ActiveDialog::DeleteCategory(_) => (50, 50),
+        ActiveDialog::WorktreeNotFound(_) => (60, 50),
+        ActiveDialog::RepoUnavailable(_) => (60, 50),
         ActiveDialog::ConfirmQuit(_) => (50, 30),
-        ActiveDialog::Error(_) => (60, 40),
+        ActiveDialog::Error(_) => (60, 60),
         _ => (60, 20),
     };
 
@@ -562,17 +564,20 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
             let layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),
+                    Constraint::Min(5),
                     Constraint::Length(1),
                     Constraint::Length(3),
                 ])
                 .split(inner_area);
 
             let text = format!(
-                "Worktree not found for \"{}\".\nRecreate?",
+                "Worktree not found for \"{}\".\n\nRecreate?",
                 state.task_title
             );
-            frame.render_widget(Paragraph::new(text).alignment(Alignment::Center), layout[0]);
+            let paragraph = Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true });
+            frame.render_widget(paragraph, layout[0]);
 
             let buttons = Layout::default()
                 .direction(Direction::Horizontal)
@@ -611,14 +616,17 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::RepoUnavailable(state) => {
             let layout = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(4), Constraint::Length(3)])
+                .constraints([Constraint::Min(6), Constraint::Length(3)])
                 .split(inner_area);
 
             let text = format!(
-                "Repo unavailable for \"{}\".\n{}",
+                "Repo unavailable for \"{}\"\n\n{}",
                 state.task_title, state.repo_path
             );
-            frame.render_widget(Paragraph::new(text).alignment(Alignment::Center), layout[0]);
+            let paragraph = Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true });
+            frame.render_widget(paragraph, layout[0]);
 
             render_button(frame, layout[1], "[ Dismiss ]", true);
             app.hit_test_map
@@ -651,11 +659,14 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::Error(state) => {
             let layout = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(5), Constraint::Length(3)])
+                .constraints([Constraint::Min(8), Constraint::Length(3)])
                 .split(inner_area);
 
-            let text = format!("{}\n{}", state.title, state.detail);
-            frame.render_widget(Paragraph::new(text).alignment(Alignment::Center), layout[0]);
+            let text = format!("{}\n\n{}", state.title, state.detail);
+            let paragraph = Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true });
+            frame.render_widget(paragraph, layout[0]);
             render_button(frame, layout[1], "[ Dismiss ]", true);
             app.hit_test_map.push((layout[1], Message::DismissDialog));
         }
@@ -682,15 +693,23 @@ fn render_input_field(
 }
 
 fn render_button(frame: &mut Frame<'_>, area: Rect, label: &str, is_focused: bool) {
-    let style = if is_focused {
-        Style::default().bg(Color::Blue).fg(Color::White)
+    let (bg, fg) = if is_focused {
+        (Color::Blue, Color::White)
     } else {
-        Style::default()
+        (Color::Reset, Color::Reset)
     };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if is_focused {
+            Style::default().fg(Color::Blue)
+        } else {
+            Style::default().fg(Color::Gray)
+        })
+        .style(Style::default().bg(bg).fg(fg));
     frame.render_widget(
         Paragraph::new(label)
             .alignment(Alignment::Center)
-            .style(style),
+            .block(block),
         area,
     );
 }
