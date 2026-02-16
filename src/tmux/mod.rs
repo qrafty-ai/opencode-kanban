@@ -187,7 +187,12 @@ pub fn tmux_get_pane_pid(session_name: &str) -> Option<u32> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().next()?.trim().parse().ok()
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .parse()
+        .ok()
 }
 
 pub fn sanitize_session_name(repo_name: &str, branch_name: &str) -> String {
@@ -329,7 +334,7 @@ fn tmux_socket() -> String {
     }
 
     if cfg!(test) {
-        "opencode-kanban-test".to_string()
+        format!("opencode-kanban-test-{}", std::process::id())
     } else {
         TMUX_SOCKET.to_string()
     }
@@ -349,7 +354,47 @@ mod tests {
     use super::*;
     use std::process::Command;
     use std::thread;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    struct SessionCleanup {
+        name: String,
+    }
+
+    impl SessionCleanup {
+        fn new(name: String) -> Self {
+            Self { name }
+        }
+    }
+
+    impl Drop for SessionCleanup {
+        fn drop(&mut self) {
+            if tmux_session_exists(&self.name) {
+                let _ = tmux_kill_session(&self.name);
+            }
+        }
+    }
+
+    fn wait_for_session(session_name: &str, timeout: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if tmux_session_exists(session_name) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    fn wait_for_pane_pid(session_name: &str, timeout: Duration) -> Option<u32> {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if let Some(pid) = tmux_get_pane_pid(session_name) {
+                return Some(pid);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        None
+    }
 
     #[test]
     fn test_sanitize_session_name() {
@@ -472,9 +517,8 @@ mod tests {
         if !tmux_available() {
             return;
         }
-
-        cleanup_test_server();
         let session_name = unique_session_name("create");
+        let _cleanup = SessionCleanup::new(session_name.clone());
 
         tmux_create_session(
             &session_name,
@@ -483,21 +527,18 @@ mod tests {
         )
         .expect("create session should succeed");
 
-        thread::sleep(Duration::from_millis(200));
-        assert!(tmux_session_exists(&session_name));
+        assert!(wait_for_session(&session_name, Duration::from_secs(2)));
 
         let sessions = tmux_list_sessions();
         assert!(sessions.iter().any(|session| session.name == session_name));
 
-        let pane_pid = tmux_get_pane_pid(&session_name);
+        let pane_pid = wait_for_pane_pid(&session_name, Duration::from_secs(2));
         assert!(pane_pid.is_some());
 
         if tmux_session_exists(&session_name) {
             let _ = tmux_kill_session(&session_name);
         }
         assert!(!tmux_session_exists(&session_name));
-
-        cleanup_test_server();
     }
 
     #[test]
@@ -505,9 +546,8 @@ mod tests {
         if !tmux_available() {
             return;
         }
-
-        cleanup_test_server();
         let session_name = unique_session_name("capture");
+        let _cleanup = SessionCleanup::new(session_name.clone());
 
         tmux_create_session(
             &session_name,
@@ -516,7 +556,7 @@ mod tests {
         )
         .expect("create session should succeed");
 
-        thread::sleep(Duration::from_millis(200));
+        assert!(wait_for_session(&session_name, Duration::from_secs(2)));
         let captured = tmux_capture_pane(&session_name, 20).expect("capture should succeed");
         assert!(captured.contains("line-one"));
         assert!(captured.contains("line-two"));
@@ -524,7 +564,6 @@ mod tests {
         if tmux_session_exists(&session_name) {
             let _ = tmux_kill_session(&session_name);
         }
-        cleanup_test_server();
     }
 
     fn tmux_available() -> bool {
@@ -541,12 +580,5 @@ mod tests {
             .expect("system time should be valid")
             .as_micros();
         format!("tmux-{prefix}-{micros}")
-    }
-
-    fn cleanup_test_server() {
-        let socket = tmux_socket();
-        let _ = Command::new("tmux")
-            .args(["-L", socket.as_str(), "kill-server"])
-            .output();
     }
 }

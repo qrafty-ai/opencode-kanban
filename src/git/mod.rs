@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn test_list_branches_and_tags() {
         let repo = TestRepo::new_with_origin_main("branches-tags").expect("repo should be created");
-        repo.git(["branch", "feature/local"])
+        repo.git(["checkout", "-b", "feature/local"])
             .expect("local branch should be created");
         repo.git(["tag", "v1.0.0"]).expect("tag should be created");
 
@@ -535,7 +535,10 @@ mod tests {
             let seed = temp.path().join("seed");
             fs::create_dir_all(&seed).context("failed to create seed dir")?;
 
-            run_git_in(&temp.path().to_path_buf(), ["init", "--bare", "origin.git"])?;
+            run_git_in(
+                &temp.path().to_path_buf(),
+                ["init", "--bare", "-b", "main", "origin.git"],
+            )?;
 
             let seed_path = seed.to_string_lossy().to_string();
             run_git_in(
