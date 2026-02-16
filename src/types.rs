@@ -32,6 +32,7 @@ pub struct Task {
     pub category_id: Uuid,
     pub position: i64,
     pub tmux_session_name: Option<String>,
+    pub opencode_session_id: Option<String>,
     pub worktree_path: Option<String>,
     pub tmux_status: String,
     pub status_source: String,
@@ -47,6 +48,7 @@ pub enum SessionState {
     Waiting,
     Idle,
     Dead,
+    Unknown,
 }
 
 impl SessionState {
@@ -56,6 +58,7 @@ impl SessionState {
             SessionState::Waiting => "waiting",
             SessionState::Idle => "idle",
             SessionState::Dead => "dead",
+            SessionState::Unknown => "unknown",
         }
     }
 }
