@@ -1,4 +1,4 @@
-use std::{io, panic, time::Duration};
+use std::{env, io, panic, process::Command, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use crossterm::{
@@ -8,7 +8,12 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use opencode_kanban::{app::App, input::event_to_message, tmux::ensure_tmux_installed, ui};
+use opencode_kanban::{
+    app::App,
+    input::event_to_message,
+    tmux::{ensure_tmux_installed, tmux_session_exists},
+    ui,
+};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -41,13 +46,39 @@ fn validate_runtime_environment() -> Result<()> {
         bail!("opencode-kanban supports only Linux and macOS.");
     }
 
-    if std::env::var_os("TMUX").is_none() {
-        bail!(
-            "opencode-kanban must run inside tmux. Start tmux first, then run `opencode-kanban`."
-        );
-    }
-
     ensure_tmux_installed()?;
+
+    if std::env::var_os("TMUX").is_none() {
+        let session_name = "opencode-kanban";
+        let current_exe = env::current_exe().context("failed to get current executable")?;
+        let exe_path = current_exe.to_string_lossy();
+
+        if tmux_session_exists(session_name) {
+            let mut child = Command::new("tmux")
+                .args(["attach-session", "-t", session_name])
+                .spawn()
+                .context("failed to attach to tmux session")?;
+
+            child.wait().context("tmux attach-session failed")?;
+            std::process::exit(0);
+        }
+
+        let mut child = Command::new("tmux")
+            .args([
+                "new-session",
+                "-A",
+                "-s",
+                session_name,
+                "-c",
+                ".",
+                exe_path.as_ref(),
+            ])
+            .spawn()
+            .context("failed to create tmux session")?;
+
+        child.wait().context("tmux new-session failed")?;
+        std::process::exit(0);
+    }
 
     Ok(())
 }
