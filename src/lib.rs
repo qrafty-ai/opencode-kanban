@@ -4,6 +4,7 @@ pub mod db;
 pub mod git;
 pub mod input;
 pub mod opencode;
+pub mod projects;
 pub mod theme;
 pub mod tmux;
 pub mod types;

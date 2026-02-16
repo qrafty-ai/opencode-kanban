@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use ratatui::widgets::ScrollbarState;
+use ratatui::widgets::{ListState, ScrollbarState};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -24,8 +24,9 @@ use crate::opencode::{
     OpenCodeBindingState, OpenCodeServerManager, ServerStatusProvider, Status, StatusProvider,
     TmuxStatusProvider, classify_binding_state, ensure_server_ready,
 };
+use crate::projects::{self, ProjectInfo};
 use crate::tmux::{
-    sanitize_session_name, tmux_create_session, tmux_kill_session, tmux_send_keys,
+    sanitize_session_name_for_project, tmux_create_session, tmux_kill_session, tmux_send_keys,
     tmux_session_exists, tmux_switch_client,
 };
 use crate::types::{Category, Repo, SessionStatus, SessionStatusError, SessionStatusSource, Task};
@@ -57,9 +58,28 @@ pub struct NewTaskDialogState {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub enum NewProjectField {
+    Name,
+    Create,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NewProjectDialogState {
+    pub name_input: String,
+    pub focused_field: NewProjectField,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ErrorDialogState {
     pub title: String,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ConfirmQuitDialogState {
+    pub active_session_count: usize,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -88,16 +108,22 @@ pub struct MoveTaskDialogState {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CategoryInputField {
+    Name,
+    Confirm,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CategoryInputMode {
     Add,
     Rename,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum CategoryInputField {
-    Name,
-    Confirm,
-    Cancel,
+pub enum View {
+    ProjectList,
+    Board,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -148,6 +174,7 @@ pub enum ActiveDialog {
     None,
     NewTask(NewTaskDialogState),
     CommandPalette(CommandPaletteState),
+    NewProject(NewProjectDialogState),
     CategoryInput(CategoryInputDialogState),
     DeleteCategory(DeleteCategoryDialogState),
     Error(ErrorDialogState),
@@ -155,6 +182,7 @@ pub enum ActiveDialog {
     MoveTask(MoveTaskDialogState),
     WorktreeNotFound(WorktreeNotFoundDialogState),
     RepoUnavailable(RepoUnavailableDialogState),
+    ConfirmQuit(ConfirmQuitDialogState),
     Help,
 }
 
@@ -195,6 +223,13 @@ pub enum Message {
     CancelQuit,
     ExecuteCommand(String),
     CycleCategoryColor(usize),
+    SwitchToProjectList,
+    SwitchToBoard(PathBuf),
+    ProjectListSelectUp,
+    ProjectListSelectDown,
+    ProjectListConfirm,
+    OpenNewProjectDialog,
+    CreateProject,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -388,6 +423,11 @@ pub struct App {
     pub active_dialog: ActiveDialog,
     pub footer_notice: Option<String>,
     pub hit_test_map: Vec<(Rect, Message)>,
+    pub current_view: View,
+    pub current_project_path: Option<PathBuf>,
+    pub project_list: Vec<ProjectInfo>,
+    pub selected_project_index: usize,
+    pub project_list_state: ListState,
     started_at: Instant,
     mouse_seen: bool,
     mouse_hint_shown: bool,
@@ -397,6 +437,13 @@ pub struct App {
 }
 
 impl App {
+    pub fn active_session_count(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|t| t.tmux_status == "running")
+            .count()
+    }
+
     pub fn new() -> Result<Self> {
         let db_path = default_db_path()?;
         let db = Database::open(&db_path)?;
@@ -419,6 +466,11 @@ impl App {
             active_dialog: ActiveDialog::None,
             footer_notice: None,
             hit_test_map: Vec::new(),
+            current_view: View::ProjectList,
+            current_project_path: None,
+            project_list: Vec::new(),
+            selected_project_index: 0,
+            project_list_state: ListState::default(),
             started_at: Instant::now(),
             mouse_seen: false,
             mouse_hint_shown: false,
@@ -428,6 +480,7 @@ impl App {
         };
 
         app.refresh_data()?;
+        app.refresh_projects()?;
         app.reconcile_startup_with_runtime(&RealRecoveryRuntime)?;
         app.refresh_data()?;
 
@@ -471,6 +524,50 @@ impl App {
         }
 
         Ok(())
+    }
+
+    pub fn refresh_projects(&mut self) -> Result<()> {
+        self.project_list = projects::list_projects().context("failed to list projects")?;
+        if !self.project_list.is_empty() {
+            self.selected_project_index =
+                self.selected_project_index.min(self.project_list.len() - 1);
+            self.project_list_state
+                .select(Some(self.selected_project_index));
+        } else {
+            self.selected_project_index = 0;
+            self.project_list_state.select(None);
+        }
+        Ok(())
+    }
+
+    pub fn switch_project(&mut self, path: PathBuf) -> Result<()> {
+        self.poller_stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.poller_thread.take() {
+            let _ = handle.join();
+        }
+
+        let db = Database::open(&path)?;
+        self.db = db;
+        self.refresh_data()?;
+
+        self.poller_stop.store(false, Ordering::Relaxed);
+        self.poller_thread = Some(spawn_status_poller(
+            path.clone(),
+            Arc::clone(&self.poller_stop),
+        ));
+
+        self.current_project_path = Some(path);
+        Ok(())
+    }
+
+    fn current_project_slug_for_tmux(&self) -> Option<String> {
+        let path = self.current_project_path.as_ref()?;
+        let stem = path.file_stem()?.to_str()?;
+        if stem == projects::DEFAULT_PROJECT {
+            None
+        } else {
+            Some(stem.to_string())
+        }
     }
 
     pub fn update(&mut self, message: Message) -> Result<()> {
@@ -621,6 +718,69 @@ impl App {
             | Message::DeleteTaskToggleRemoveWorktree
             | Message::DeleteTaskToggleDeleteBranch => {}
             Message::ConfirmDeleteTask => self.confirm_delete_task()?,
+            Message::SwitchToProjectList => {
+                self.current_view = View::ProjectList;
+            }
+            Message::SwitchToBoard(path) => {
+                self.switch_project(path)?;
+                self.current_view = View::Board;
+            }
+            Message::ProjectListSelectUp => {
+                if self.selected_project_index > 0 {
+                    self.selected_project_index -= 1;
+                    self.project_list_state
+                        .select(Some(self.selected_project_index));
+                }
+            }
+            Message::ProjectListSelectDown => {
+                if self.selected_project_index + 1 < self.project_list.len() {
+                    self.selected_project_index += 1;
+                    self.project_list_state
+                        .select(Some(self.selected_project_index));
+                }
+            }
+            Message::ProjectListConfirm => {
+                if let Some(project) = self.project_list.get(self.selected_project_index) {
+                    self.switch_project(project.path.clone())?;
+                    self.current_view = View::Board;
+                }
+            }
+            Message::OpenNewProjectDialog => {
+                self.active_dialog = ActiveDialog::NewProject(NewProjectDialogState {
+                    name_input: String::new(),
+                    focused_field: NewProjectField::Name,
+                    error_message: None,
+                });
+            }
+            Message::CreateProject => {
+                if let ActiveDialog::NewProject(state) = &self.active_dialog {
+                    let name = state.name_input.trim();
+                    if name.is_empty() {
+                        // Do nothing if empty
+                    } else {
+                        match projects::create_project(name) {
+                            Ok(path) => {
+                                self.active_dialog = ActiveDialog::None;
+                                self.refresh_projects()?;
+                                if let Some(idx) =
+                                    self.project_list.iter().position(|p| p.path == path)
+                                {
+                                    self.selected_project_index = idx;
+                                    self.project_list_state.select(Some(idx));
+                                }
+                                self.switch_project(path)?;
+                                self.current_view = View::Board;
+                            }
+                            Err(e) => {
+                                self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                                    title: "Failed to create project".to_string(),
+                                    detail: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         self.maybe_show_tmux_mouse_hint();
@@ -645,6 +805,23 @@ impl App {
                 self.update(Message::OpenCommandPalette)?;
             }
             KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+
+        if self.current_view == View::ProjectList {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.update(Message::ProjectListSelectUp)?,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.update(Message::ProjectListSelectDown)?
+                }
+                KeyCode::Enter => self.update(Message::ProjectListConfirm)?,
+                KeyCode::Char('n') => self.update(Message::OpenNewProjectDialog)?,
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        match key.code {
             KeyCode::Char('h') | KeyCode::Left => {
                 self.update(Message::NavigateLeft)?;
             }
@@ -850,6 +1027,59 @@ impl App {
                         NewTaskField::Title => state.title_input.push(ch),
                         _ => {}
                     },
+                    _ => {}
+                }
+            }
+            ActiveDialog::NewProject(state) => {
+                let fields = [
+                    NewProjectField::Name,
+                    NewProjectField::Create,
+                    NewProjectField::Cancel,
+                ];
+
+                let mut focus_index = fields
+                    .iter()
+                    .position(|field| *field == state.focused_field)
+                    .unwrap_or(0);
+
+                let move_focus = |current: usize, delta: isize| -> usize {
+                    let len = fields.len() as isize;
+                    let next = (current as isize + delta).rem_euclid(len);
+                    next as usize
+                };
+
+                match key.code {
+                    KeyCode::Esc => self.active_dialog = ActiveDialog::None,
+                    KeyCode::Tab | KeyCode::Down => {
+                        focus_index = move_focus(focus_index, 1);
+                        state.focused_field = fields[focus_index].clone();
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        focus_index = move_focus(focus_index, -1);
+                        state.focused_field = fields[focus_index].clone();
+                    }
+                    KeyCode::Left if state.focused_field == NewProjectField::Create => {
+                        state.focused_field = NewProjectField::Cancel;
+                    }
+                    KeyCode::Right if state.focused_field == NewProjectField::Cancel => {
+                        state.focused_field = NewProjectField::Create;
+                    }
+                    KeyCode::Backspace => {
+                        if state.focused_field == NewProjectField::Name {
+                            state.name_input.pop();
+                        }
+                    }
+                    KeyCode::Enter => {
+                        follow_up = Some(match state.focused_field {
+                            NewProjectField::Cancel => Message::DismissDialog,
+                            _ => Message::CreateProject,
+                        });
+                    }
+                    KeyCode::Char(ch) => {
+                        if state.focused_field == NewProjectField::Name {
+                            state.name_input.push(ch);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1348,7 +1578,14 @@ impl App {
             return Ok(());
         };
 
-        let result = attach_task_with_runtime(&self.db, &task, &repo, &RealRecoveryRuntime)?;
+        let project_slug = self.current_project_slug_for_tmux();
+        let result = attach_task_with_runtime(
+            &self.db,
+            project_slug.as_deref(),
+            &task,
+            &repo,
+            &RealRecoveryRuntime,
+        )?;
         match result {
             AttachTaskResult::Attached => {
                 self.active_dialog = ActiveDialog::None;
@@ -1438,11 +1675,13 @@ impl App {
             .map(|category| category.id)
             .context("no category available for new task")?;
 
+        let project_slug = self.current_project_slug_for_tmux();
         let result = create_task_pipeline_with_runtime(
             &self.db,
             &mut self.repos,
             todo_category,
             &dialog_state,
+            project_slug.as_deref(),
             &RealCreateTaskRuntime,
         );
 
@@ -1608,6 +1847,7 @@ fn reconcile_startup_tasks(
 
 fn attach_task_with_runtime(
     db: &Database,
+    project_slug: Option<&str>,
     task: &Task,
     repo: &Repo,
     runtime: &impl RecoveryRuntime,
@@ -1646,6 +1886,7 @@ fn attach_task_with_runtime(
 
     let session_name = next_available_session_name(
         task.tmux_session_name.as_deref(),
+        project_slug,
         &repo.name,
         &task.branch,
         runtime,
@@ -1670,6 +1911,7 @@ fn create_task_pipeline_with_runtime(
     repos: &mut Vec<Repo>,
     todo_category_id: Uuid,
     state: &NewTaskDialogState,
+    project_slug: Option<&str>,
     runtime: &impl CreateTaskRuntime,
 ) -> Result<CreateTaskOutcome> {
     let mut warning = None;
@@ -1719,9 +1961,10 @@ fn create_task_pipeline_with_runtime(
     let mut created_task_id: Option<Uuid> = None;
 
     let mut operation = || -> Result<()> {
-        let session_name = next_available_session_name_by(None, &repo.name, branch, |name| {
-            runtime.tmux_session_exists(name)
-        });
+        let session_name =
+            next_available_session_name_by(None, project_slug, &repo.name, branch, |name| {
+                runtime.tmux_session_exists(name)
+            });
 
         runtime
             .tmux_create_session(&session_name, &worktree_path, None)
@@ -1855,17 +2098,23 @@ fn persist_binding_state(
 
 fn next_available_session_name(
     existing_name: Option<&str>,
+    project_slug: Option<&str>,
     repo_name: &str,
     branch_name: &str,
     runtime: &impl RecoveryRuntime,
 ) -> String {
-    next_available_session_name_by(existing_name, repo_name, branch_name, |name| {
-        runtime.session_exists(name)
-    })
+    next_available_session_name_by(
+        existing_name,
+        project_slug,
+        repo_name,
+        branch_name,
+        |name| runtime.session_exists(name),
+    )
 }
 
 fn next_available_session_name_by<F>(
     existing_name: Option<&str>,
+    project_slug: Option<&str>,
     repo_name: &str,
     branch_name: &str,
     session_exists: F,
@@ -1879,7 +2128,7 @@ where
         return existing_name.to_string();
     }
 
-    let base = sanitize_session_name(repo_name, branch_name);
+    let base = sanitize_session_name_for_project(project_slug, repo_name, branch_name);
     if !session_exists(&base) {
         return base;
     }
@@ -2066,11 +2315,12 @@ async fn interruptible_sleep(duration: Duration, stop: &AtomicBool) {
 }
 
 fn default_db_path() -> Result<PathBuf> {
-    let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    let app_dir = base.join("opencode-kanban");
-    std::fs::create_dir_all(&app_dir)
-        .with_context(|| format!("failed to create data dir {}", app_dir.display()))?;
-    Ok(app_dir.join("opencode-kanban.sqlite"))
+    let path = projects::get_project_path(projects::DEFAULT_PROJECT);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create data dir {}", parent.display()))?;
+    }
+    Ok(path)
 }
 
 fn point_in_rect(x: u16, y: u16, rect: Rect) -> bool {
@@ -2121,6 +2371,11 @@ mod tests {
             mouse_hint_shown: false,
             poller_stop: Arc::new(AtomicBool::new(true)),
             poller_thread: None,
+            current_view: View::Board,
+            current_project_path: None,
+            project_list: Vec::new(),
+            selected_project_index: 0,
+            project_list_state: ListState::default(),
             _server_manager: OpenCodeServerManager::default(),
         })
     }
@@ -2499,7 +2754,8 @@ mod tests {
 
         let runtime = FakeRecoveryRuntime::default();
         let updated_task = fixture.db.get_task(task.id)?;
-        let result = attach_task_with_runtime(&fixture.db, &updated_task, &fixture.repo, &runtime)?;
+        let result =
+            attach_task_with_runtime(&fixture.db, None, &updated_task, &fixture.repo, &runtime)?;
 
         assert_eq!(result, AttachTaskResult::Attached);
         let created = runtime.created_sessions.borrow();
@@ -2530,7 +2786,8 @@ mod tests {
 
         let runtime = FakeRecoveryRuntime::default();
         let updated_task = fixture.db.get_task(task.id)?;
-        let result = attach_task_with_runtime(&fixture.db, &updated_task, &fixture.repo, &runtime)?;
+        let result =
+            attach_task_with_runtime(&fixture.db, None, &updated_task, &fixture.repo, &runtime)?;
 
         assert_eq!(result, AttachTaskResult::WorktreeNotFound);
         assert!(runtime.created_sessions.borrow().is_empty());
@@ -2559,7 +2816,8 @@ mod tests {
             .insert(session_id.clone(), OpenCodeBindingState::Stale);
 
         let updated_task = fixture.db.get_task(task.id)?;
-        let result = attach_task_with_runtime(&fixture.db, &updated_task, &fixture.repo, &runtime)?;
+        let result =
+            attach_task_with_runtime(&fixture.db, None, &updated_task, &fixture.repo, &runtime)?;
 
         assert_eq!(result, AttachTaskResult::Attached);
         let created = runtime.created_sessions.borrow();
@@ -2610,7 +2868,8 @@ mod tests {
         );
 
         let updated_task = fixture.db.get_task(task.id)?;
-        let result = attach_task_with_runtime(&fixture.db, &updated_task, &fixture.repo, &runtime)?;
+        let result =
+            attach_task_with_runtime(&fixture.db, None, &updated_task, &fixture.repo, &runtime)?;
 
         assert_eq!(result, AttachTaskResult::Attached);
         assert_eq!(
@@ -2643,6 +2902,7 @@ mod tests {
             &mut repos,
             fixture.todo_category,
             &state,
+            None,
             &runtime,
         )?;
 
@@ -2659,6 +2919,38 @@ mod tests {
         assert_eq!(runtime.created_worktrees.borrow().len(), 1);
         assert_eq!(runtime.created_sessions.borrow().len(), 1);
         assert!(runtime.switched_sessions.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_flow_session_namespaced_by_project_slug() -> Result<()> {
+        let fixture = RecoveryFixture::new()?;
+        let mut repos = fixture.db.list_repos()?;
+        let runtime = FakeCreateTaskRuntime::default();
+
+        let state = NewTaskDialogState {
+            repo_idx: 0,
+            repo_input: String::new(),
+            branch_input: "feature/create-flow-project".to_string(),
+            base_input: "origin/main".to_string(),
+            title_input: "Create flow task".to_string(),
+            ensure_base_up_to_date: false,
+            loading_message: None,
+            focused_field: NewTaskField::Create,
+        };
+
+        let _outcome = create_task_pipeline_with_runtime(
+            &fixture.db,
+            &mut repos,
+            fixture.todo_category,
+            &state,
+            Some("my-project"),
+            &runtime,
+        )?;
+
+        let created = runtime.created_sessions.borrow();
+        assert_eq!(created.len(), 1);
+        assert!(created[0].starts_with("ok-my-project-"));
         Ok(())
     }
 
@@ -2685,6 +2977,7 @@ mod tests {
             &mut repos,
             fixture.todo_category,
             &state,
+            None,
             &runtime,
         )
         .expect_err("create flow should fail when tmux creation fails");
