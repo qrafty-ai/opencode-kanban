@@ -22,12 +22,12 @@ use crate::git::{
 };
 use crate::opencode::{
     OpenCodeServerManager, ServerStatusProvider, Status, ensure_server_ready,
-    opencode_attach_command, opencode_is_running_in_session,
+    opencode_attach_command,
 };
 use crate::projects::{self, ProjectInfo};
 use crate::tmux::{
     sanitize_session_name_for_project, tmux_capture_pane, tmux_create_session, tmux_kill_session,
-    tmux_send_keys, tmux_session_exists, tmux_switch_client,
+    tmux_session_exists, tmux_switch_client,
 };
 use crate::types::{Category, Repo, SessionStatus, SessionStatusSource, Task};
 
@@ -266,15 +266,14 @@ trait RecoveryRuntime {
     fn worktree_exists(&self, worktree_path: &Path) -> bool;
     fn session_exists(&self, session_name: &str) -> bool;
     fn create_session(&self, session_name: &str, working_dir: &Path, command: &str) -> Result<()>;
-    fn send_command(&self, session_name: &str, command: &str) -> Result<()>;
     fn switch_client(&self, session_name: &str) -> Result<()>;
 }
 
 struct RealRecoveryRuntime;
 
 impl RecoveryRuntime for RealRecoveryRuntime {
-    fn repo_exists(&self, repo_path: &Path) -> bool {
-        repo_path.exists()
+    fn repo_exists(&self, path: &Path) -> bool {
+        path.exists()
     }
 
     fn worktree_exists(&self, worktree_path: &Path) -> bool {
@@ -287,10 +286,6 @@ impl RecoveryRuntime for RealRecoveryRuntime {
 
     fn create_session(&self, session_name: &str, working_dir: &Path, command: &str) -> Result<()> {
         tmux_create_session(session_name, working_dir, Some(command))
-    }
-
-    fn send_command(&self, session_name: &str, command: &str) -> Result<()> {
-        tmux_send_keys(session_name, command)
     }
 
     fn switch_client(&self, session_name: &str) -> Result<()> {
@@ -2019,10 +2014,6 @@ fn attach_task_with_runtime(
     if let Some(session_name) = task.tmux_session_name.as_deref()
         && runtime.session_exists(session_name)
     {
-        if !opencode_is_running_in_session(session_name) {
-            let command = opencode_command(None, task.worktree_path.as_deref());
-            runtime.send_command(session_name, &command)?;
-        }
         runtime.switch_client(session_name)?;
         return Ok(AttachTaskResult::Attached);
     }
@@ -2117,8 +2108,10 @@ fn create_task_pipeline_with_runtime(
                 runtime.tmux_session_exists(name)
             });
 
+        let command = opencode_command(None, Some(worktree_path.to_string_lossy().as_ref()));
+
         runtime
-            .tmux_create_session(&session_name, &worktree_path, None)
+            .tmux_create_session(&session_name, &worktree_path, Some(&command))
             .context("tmux session creation failed")?;
         created_session_name = Some(session_name.clone());
 
@@ -2593,16 +2586,7 @@ mod tests {
             attach_task_with_runtime(&fixture.db, None, &updated_task, &fixture.repo, &runtime)?;
 
         assert_eq!(result, AttachTaskResult::Attached);
-        assert_eq!(
-            *runtime.sent_commands.borrow(),
-            vec![(
-                session_name,
-                format!(
-                    "opencode attach http://127.0.0.1:4096 --dir {}",
-                    fixture.worktree().display()
-                )
-            )]
-        );
+        assert_eq!(*runtime.switched_sessions.borrow(), vec![session_name]);
         assert!(runtime.created_sessions.borrow().is_empty());
         Ok(())
     }
@@ -2857,22 +2841,6 @@ mod tests {
                 working_dir.to_path_buf(),
                 command.to_string(),
             ));
-            self.sessions.borrow_mut().insert(
-                session_name.to_string(),
-                SessionStatus {
-                    state: Status::Idle,
-                    source: SessionStatusSource::None,
-                    fetched_at: SystemTime::now(),
-                    error: None,
-                },
-            );
-            Ok(())
-        }
-
-        fn send_command(&self, session_name: &str, command: &str) -> Result<()> {
-            self.sent_commands
-                .borrow_mut()
-                .push((session_name.to_string(), command.to_string()));
             self.sessions.borrow_mut().insert(
                 session_name.to_string(),
                 SessionStatus {

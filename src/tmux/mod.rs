@@ -43,26 +43,19 @@ pub fn tmux_create_session(
     working_dir: &Path,
     command: Option<&str>,
 ) -> Result<()> {
+    let mut args = new_session_args(session_name, working_dir);
+    if let Some(command) = command {
+        args.push(command.to_string());
+    }
+
     let output = tmux_command()
-        .args(new_session_args(session_name, working_dir))
+        .args(args)
         .output()
         .context("failed to run tmux new-session")?;
 
     ensure_success(&output, "new-session")?;
 
-    if let Some(command) = command {
-        tmux_send_keys(session_name, command)?;
-    }
-
     Ok(())
-}
-
-pub fn tmux_send_keys(session_name: &str, command: &str) -> Result<()> {
-    let output = tmux_command()
-        .args(send_keys_args(session_name, command))
-        .output()
-        .context("failed to run tmux send-keys")?;
-    ensure_success(&output, "send-keys")
 }
 
 pub fn tmux_kill_session(session_name: &str) -> Result<()> {
@@ -265,16 +258,6 @@ fn new_session_args(session_name: &str, working_dir: &Path) -> Vec<String> {
         session_name.to_string(),
         "-c".to_string(),
         working_dir.to_string_lossy().to_string(),
-    ]
-}
-
-fn send_keys_args(session_name: &str, command: &str) -> Vec<String> {
-    vec![
-        "send-keys".to_string(),
-        "-t".to_string(),
-        session_name.to_string(),
-        command.to_string(),
-        "Enter".to_string(),
     ]
 }
 
@@ -481,14 +464,6 @@ mod tests {
         assert_eq!(
             args,
             vec!["new-session", "-d", "-s", "ok-test", "-c", "/tmp/worktree"]
-        );
-    }
-
-    #[test]
-    fn test_send_keys_args_builder() {
-        assert_eq!(
-            send_keys_args("ok-test", "opencode"),
-            vec!["send-keys", "-t", "ok-test", "opencode", "Enter"]
         );
     }
 

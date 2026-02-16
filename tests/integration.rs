@@ -19,8 +19,7 @@ use opencode_kanban::git::{
 };
 use opencode_kanban::opencode::{OpenCodeBindingState, Status, classify_binding_state};
 use opencode_kanban::tmux::{
-    sanitize_session_name, tmux_create_session, tmux_kill_session, tmux_send_keys,
-    tmux_session_exists,
+    sanitize_session_name, tmux_create_session, tmux_kill_session, tmux_session_exists,
 };
 use opencode_kanban::types::{
     SessionState, SessionStatus, SessionStatusError, SessionStatusSource, Task,
@@ -432,7 +431,6 @@ fn wait_for_task(
 fn binding_state_from_task(task: &Task) -> OpenCodeBindingState {
     let source = match task.status_source.as_str() {
         "server" => SessionStatusSource::Server,
-        "tmux" => SessionStatusSource::Tmux,
         _ => SessionStatusSource::None,
     };
 
