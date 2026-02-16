@@ -1,8 +1,10 @@
 pub mod app;
+pub mod command_palette;
 pub mod db;
 pub mod git;
 pub mod input;
 pub mod opencode;
+pub mod theme;
 pub mod tmux;
 pub mod types;
 pub mod ui;

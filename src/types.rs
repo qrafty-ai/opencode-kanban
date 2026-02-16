@@ -19,6 +19,7 @@ pub struct Category {
     pub id: Uuid,
     pub name: String,
     pub position: i64,
+    pub color: Option<String>,
     pub created_at: String,
 }
 
@@ -91,4 +92,11 @@ pub struct SessionStatus {
     pub source: SessionStatusSource,
     pub fetched_at: std::time::SystemTime,
     pub error: Option<SessionStatusError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct CommandFrequency {
+    pub command_id: String,
+    pub use_count: i64,
+    pub last_used: String,
 }

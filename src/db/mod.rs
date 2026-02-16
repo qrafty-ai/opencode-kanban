@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 
-use std::{fs, path::Path, process::Command};
+use std::{collections::HashMap, fs, path::Path, process::Command};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use rusqlite::{Connection, params, types::Type};
 use uuid::Uuid;
 
-use crate::types::{Category, Repo, Task};
+use crate::types::{Category, CommandFrequency, Repo, Task};
 
 const DEFAULT_TMUX_STATUS: &str = "unknown";
 const DEFAULT_STATUS_SOURCE: &str = "none";
@@ -273,13 +273,18 @@ impl Database {
         Ok(())
     }
 
-    pub fn add_category(&self, name: impl AsRef<str>, position: i64) -> Result<Category> {
+    pub fn add_category(
+        &self,
+        name: impl AsRef<str>,
+        position: i64,
+        color: Option<String>,
+    ) -> Result<Category> {
         let now = now_iso();
         let id = Uuid::new_v4();
         self.conn
             .execute(
-                "INSERT INTO categories (id, name, position, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![id.to_string(), name.as_ref(), position, now],
+                "INSERT INTO categories (id, name, position, color, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id.to_string(), name.as_ref(), position, color, now],
             )
             .context("failed to insert category")?;
 
@@ -288,7 +293,7 @@ impl Database {
 
     pub fn list_categories(&self) -> Result<Vec<Category>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, position, created_at FROM categories ORDER BY position ASC",
+            "SELECT id, name, position, color, created_at FROM categories ORDER BY position ASC",
         )?;
 
         let categories = stmt
@@ -319,6 +324,16 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_category_color(&self, id: Uuid, color: Option<String>) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE categories SET color = ?1 WHERE id = ?2",
+                params![color, id.to_string()],
+            )
+            .context("failed to update category color")?;
+        Ok(())
+    }
+
     pub fn delete_category(&self, id: Uuid) -> Result<()> {
         self.conn
             .execute(
@@ -327,6 +342,44 @@ impl Database {
             )
             .context("failed to delete category")?;
         Ok(())
+    }
+
+    pub fn increment_command_usage(&self, command_id: &str) -> Result<()> {
+        let now = now_iso();
+        self.conn
+            .execute(
+                "INSERT INTO command_frequency (command_id, use_count, last_used)
+                 VALUES (?1, 1, ?2)
+                 ON CONFLICT(command_id) DO UPDATE SET
+                     use_count = use_count + 1,
+                     last_used = ?2",
+                params![command_id, now],
+            )
+            .context("failed to increment command usage")?;
+        Ok(())
+    }
+
+    pub fn get_command_frequencies(&self) -> Result<HashMap<String, CommandFrequency>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT command_id, use_count, last_used FROM command_frequency ORDER BY use_count DESC",
+        )?;
+
+        let rows = stmt
+            .query_map(params![], |row| {
+                Ok(CommandFrequency {
+                    command_id: row.get(0)?,
+                    use_count: row.get(1)?,
+                    last_used: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load command frequencies")?;
+
+        let mut map = HashMap::new();
+        for freq in rows {
+            map.insert(freq.command_id.clone(), freq);
+        }
+        Ok(map)
     }
 
     fn run_migrations(&self) -> Result<()> {
@@ -346,6 +399,7 @@ impl Database {
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL UNIQUE,
                     position INTEGER NOT NULL,
+                    color TEXT,
                     created_at TEXT NOT NULL
                 );
 
@@ -366,6 +420,12 @@ impl Database {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(repo_id, branch)
+                );
+
+                CREATE TABLE IF NOT EXISTS command_frequency (
+                    command_id TEXT PRIMARY KEY,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    last_used TEXT NOT NULL
                 );",
             )
             .context("failed to run sqlite migrations")?;
@@ -416,6 +476,35 @@ impl Database {
             )
             .context("failed to backfill tasks.status_source")?;
 
+        self.migrate_categories_color_column()?;
+        Ok(())
+    }
+
+    fn migrate_categories_color_column(&self) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("PRAGMA table_info(categories)")
+            .context("failed to prepare categories table_info pragma")?;
+
+        let mut rows = stmt
+            .query(params![])
+            .context("failed to query categories table_info pragma")?;
+
+        let mut has_color_column = false;
+        while let Some(row) = rows.next()? {
+            let column_name: String = row.get(1)?;
+            if column_name == "color" {
+                has_color_column = true;
+                break;
+            }
+        }
+
+        if !has_color_column {
+            self.conn
+                .execute("ALTER TABLE categories ADD COLUMN color TEXT", params![])
+                .context("failed to add categories.color column")?;
+        }
+
         Ok(())
     }
 
@@ -427,9 +516,9 @@ impl Database {
         let category_count: i64 = stmt.query_row(params![], |row| row.get(0))?;
 
         if category_count == 0 {
-            self.add_category("TODO", 0)?;
-            self.add_category("IN PROGRESS", 1)?;
-            self.add_category("DONE", 2)?;
+            self.add_category("TODO", 0, None)?;
+            self.add_category("IN PROGRESS", 1, None)?;
+            self.add_category("DONE", 2, None)?;
         }
 
         Ok(())
@@ -449,7 +538,7 @@ impl Database {
     fn get_category(&self, id: Uuid) -> Result<Category> {
         self.conn
             .query_row(
-                "SELECT id, name, position, created_at FROM categories WHERE id = ?1",
+                "SELECT id, name, position, color, created_at FROM categories WHERE id = ?1",
                 params![id.to_string()],
                 map_category_row,
             )
@@ -474,7 +563,8 @@ fn map_category_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Category> {
         id: parse_uuid_column(row.get::<_, String>(0)?, 0)?,
         name: row.get(1)?,
         position: row.get(2)?,
-        created_at: row.get(3)?,
+        color: row.get(3)?,
+        created_at: row.get(4)?,
     })
 }
 
@@ -591,6 +681,64 @@ mod tests {
     }
 
     #[test]
+    fn test_migration_adds_categories_color_column_without_data_loss() -> Result<()> {
+        let path = temp_path("migration-category-color").join("opencode-kanban.sqlite");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let legacy_id = Uuid::new_v4();
+
+        {
+            let conn = rusqlite::Connection::open(&path)?;
+            conn.execute(
+                "CREATE TABLE categories (\
+                    id TEXT PRIMARY KEY,\
+                    name TEXT NOT NULL UNIQUE,\
+                    position INTEGER NOT NULL,\
+                    created_at TEXT NOT NULL\
+                 )",
+                params![],
+            )?;
+
+            conn.execute(
+                "INSERT INTO categories (id, name, position, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    legacy_id.to_string(),
+                    "LEGACY",
+                    0_i64,
+                    "2026-01-01T00:00:00Z"
+                ],
+            )?;
+        }
+
+        {
+            let db = Database::open(&path)?;
+
+            let mut stmt = db.conn.prepare("PRAGMA table_info(categories)")?;
+            let column_names = stmt
+                .query_map(params![], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            assert!(column_names.iter().any(|name| name == "color"));
+
+            let legacy_color: Option<String> = db.conn.query_row(
+                "SELECT color FROM categories WHERE id = ?1",
+                params![legacy_id.to_string()],
+                |row| row.get(0),
+            )?;
+            assert_eq!(legacy_color, None);
+        }
+
+        let _db = Database::open(&path)?;
+
+        if let Some(parent) = path.parent() {
+            std::fs::remove_dir_all(parent)?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_repo_crud() -> Result<()> {
         let db = Database::open(":memory:")?;
         let repo_dir = create_temp_git_repo("repo-crud")?;
@@ -679,7 +827,7 @@ mod tests {
     fn test_category_crud() -> Result<()> {
         let db = Database::open(":memory:")?;
 
-        let category = db.add_category("REVIEW", 3)?;
+        let category = db.add_category("REVIEW", 3, None)?;
         db.rename_category(category.id, "QA")?;
         db.update_category_position(category.id, 4)?;
 
@@ -767,7 +915,7 @@ mod tests {
         let duplicate_repo = db.add_repo(&repo_dir);
         assert!(duplicate_repo.is_err());
 
-        let duplicate_category = db.add_category("TODO", 99);
+        let duplicate_category = db.add_category("TODO", 99, None);
         assert!(duplicate_category.is_err());
 
         let todo_category = db.list_categories()?[0].id;
@@ -879,6 +1027,63 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::remove_dir_all(parent)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_increment_new_command() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        db.increment_command_usage("create-worktree")?;
+
+        let freqs = db.get_command_frequencies()?;
+        assert_eq!(freqs.len(), 1);
+        let freq = freqs.get("create-worktree").unwrap();
+        assert_eq!(freq.use_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_increment_existing_command() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        db.increment_command_usage("create-worktree")?;
+        db.increment_command_usage("create-worktree")?;
+        db.increment_command_usage("create-worktree")?;
+
+        let freqs = db.get_command_frequencies()?;
+        let freq = freqs.get("create-worktree").unwrap();
+        assert_eq!(freq.use_count, 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_frequencies_empty() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        let freqs = db.get_command_frequencies()?;
+        assert!(freqs.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_frequencies_with_data() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        db.increment_command_usage("cmd-a")?;
+        db.increment_command_usage("cmd-a")?;
+        db.increment_command_usage("cmd-b")?;
+
+        let freqs = db.get_command_frequencies()?;
+        assert_eq!(freqs.len(), 2);
+
+        let cmd_a = freqs.get("cmd-a").unwrap();
+        let cmd_b = freqs.get("cmd-b").unwrap();
+        assert_eq!(cmd_a.use_count, 2);
+        assert_eq!(cmd_b.use_count, 1);
 
         Ok(())
     }

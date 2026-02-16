@@ -5,21 +5,22 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub enum OpenCodeServerState {
+    #[default]
     Starting,
     ReadyAttached,
     ReadySpawned,
     Failed(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OpenCodeServerManager {
     state: Arc<Mutex<OpenCodeServerState>>,
 }
 
 impl OpenCodeServerManager {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(OpenCodeServerState::Starting)),
         }

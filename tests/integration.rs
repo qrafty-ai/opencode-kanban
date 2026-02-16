@@ -282,7 +282,13 @@ impl GitFixture {
         std::fs::create_dir_all(&seed)?;
         run_git(
             temp.path(),
-            ["init", "--bare", origin.to_string_lossy().as_ref()],
+            [
+                "init",
+                "--bare",
+                "-b",
+                "main",
+                origin.to_string_lossy().as_ref(),
+            ],
         )?;
 
         run_git(
