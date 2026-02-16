@@ -137,6 +137,12 @@ pub struct RepoUnavailableDialogState {
     pub repo_path: String,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ViewMode {
+    Kanban,
+    SidePanel,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ActiveDialog {
@@ -156,6 +162,7 @@ pub enum ActiveDialog {
 pub enum Message {
     Key(KeyEvent),
     Mouse(MouseEvent),
+    Tick,
     Resize(u16, u16),
     NavigateLeft,
     NavigateRight,
@@ -166,6 +173,7 @@ pub enum Message {
     DismissDialog,
     FocusColumn(usize),
     SelectTask(usize, usize),
+    SelectTaskInSidePanel(usize),
     OpenAddCategoryDialog,
     OpenRenameCategoryDialog,
     OpenDeleteCategoryDialog,
@@ -375,6 +383,10 @@ pub struct App {
     mouse_hint_shown: bool,
     poller_stop: Arc<AtomicBool>,
     poller_thread: Option<thread::JoinHandle<()>>,
+    pub view_mode: ViewMode,
+    pub side_panel_width: u16,
+    pub selected_task_index: usize,
+    pub current_log_buffer: Option<String>,
 }
 
 impl App {
@@ -404,6 +416,10 @@ impl App {
             mouse_hint_shown: false,
             poller_stop,
             poller_thread: None,
+            view_mode: ViewMode::SidePanel,
+            side_panel_width: 40,
+            selected_task_index: 0,
+            current_log_buffer: None,
         };
 
         app.refresh_data()?;
@@ -456,6 +472,33 @@ impl App {
         match message {
             Message::Key(key) => self.handle_key(key)?,
             Message::Mouse(mouse) => self.handle_mouse(mouse)?,
+            Message::Tick => {
+                if self.view_mode == ViewMode::SidePanel {
+                    let Some(task) = self.selected_task() else {
+                        self.current_log_buffer = None;
+                        self.maybe_show_tmux_mouse_hint();
+                        return Ok(());
+                    };
+
+                    if task.tmux_status == Status::Running.as_str()
+                        && let Some(session_name) = task.tmux_session_name.as_deref()
+                    {
+                        match tmux_capture_pane(session_name, 50) {
+                            Ok(buffer) => self.current_log_buffer = Some(buffer),
+                            Err(err) => {
+                                warn!(
+                                    session = %session_name,
+                                    error = %err,
+                                    "failed to capture tmux pane"
+                                );
+                                self.current_log_buffer = None;
+                            }
+                        }
+                    } else {
+                        self.current_log_buffer = None;
+                    }
+                }
+            }
             Message::Resize(w, h) => {
                 self.viewport = (w, h);
                 self.layout_epoch = self.layout_epoch.saturating_add(1);
@@ -515,6 +558,9 @@ impl App {
                     self.focused_column = column;
                     self.selected_task_per_column.insert(column, index);
                 }
+            }
+            Message::SelectTaskInSidePanel(index) => {
+                self.selected_task_index = index;
             }
             Message::OpenAddCategoryDialog => {
                 self.active_dialog = ActiveDialog::CategoryInput(CategoryInputDialogState {
@@ -597,6 +643,39 @@ impl App {
         match key.code {
             KeyCode::Char('?') => self.active_dialog = ActiveDialog::Help,
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('v') => {
+                self.current_log_buffer = None;
+
+                match self.view_mode {
+                    ViewMode::Kanban => {
+                        self.view_mode = ViewMode::SidePanel;
+
+                        let entries = self.linear_task_entries();
+                        if entries.is_empty() {
+                            self.selected_task_index = 0;
+                        } else {
+                            let current_id = self
+                                .selected_task_in_column(self.focused_column)
+                                .map(|task| task.id);
+                            let index = current_id
+                                .and_then(|id| {
+                                    entries.iter().position(|(_, _, task)| task.id == id)
+                                })
+                                .unwrap_or(0);
+                            self.apply_linear_task_selection(&entries, index);
+                        }
+                    }
+                    ViewMode::SidePanel => {
+                        self.view_mode = ViewMode::Kanban;
+                    }
+                }
+            }
+            KeyCode::Char('<') => {
+                self.side_panel_width = self.side_panel_width.saturating_sub(5).max(20);
+            }
+            KeyCode::Char('>') => {
+                self.side_panel_width = self.side_panel_width.saturating_add(5).min(80);
+            }
             KeyCode::Char('h') | KeyCode::Left => {
                 self.update(Message::NavigateLeft)?;
             }
@@ -604,10 +683,38 @@ impl App {
                 self.update(Message::NavigateRight)?;
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                self.update(Message::SelectDown)?;
+                if self.view_mode == ViewMode::SidePanel {
+                    let entries = self.linear_task_entries();
+                    if entries.is_empty() {
+                        self.selected_task_index = 0;
+                        self.current_log_buffer = None;
+                    } else {
+                        let current = self.selected_task_index.min(entries.len() - 1);
+                        let next = (current + 1) % entries.len();
+                        self.apply_linear_task_selection(&entries, next);
+                    }
+                } else {
+                    self.update(Message::SelectDown)?;
+                }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.update(Message::SelectUp)?;
+                if self.view_mode == ViewMode::SidePanel {
+                    let entries = self.linear_task_entries();
+                    if entries.is_empty() {
+                        self.selected_task_index = 0;
+                        self.current_log_buffer = None;
+                    } else {
+                        let current = self.selected_task_index.min(entries.len() - 1);
+                        let prev = if current == 0 {
+                            entries.len() - 1
+                        } else {
+                            current - 1
+                        };
+                        self.apply_linear_task_selection(&entries, prev);
+                    }
+                } else {
+                    self.update(Message::SelectUp)?;
+                }
             }
             KeyCode::Char('n') => {
                 self.update(Message::OpenNewTaskDialog)?;
@@ -996,7 +1103,14 @@ impl App {
     }
 
     fn selected_task(&self) -> Option<Task> {
-        let category = self.categories.get(self.focused_column)?;
+        match self.view_mode {
+            ViewMode::Kanban => self.selected_task_in_column(self.focused_column),
+            ViewMode::SidePanel => self.selected_task_in_linear_list(),
+        }
+    }
+
+    fn selected_task_in_column(&self, column_index: usize) -> Option<Task> {
+        let category = self.categories.get(column_index)?;
         let mut tasks: Vec<Task> = self
             .tasks
             .iter()
@@ -1007,10 +1121,59 @@ impl App {
 
         let selected = self
             .selected_task_per_column
-            .get(&self.focused_column)
+            .get(&column_index)
             .copied()
             .unwrap_or(0);
         tasks.get(selected).cloned()
+    }
+
+    fn selected_task_in_linear_list(&self) -> Option<Task> {
+        let entries = self.linear_task_entries();
+        if entries.is_empty() {
+            return None;
+        }
+        let index = self.selected_task_index.min(entries.len() - 1);
+        entries.into_iter().nth(index).map(|(_, _, task)| task)
+    }
+
+    fn linear_task_entries(&self) -> Vec<(usize, usize, Task)> {
+        let mut category_order: Vec<(usize, &Category)> =
+            self.categories.iter().enumerate().collect();
+        category_order.sort_by_key(|(_, category)| category.position);
+
+        let mut entries: Vec<(usize, usize, Task)> = Vec::new();
+        for (column_index, category) in category_order {
+            let mut tasks: Vec<Task> = self
+                .tasks
+                .iter()
+                .filter(|task| task.category_id == category.id)
+                .cloned()
+                .collect();
+            tasks.sort_by_key(|task| task.position);
+
+            for (index_in_column, task) in tasks.into_iter().enumerate() {
+                entries.push((column_index, index_in_column, task));
+            }
+        }
+
+        entries
+    }
+
+    fn apply_linear_task_selection(&mut self, entries: &[(usize, usize, Task)], index: usize) {
+        if entries.is_empty() {
+            self.selected_task_index = 0;
+            self.current_log_buffer = None;
+            return;
+        }
+
+        let index = index.min(entries.len() - 1);
+        self.selected_task_index = index;
+
+        let (column_index, index_in_column, _) = &entries[index];
+        self.focused_column = (*column_index).min(self.categories.len().saturating_sub(1));
+        self.selected_task_per_column
+            .insert(*column_index, *index_in_column);
+        self.current_log_buffer = None;
     }
 
     fn repo_for_task(&self, task: &Task) -> Option<Repo> {
@@ -2078,7 +2241,6 @@ mod tests {
     struct FakeCreateTaskRuntime {
         fail_fetch: RefCell<bool>,
         fail_tmux_create: RefCell<bool>,
-        fail_switch: RefCell<bool>,
         created_worktrees: RefCell<Vec<PathBuf>>,
         removed_worktrees: RefCell<Vec<PathBuf>>,
         sessions: RefCell<HashMap<String, bool>>,
