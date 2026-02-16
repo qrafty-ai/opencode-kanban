@@ -58,6 +58,7 @@ Rust TUI kanban board for managing git worktrees and OpenCode sessions, orchestr
 ## ANTI-PATTERNS (THIS PROJECT)
 - **Unsafe env**: `env::set_var` requires `unsafe` in multi-threaded (src/opencode/mod.rs)
 - **Hardcoded "TODO"**: category name hardcoded in db init (src/db/mod.rs)
+- **Process killing**: NEVER kill `opencode` processes broadly - this will kill the agent itself. Use specific PIDs or port-based targeting only when necessary.
 - **Expect/unwrap**: used liberally in tmux/git modules - can panic
 
 ## COMMANDS
