@@ -127,6 +127,10 @@ fn render_project_list(frame: &mut Frame<'_>, app: &mut App) {
         .title(" n: New Project, Enter: Select, q: Quit ")
         .title_alignment(Alignment::Center);
     frame.render_widget(footer, chunks[2]);
+
+    if app.active_dialog != ActiveDialog::None {
+        render_dialog(frame, app);
+    }
 }
 
 pub fn render_board(frame: &mut Frame<'_>, app: &mut App) {
