@@ -17,6 +17,8 @@ pub use crate::types::SessionState as Status;
 pub use server::{OpenCodeServerManager, OpenCodeServerState, ensure_server_ready};
 pub use status_server::ServerStatusProvider;
 
+pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:4096";
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum OpenCodeBindingState {
     Bound,
@@ -81,7 +83,7 @@ impl StatusProvider for TmuxStatusProvider {
                 error: None,
             },
             Err(err) => SessionStatus {
-                state: SessionState::Unknown,
+                state: SessionState::Idle,
                 source: SessionStatusSource::Tmux,
                 fetched_at: SystemTime::now(),
                 error: Some(SessionStatusError {
@@ -267,7 +269,7 @@ pub fn opencode_detect_status(pane_output: &str) -> Status {
         return Status::Idle;
     }
 
-    Status::Unknown
+    Status::Idle
 }
 
 pub fn opencode_is_running_in_session(tmux_session_name: &str) -> bool {
@@ -319,6 +321,63 @@ fn ensure_opencode_available(binary: &str) -> Result<()> {
             format!("failed to execute `{binary} --version` while checking OpenCode availability")
         }),
     }
+}
+
+pub fn opencode_attach_command(session_id: Option<&str>) -> String {
+    let url = DEFAULT_SERVER_URL;
+    match session_id {
+        Some(id) => format!("opencode attach {url} --session {id}"),
+        None => format!("opencode attach {url}"),
+    }
+}
+
+pub fn opencode_query_session_by_dir(working_dir: &Path) -> Result<Option<String>> {
+    let db_path = dirs::data_dir()
+        .context("failed to determine home directory for opencode database")?
+        .join("opencode")
+        .join("opencode.db");
+
+    tracing::debug!("Checking for opencode DB at: {}", db_path.display());
+
+    if !db_path.exists() {
+        tracing::debug!("OpenCode DB not found, returning None");
+        return Ok(None);
+    }
+
+    let dir_str = working_dir.to_string_lossy();
+    let query = format!(
+        "SELECT id FROM session WHERE directory = '{}' ORDER BY time_created DESC LIMIT 1",
+        dir_str.replace('\'', "''")
+    );
+
+    tracing::debug!("Querying opencode DB: {}", query);
+
+    let output = Command::new("sqlite3")
+        .args(["-batch", "-readonly", db_path.to_str().unwrap_or_default()])
+        .arg(&query)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to query opencode database for directory {}",
+                dir_str
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!("SQLite query failed: {}", stderr.trim());
+        bail!("sqlite3 query failed: {}", stderr.trim());
+    }
+
+    let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if result.is_empty() {
+        tracing::debug!("No session found for directory: {}", dir_str);
+        return Ok(None);
+    }
+
+    tracing::debug!("Found session ID for directory {}: {}", dir_str, result);
+    Ok(Some(result))
 }
 
 #[cfg(test)]
@@ -424,7 +483,7 @@ mod tests {
     #[test]
     fn test_classify_binding_state_stale_when_server_reports_missing() {
         let status = SessionStatus {
-            state: Status::Unknown,
+            state: Status::Idle,
             source: SessionStatusSource::None,
             fetched_at: SystemTime::UNIX_EPOCH,
             error: Some(SessionStatusError {
@@ -442,7 +501,7 @@ mod tests {
     #[test]
     fn test_classify_binding_state_bound_on_non_definitive_errors() {
         let status = SessionStatus {
-            state: Status::Unknown,
+            state: Status::Idle,
             source: SessionStatusSource::None,
             fetched_at: SystemTime::UNIX_EPOCH,
             error: Some(SessionStatusError {
@@ -460,7 +519,7 @@ mod tests {
     #[test]
     fn test_classify_binding_state_bound_when_server_is_down() {
         let status = SessionStatus {
-            state: Status::Unknown,
+            state: Status::Idle,
             source: SessionStatusSource::None,
             fetched_at: SystemTime::UNIX_EPOCH,
             error: Some(SessionStatusError {
@@ -478,7 +537,7 @@ mod tests {
     #[test]
     fn test_classify_binding_state_bound_on_server_auth_failure() {
         let status = SessionStatus {
-            state: Status::Unknown,
+            state: Status::Idle,
             source: SessionStatusSource::None,
             fetched_at: SystemTime::UNIX_EPOCH,
             error: Some(SessionStatusError {
@@ -496,7 +555,7 @@ mod tests {
     #[test]
     fn test_classify_binding_state_bound_on_parse_contract_mismatch() {
         let status = SessionStatus {
-            state: Status::Unknown,
+            state: Status::Idle,
             source: SessionStatusSource::None,
             fetched_at: SystemTime::UNIX_EPOCH,
             error: Some(SessionStatusError {
@@ -604,7 +663,7 @@ mod tests {
                 .get(session_id)
                 .cloned()
                 .unwrap_or(SessionStatus {
-                    state: Status::Unknown,
+                    state: Status::Idle,
                     source: SessionStatusSource::None,
                     fetched_at: SystemTime::UNIX_EPOCH,
                     error: None,
