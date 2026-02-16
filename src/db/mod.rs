@@ -239,13 +239,18 @@ impl Database {
         Ok(())
     }
 
-    pub fn add_category(&self, name: impl AsRef<str>, position: i64) -> Result<Category> {
+    pub fn add_category(
+        &self,
+        name: impl AsRef<str>,
+        position: i64,
+        color: Option<String>,
+    ) -> Result<Category> {
         let now = now_iso();
         let id = Uuid::new_v4();
         self.conn
             .execute(
-                "INSERT INTO categories (id, name, position, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![id.to_string(), name.as_ref(), position, now],
+                "INSERT INTO categories (id, name, position, color, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id.to_string(), name.as_ref(), position, color, now],
             )
             .context("failed to insert category")?;
 
@@ -254,7 +259,7 @@ impl Database {
 
     pub fn list_categories(&self) -> Result<Vec<Category>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, position, created_at FROM categories ORDER BY position ASC",
+            "SELECT id, name, position, color, created_at FROM categories ORDER BY position ASC",
         )?;
 
         let categories = stmt
@@ -285,6 +290,16 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_category_color(&self, id: Uuid, color: Option<String>) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE categories SET color = ?1 WHERE id = ?2",
+                params![color, id.to_string()],
+            )
+            .context("failed to update category color")?;
+        Ok(())
+    }
+
     pub fn delete_category(&self, id: Uuid) -> Result<()> {
         self.conn
             .execute(
@@ -312,6 +327,7 @@ impl Database {
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL UNIQUE,
                     position INTEGER NOT NULL,
+                    color TEXT,
                     created_at TEXT NOT NULL
                 );
 
@@ -332,6 +348,36 @@ impl Database {
                 );",
             )
             .context("failed to run sqlite migrations")?;
+
+        self.migrate_categories_color_column()?;
+        Ok(())
+    }
+
+    fn migrate_categories_color_column(&self) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("PRAGMA table_info(categories)")
+            .context("failed to prepare categories table_info pragma")?;
+
+        let mut rows = stmt
+            .query(params![])
+            .context("failed to query categories table_info pragma")?;
+
+        let mut has_color_column = false;
+        while let Some(row) = rows.next()? {
+            let column_name: String = row.get(1)?;
+            if column_name == "color" {
+                has_color_column = true;
+                break;
+            }
+        }
+
+        if !has_color_column {
+            self.conn
+                .execute("ALTER TABLE categories ADD COLUMN color TEXT", params![])
+                .context("failed to add categories.color column")?;
+        }
+
         Ok(())
     }
 
@@ -343,9 +389,9 @@ impl Database {
         let category_count: i64 = stmt.query_row(params![], |row| row.get(0))?;
 
         if category_count == 0 {
-            self.add_category("TODO", 0)?;
-            self.add_category("IN PROGRESS", 1)?;
-            self.add_category("DONE", 2)?;
+            self.add_category("TODO", 0, None)?;
+            self.add_category("IN PROGRESS", 1, None)?;
+            self.add_category("DONE", 2, None)?;
         }
 
         Ok(())
@@ -365,7 +411,7 @@ impl Database {
     fn get_category(&self, id: Uuid) -> Result<Category> {
         self.conn
             .query_row(
-                "SELECT id, name, position, created_at FROM categories WHERE id = ?1",
+                "SELECT id, name, position, color, created_at FROM categories WHERE id = ?1",
                 params![id.to_string()],
                 map_category_row,
             )
@@ -390,7 +436,8 @@ fn map_category_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Category> {
         id: parse_uuid_column(row.get::<_, String>(0)?, 0)?,
         name: row.get(1)?,
         position: row.get(2)?,
-        created_at: row.get(3)?,
+        color: row.get(3)?,
+        created_at: row.get(4)?,
     })
 }
 
@@ -462,6 +509,7 @@ mod tests {
     use std::{path::PathBuf, process::Command};
 
     use anyhow::Result;
+    use rusqlite::params;
     use uuid::Uuid;
 
     use super::Database;
@@ -487,6 +535,64 @@ mod tests {
         let path = temp_path("sqlite-file").join("opencode-kanban.sqlite");
         let _db = Database::open(&path)?;
         assert!(path.exists());
+
+        if let Some(parent) = path.parent() {
+            std::fs::remove_dir_all(parent)?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_migration_adds_categories_color_column_without_data_loss() -> Result<()> {
+        let path = temp_path("migration-category-color").join("opencode-kanban.sqlite");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let legacy_id = Uuid::new_v4();
+
+        {
+            let conn = rusqlite::Connection::open(&path)?;
+            conn.execute(
+                "CREATE TABLE categories (\
+                    id TEXT PRIMARY KEY,\
+                    name TEXT NOT NULL UNIQUE,\
+                    position INTEGER NOT NULL,\
+                    created_at TEXT NOT NULL\
+                 )",
+                params![],
+            )?;
+
+            conn.execute(
+                "INSERT INTO categories (id, name, position, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    legacy_id.to_string(),
+                    "LEGACY",
+                    0_i64,
+                    "2026-01-01T00:00:00Z"
+                ],
+            )?;
+        }
+
+        {
+            let db = Database::open(&path)?;
+
+            let mut stmt = db.conn.prepare("PRAGMA table_info(categories)")?;
+            let column_names = stmt
+                .query_map(params![], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            assert!(column_names.iter().any(|name| name == "color"));
+
+            let legacy_color: Option<String> = db.conn.query_row(
+                "SELECT color FROM categories WHERE id = ?1",
+                params![legacy_id.to_string()],
+                |row| row.get(0),
+            )?;
+            assert_eq!(legacy_color, None);
+        }
+
+        let _db = Database::open(&path)?;
 
         if let Some(parent) = path.parent() {
             std::fs::remove_dir_all(parent)?;
@@ -569,7 +675,7 @@ mod tests {
     fn test_category_crud() -> Result<()> {
         let db = Database::open(":memory:")?;
 
-        let category = db.add_category("REVIEW", 3)?;
+        let category = db.add_category("REVIEW", 3, None)?;
         db.rename_category(category.id, "QA")?;
         db.update_category_position(category.id, 4)?;
 
@@ -657,7 +763,7 @@ mod tests {
         let duplicate_repo = db.add_repo(&repo_dir);
         assert!(duplicate_repo.is_err());
 
-        let duplicate_category = db.add_category("TODO", 99);
+        let duplicate_category = db.add_category("TODO", 99, None);
         assert!(duplicate_category.is_err());
 
         let todo_category = db.list_categories()?[0].id;

@@ -182,6 +182,9 @@ pub enum Message {
     WorktreeNotFoundRecreate,
     WorktreeNotFoundMarkBroken,
     RepoUnavailableDismiss,
+    ConfirmQuit,
+    CancelQuit,
+    CycleCategoryColor(usize),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -535,6 +538,32 @@ impl App {
             Message::WorktreeNotFoundMarkBroken => self.mark_worktree_missing_as_broken()?,
             Message::RepoUnavailableDismiss => self.active_dialog = ActiveDialog::None,
             Message::CreateTask => self.confirm_new_task()?,
+            Message::ConfirmQuit => self.should_quit = true,
+            Message::CancelQuit => self.active_dialog = ActiveDialog::None,
+            Message::CycleCategoryColor(col_idx) => {
+                let color_cycle = [
+                    None,
+                    Some("cyan".to_string()),
+                    Some("magenta".to_string()),
+                    Some("blue".to_string()),
+                    Some("green".to_string()),
+                    Some("yellow".to_string()),
+                    Some("red".to_string()),
+                ];
+                if let Some(category) = self.categories.get(col_idx) {
+                    let current_color = &category.color;
+                    let next_idx = color_cycle
+                        .iter()
+                        .position(|c| c.as_ref() == current_color.as_ref())
+                        .map(|i| (i + 1) % color_cycle.len())
+                        .unwrap_or(0);
+                    let next_color = color_cycle[next_idx].clone();
+                    self.db
+                        .update_category_color(category.id, next_color)
+                        .context("failed to update category color")?;
+                    self.refresh_data()?;
+                }
+            }
             Message::DeleteTaskToggleKillTmux
             | Message::DeleteTaskToggleRemoveWorktree
             | Message::DeleteTaskToggleDeleteBranch => {}
@@ -577,6 +606,9 @@ impl App {
             }
             KeyCode::Char('c') => {
                 self.update(Message::OpenAddCategoryDialog)?;
+            }
+            KeyCode::Char('p') => {
+                self.update(Message::CycleCategoryColor(self.focused_column))?;
             }
             KeyCode::Char('r') => {
                 self.update(Message::OpenRenameCategoryDialog)?;
@@ -1127,7 +1159,7 @@ impl App {
                     .max()
                     .unwrap_or(-1)
                     + 1;
-                let created = self.db.add_category(name, next_position)?;
+                let created = self.db.add_category(name, next_position, None)?;
                 self.active_dialog = ActiveDialog::None;
                 self.refresh_data()?;
                 if let Some(index) = self.categories.iter().position(|c| c.id == created.id) {

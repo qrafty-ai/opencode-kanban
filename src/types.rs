@@ -19,6 +19,7 @@ pub struct Category {
     pub id: Uuid,
     pub name: String,
     pub position: i64,
+    pub color: Option<String>,
     pub created_at: String,
 }
 
