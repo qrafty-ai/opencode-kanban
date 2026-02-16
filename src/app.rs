@@ -82,7 +82,7 @@ pub struct ConfirmQuitDialogState {
     pub active_session_count: usize,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum DeleteTaskField {
     KillTmux,
     RemoveWorktree,
@@ -168,6 +168,22 @@ pub struct RepoUnavailableDialogState {
     pub repo_path: String,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ContextMenuItem {
+    Attach,
+    Delete,
+    Move,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextMenuState {
+    pub position: (u16, u16),
+    pub task_id: Uuid,
+    pub task_column: usize,
+    pub items: Vec<ContextMenuItem>,
+    pub selected_index: usize,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActiveDialog {
@@ -230,6 +246,15 @@ pub enum Message {
     ProjectListConfirm,
     OpenNewProjectDialog,
     CreateProject,
+    FocusNewTaskField(NewTaskField),
+    ToggleNewTaskCheckbox,
+    FocusCategoryInputField(CategoryInputField),
+    FocusNewProjectField(NewProjectField),
+    FocusDeleteTaskField(DeleteTaskField),
+    ToggleDeleteTaskCheckbox(DeleteTaskField),
+    FocusDialogButton(String),
+    SelectProject(usize),
+    SelectCommandPaletteItem(usize),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -423,6 +448,8 @@ pub struct App {
     pub active_dialog: ActiveDialog,
     pub footer_notice: Option<String>,
     pub hit_test_map: Vec<(Rect, Message)>,
+    pub hovered_message: Option<Message>,
+    pub context_menu: Option<ContextMenuState>,
     pub current_view: View,
     pub current_project_path: Option<PathBuf>,
     pub project_list: Vec<ProjectInfo>,
@@ -466,6 +493,8 @@ impl App {
             active_dialog: ActiveDialog::None,
             footer_notice: None,
             hit_test_map: Vec::new(),
+            hovered_message: None,
+            context_menu: None,
             current_view: View::ProjectList,
             current_project_path: None,
             project_list: Vec::new(),
@@ -578,6 +607,8 @@ impl App {
                 self.viewport = (w, h);
                 self.layout_epoch = self.layout_epoch.saturating_add(1);
                 self.hit_test_map.clear();
+                self.context_menu = None;
+                self.hovered_message = None;
             }
             Message::NavigateLeft => {
                 if self.focused_column > 0 {
@@ -626,7 +657,11 @@ impl App {
                 self.active_dialog =
                     ActiveDialog::CommandPalette(CommandPaletteState::new(frequencies));
             }
-            Message::DismissDialog => self.active_dialog = ActiveDialog::None,
+            Message::DismissDialog => {
+                self.active_dialog = ActiveDialog::None;
+                self.context_menu = None;
+                self.hovered_message = None;
+            }
             Message::FocusColumn(index) => {
                 if index < self.categories.len() {
                     self.focused_column = index;
@@ -781,6 +816,67 @@ impl App {
                     }
                 }
             }
+            Message::FocusNewTaskField(field) => {
+                if let ActiveDialog::NewTask(state) = &mut self.active_dialog {
+                    state.focused_field = field;
+                }
+            }
+            Message::ToggleNewTaskCheckbox => {
+                if let ActiveDialog::NewTask(state) = &mut self.active_dialog {
+                    state.focused_field = NewTaskField::EnsureBaseUpToDate;
+                    state.ensure_base_up_to_date = !state.ensure_base_up_to_date;
+                }
+            }
+            Message::FocusCategoryInputField(field) => {
+                if let ActiveDialog::CategoryInput(state) = &mut self.active_dialog {
+                    state.focused_field = field;
+                }
+            }
+            Message::FocusNewProjectField(field) => {
+                if let ActiveDialog::NewProject(state) = &mut self.active_dialog {
+                    state.focused_field = field;
+                }
+            }
+            Message::FocusDeleteTaskField(field) => {
+                if let ActiveDialog::DeleteTask(state) = &mut self.active_dialog {
+                    state.focused_field = field;
+                }
+            }
+            Message::ToggleDeleteTaskCheckbox(field) => {
+                if let ActiveDialog::DeleteTask(state) = &mut self.active_dialog {
+                    state.focused_field = field;
+                    match field {
+                        DeleteTaskField::KillTmux => state.kill_tmux = !state.kill_tmux,
+                        DeleteTaskField::RemoveWorktree => {
+                            state.remove_worktree = !state.remove_worktree
+                        }
+                        DeleteTaskField::DeleteBranch => state.delete_branch = !state.delete_branch,
+                        _ => {}
+                    }
+                }
+            }
+            Message::FocusDialogButton(_button_id) => {}
+            Message::SelectProject(idx) => {
+                if idx < self.project_list.len() {
+                    self.selected_project_index = idx;
+                    self.project_list_state.select(Some(idx));
+                    if let Some(project) = self.project_list.get(idx) {
+                        let _ = self.switch_project(project.path.clone());
+                        self.current_view = View::Board;
+                    }
+                }
+            }
+            #[allow(clippy::collapsible_if)]
+            Message::SelectCommandPaletteItem(idx) => {
+                if let ActiveDialog::CommandPalette(ref mut state) = self.active_dialog {
+                    if idx < state.filtered.len() {
+                        state.selected_index = idx;
+                        if let Some(cmd_id) = state.selected_command_id() {
+                            self.update(Message::ExecuteCommand(cmd_id))?;
+                        }
+                    }
+                }
+            }
         }
 
         self.maybe_show_tmux_mouse_hint();
@@ -880,8 +976,22 @@ impl App {
         self.last_mouse_event = Some(mouse);
         self.mouse_seen = true;
 
+        let x = mouse.column;
+        let y = mouse.row;
+
+        // Handle hover state on mouse move
         match mouse.kind {
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                self.hovered_message = self
+                    .hit_test_map
+                    .iter()
+                    .find(|(rect, _)| point_in_rect(x, y, *rect))
+                    .map(|(_, msg)| msg.clone());
+                return Ok(());
+            }
             MouseEventKind::ScrollDown => {
+                // Close context menu on scroll
+                self.context_menu = None;
                 if self.categories.get(self.focused_column).is_some() {
                     let max_offset = self.max_scroll_offset_for_column(self.focused_column);
                     let offset = self
@@ -893,6 +1003,8 @@ impl App {
                 return Ok(());
             }
             MouseEventKind::ScrollUp => {
+                // Close context menu on scroll
+                self.context_menu = None;
                 let offset = self
                     .scroll_offset_per_column
                     .entry(self.focused_column)
@@ -903,12 +1015,94 @@ impl App {
             _ => {}
         }
 
+        // Handle right-click for context menu
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right)) {
+            self.context_menu = None; // Close any existing menu first
+
+            // Check if clicking on a task
+            if let Some((_rect, Message::SelectTask(column, task_idx))) = self
+                .hit_test_map
+                .iter()
+                .find(|(r, _)| point_in_rect(x, y, *r))
+            {
+                let Some(category) = self.categories.get(*column) else {
+                    return Ok(());
+                };
+                let tasks_in_column: Vec<_> = self
+                    .tasks
+                    .iter()
+                    .filter(|t| t.category_id == category.id)
+                    .collect();
+                if let Some(task) = tasks_in_column.get(*task_idx) {
+                    self.context_menu = Some(ContextMenuState {
+                        position: (x, y),
+                        task_id: task.id,
+                        task_column: *column,
+                        items: vec![
+                            ContextMenuItem::Attach,
+                            ContextMenuItem::Delete,
+                            ContextMenuItem::Move,
+                        ],
+                        selected_index: 0,
+                    });
+                    self.focused_column = *column;
+                    self.selected_task_per_column.insert(*column, *task_idx);
+                    return Ok(());
+                }
+            }
+            return Ok(());
+        }
+
+        // Handle left click for context menu actions
+        #[allow(clippy::collapsible_if)]
+        if let Some(ref mut menu) = self.context_menu {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                // Check if click is within menu bounds
+                let menu_width = 15u16;
+                let menu_height = menu.items.len() as u16;
+                let menu_rect =
+                    Rect::new(menu.position.0, menu.position.1, menu_width, menu_height);
+
+                if point_in_rect(x, y, menu_rect) {
+                    let item_index = (y - menu.position.1) as usize;
+                    if item_index < menu.items.len() {
+                        let item = &menu.items[item_index];
+                        match item {
+                            ContextMenuItem::Attach => {
+                                self.context_menu = None;
+                                self.update(Message::AttachSelectedTask)?;
+                                return Ok(());
+                            }
+                            ContextMenuItem::Delete => {
+                                self.context_menu = None;
+                                self.update(Message::OpenDeleteTaskDialog)?;
+                                return Ok(());
+                            }
+                            ContextMenuItem::Move => {
+                                // TODO: Open move dialog or submenu
+                                self.context_menu = None;
+                                self.update(Message::OpenDeleteTaskDialog)?; // Placeholder
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                // Click outside closes menu
+                self.context_menu = None;
+                return Ok(());
+            }
+        }
+
+        // Only handle left click if no context menu is open
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return Ok(());
         }
 
-        let x = mouse.column;
-        let y = mouse.row;
+        // Close context menu on left click outside
+        if self.context_menu.is_some() {
+            self.context_menu = None;
+            return Ok(());
+        }
 
         if self.active_dialog == ActiveDialog::Help {
             let help_area = Rect {
@@ -2366,6 +2560,8 @@ mod tests {
             active_dialog: ActiveDialog::None,
             footer_notice: None,
             hit_test_map: Vec::new(),
+            hovered_message: None,
+            context_menu: None,
             started_at: Instant::now(),
             mouse_seen: false,
             mouse_hint_shown: false,
