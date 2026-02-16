@@ -4,7 +4,7 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 const TMUX_SOCKET: &str = "";
 
@@ -199,6 +199,26 @@ pub fn sanitize_session_name(repo_name: &str, branch_name: &str) -> String {
     let repo = sanitize_fragment(repo_name);
     let branch = sanitize_fragment(branch_name);
     let mut session_name = format!("ok-{repo}-{branch}");
+    session_name.truncate(200);
+    session_name
+}
+
+pub fn sanitize_session_name_for_project(
+    project_slug: Option<&str>,
+    repo_name: &str,
+    branch_name: &str,
+) -> String {
+    let Some(project_slug) = project_slug
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return sanitize_session_name(repo_name, branch_name);
+    };
+
+    let project = sanitize_fragment(project_slug);
+    let repo = sanitize_fragment(repo_name);
+    let branch = sanitize_fragment(branch_name);
+    let mut session_name = format!("ok-{project}-{repo}-{branch}");
     session_name.truncate(200);
     session_name
 }
@@ -420,6 +440,26 @@ mod tests {
         let result = sanitize_session_name(&long_repo, &long_branch);
         assert!(result.len() <= 200);
         assert!(result.starts_with("ok-"));
+    }
+
+    #[test]
+    fn test_sanitize_session_name_for_project() {
+        assert_eq!(
+            sanitize_session_name_for_project(None, "my-repo", "feature/login"),
+            "ok-my-repo-feature-login"
+        );
+        assert_eq!(
+            sanitize_session_name_for_project(Some(" "), "my-repo", "feature/login"),
+            "ok-my-repo-feature-login"
+        );
+        assert_eq!(
+            sanitize_session_name_for_project(Some("my-project"), "my-repo", "feature/login"),
+            "ok-my-project-my-repo-feature-login"
+        );
+        assert_eq!(
+            sanitize_session_name_for_project(Some("my project"), "my-repo", "feature/login"),
+            "ok-my-project-my-repo-feature-login"
+        );
     }
 
     #[test]
