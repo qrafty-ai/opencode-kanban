@@ -977,8 +977,8 @@ mod tests {
         conn.execute(
             "INSERT INTO tasks (
                 id, title, repo_id, branch, category_id, position, tmux_session_name,
-                opencode_session_id, worktree_path, tmux_status, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, NULL, NULL, ?6, ?7, ?7)",
+                worktree_path, tmux_status, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, NULL, ?6, ?7, ?7)",
             params![
                 task_id.to_string(),
                 "legacy task",

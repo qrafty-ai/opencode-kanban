@@ -2669,77 +2669,6 @@ mod tests {
     }
 
     #[test]
-    fn test_recovery_reconcile_stale_binding_preserves_session_id() -> Result<()> {
-        let fixture = RecoveryFixture::new()?;
-        let task = fixture.new_task("startup-stale-binding")?;
-        let session_id = Uuid::new_v4().to_string();
-
-        fixture.db.update_task_tmux(
-            task.id,
-            Some("ok-startup-stale-binding".to_string()),
-            Some(fixture.worktree().display().to_string()),
-        )?;
-
-        let runtime = FakeRecoveryRuntime::default();
-
-        reconcile_startup_tasks(
-            &fixture.db,
-            &fixture.db.list_tasks()?,
-            &fixture.db.list_repos()?,
-            &runtime,
-        )?;
-
-        let updated = fixture.db.get_task(task.id)?;
-        assert_eq!(updated.status_source, SessionStatusSource::Server.as_str());
-        assert_eq!(
-            updated.status_error.as_deref(),
-            Some(
-                format!(
-                    "BINDING_STALE: OpenCode server does not recognize session id {session_id}"
-                )
-                .as_str()
-            )
-        );
-        assert!(updated.status_fetched_at.is_some());
-        Ok(())
-    }
-
-    #[test]
-    fn test_recovery_attach_dead_task_with_existing_worktree_recreates_session() -> Result<()> {
-        let fixture = RecoveryFixture::new()?;
-        let task = fixture.new_task("attach-recreate")?;
-        let session_id = Uuid::new_v4().to_string();
-        let session_name = "ok-attach-recreate".to_string();
-
-        fixture.db.update_task_tmux(
-            task.id,
-            Some(session_name.clone()),
-            Some(fixture.worktree().display().to_string()),
-        )?;
-        fixture
-            .db
-            .update_task_status(task.id, Status::Dead.as_str())?;
-
-        let runtime = FakeRecoveryRuntime::default();
-        let updated_task = fixture.db.get_task(task.id)?;
-        let result =
-            attach_task_with_runtime(&fixture.db, None, &updated_task, &fixture.repo, &runtime)?;
-
-        assert_eq!(result, AttachTaskResult::Attached);
-        let created = runtime.created_sessions.borrow();
-        assert_eq!(created.len(), 1);
-        assert_eq!(created[0].0, session_name);
-        assert_eq!(
-            created[0].2,
-            format!("opencode attach http://127.0.0.1:4096 --session {session_id}")
-        );
-
-        let switched = runtime.switched_sessions.borrow();
-        assert!(switched.is_empty());
-        Ok(())
-    }
-
-    #[test]
     fn test_recovery_attach_dead_task_with_missing_worktree_shows_error() -> Result<()> {
         let fixture = RecoveryFixture::new()?;
         let task = fixture.new_task("attach-missing-worktree")?;
@@ -2762,51 +2691,6 @@ mod tests {
         assert_eq!(result, AttachTaskResult::WorktreeNotFound);
         assert!(runtime.created_sessions.borrow().is_empty());
         assert!(runtime.switched_sessions.borrow().is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn test_recovery_attach_stale_binding_recreates_without_resume_arg() -> Result<()> {
-        let fixture = RecoveryFixture::new()?;
-        let task = fixture.new_task("attach-stale-binding")?;
-        let session_id = Uuid::new_v4().to_string();
-        let session_name = "ok-attach-stale-binding".to_string();
-
-        fixture.db.update_task_tmux(
-            task.id,
-            Some(session_name.clone()),
-            Some(fixture.worktree().display().to_string()),
-        )?;
-
-        let runtime = FakeRecoveryRuntime::default();
-
-        let updated_task = fixture.db.get_task(task.id)?;
-        let result =
-            attach_task_with_runtime(&fixture.db, None, &updated_task, &fixture.repo, &runtime)?;
-
-        assert_eq!(result, AttachTaskResult::Attached);
-        let created = runtime.created_sessions.borrow();
-        assert_eq!(created.len(), 1);
-        assert_eq!(created[0].0, session_name);
-        assert_eq!(
-            created[0].2,
-            format!("opencode attach http://127.0.0.1:4096 --session {session_id}")
-        );
-
-        let persisted = fixture.db.get_task(task.id)?;
-        assert_eq!(
-            persisted.status_source,
-            SessionStatusSource::Server.as_str()
-        );
-        assert_eq!(
-            persisted.status_error.as_deref(),
-            Some(
-                format!(
-                    "BINDING_STALE: OpenCode server does not recognize session id {session_id}"
-                )
-                .as_str()
-            )
-        );
         Ok(())
     }
 
