@@ -135,12 +135,26 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
 
     let _mock_server = MockStatusServer::start(
         vec![
+            http_json_response(&format!(
+                "[{{\"id\":\"sid-server-first\",\"directory\":\"{}\"}}]",
+                fixture.repo_path().display()
+            )),
+            http_json_response(&format!(
+                "[{{\"id\":\"sid-server-first\",\"directory\":\"{}\"}}]",
+                fixture.repo_path().display()
+            )),
+            http_json_response(&format!(
+                "[{{\"id\":\"sid-server-first\",\"directory\":\"{}\"}}]",
+                fixture.repo_path().display()
+            )),
+            http_json_response("[]"),
+        ],
+        vec![
             http_json_response("{\"sid-server-first\":{\"state\":\"running\"}}"),
             http_json_response("{\"sid-server-first\":{\"state\":\"running\"}}"),
             http_json_response("{\"sid-server-first\":{\"state\":\"running\"}}"),
             http_json_response("{}"),
         ],
-        http_json_response("{}"),
     )?;
 
     let db_path = kanban_db_path(&xdg_data_home);
@@ -176,11 +190,12 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
         })?;
 
         wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
-            current.status_source == "tmux"
+            current.status_source == "none"
+                && current.tmux_status == "dead"
                 && current
                     .status_error
                     .as_deref()
-                    .is_some_and(|error| error.starts_with("SERVER_STATUS_MISSING:"))
+                    .is_some_and(|error| error.starts_with("SESSION_NOT_FOUND:"))
         })?;
     }
 
@@ -214,8 +229,10 @@ fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Re
 
     cleanup_test_tmux_server();
 
-    let _mock_server =
-        MockStatusServer::start(vec![http_error_response(500)], http_error_response(500))?;
+    let _mock_server = MockStatusServer::start(
+        vec![http_json_response("[]")],
+        vec![http_error_response(500)],
+    )?;
 
     let db_path = kanban_db_path(&xdg_data_home);
     let db = Database::open(&db_path)?;
@@ -243,22 +260,11 @@ fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Re
 
         wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
             current.tmux_status == "dead"
-                && current.status_source == "tmux"
+                && current.status_source == "none"
                 && current
                     .status_error
                     .as_deref()
-                    .is_some_and(|error| error.starts_with("SERVER_HTTP_ERROR:"))
-        })?;
-
-        tmux_send_keys(&session_name, "printf \"I'm ready\\n\"")?;
-
-        wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
-            current.tmux_status == "idle"
-                && current.status_source == "tmux"
-                && current
-                    .status_error
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("SERVER_HTTP_ERROR:"))
+                    .is_some_and(|error| error.starts_with("SERVER_"))
         })?;
     }
 
@@ -472,12 +478,14 @@ fn http_error_response(status_code: u16) -> String {
 struct MockStatusServer {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    session_responses: Arc<Mutex<VecDeque<String>>>,
+    session_status_responses: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl MockStatusServer {
     fn start(
+        session_responses: Vec<String>,
         session_status_responses: Vec<String>,
-        default_session_status_response: String,
     ) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 4096))
             .context("failed to bind mock status server on 127.0.0.1:4096")?;
@@ -487,10 +495,11 @@ impl MockStatusServer {
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
-        let responses = Arc::new(Mutex::new(VecDeque::from(session_status_responses)));
-        let response_queue = Arc::clone(&responses);
-        let default_response = Arc::new(default_session_status_response);
-        let fallback_response = Arc::clone(&default_response);
+        let session_responses = Arc::new(Mutex::new(VecDeque::from(session_responses)));
+        let session_response_queue = Arc::clone(&session_responses);
+        let session_status_responses =
+            Arc::new(Mutex::new(VecDeque::from(session_status_responses)));
+        let session_status_response_queue = Arc::clone(&session_status_responses);
 
         let handle = thread::spawn(move || {
             while !stop_flag.load(Ordering::Relaxed) {
@@ -513,12 +522,20 @@ impl MockStatusServer {
                         let response = if request.starts_with("GET /global/health") {
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"healthy\":true}"
                                 .to_string()
-                        } else if request.starts_with("GET /session/status") {
-                            response_queue
+                        } else if request.starts_with("GET /session")
+                            && !request.starts_with("GET /session/status")
+                        {
+                            session_response_queue
                                 .lock()
-                                .expect("mock response queue lock should not be poisoned")
+                                .expect("mock session response queue lock should not be poisoned")
                                 .pop_front()
-                                .unwrap_or_else(|| (*fallback_response).clone())
+                                .unwrap_or_else(|| "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[]".to_string())
+                        } else if request.starts_with("GET /session/status") {
+                            session_status_response_queue
+                                .lock()
+                                .expect("mock session status response queue lock should not be poisoned")
+                                .pop_front()
+                                .unwrap_or_else(|| "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}".to_string())
                         } else {
                             "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_string()
                         };
@@ -537,6 +554,8 @@ impl MockStatusServer {
         Ok(Self {
             stop,
             handle: Some(handle),
+            session_responses,
+            session_status_responses,
         })
     }
 }

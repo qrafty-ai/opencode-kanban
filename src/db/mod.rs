@@ -128,9 +128,9 @@ impl Database {
             .execute(
                 "INSERT INTO tasks (
                     id, title, repo_id, branch, category_id, position, tmux_session_name,
-                    opencode_session_id, worktree_path, tmux_status, status_source,
+                    worktree_path, tmux_status, status_source,
                     status_fetched_at, status_error, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     id.to_string(),
                     title,
@@ -138,7 +138,6 @@ impl Database {
                     branch,
                     category_id.to_string(),
                     position,
-                    Option::<String>::None,
                     Option::<String>::None,
                     Option::<String>::None,
                     DEFAULT_TMUX_STATUS,
@@ -158,7 +157,7 @@ impl Database {
         self.conn
             .query_row(
                 "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
-                        opencode_session_id, worktree_path, tmux_status, status_source,
+                        worktree_path, tmux_status, status_source,
                         status_fetched_at, status_error, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 params![id.to_string()],
@@ -170,7 +169,7 @@ impl Database {
     pub fn list_tasks(&self) -> Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
-                    opencode_session_id, worktree_path, tmux_status, status_source,
+                    worktree_path, tmux_status, status_source,
                     status_fetched_at, status_error, created_at, updated_at
              FROM tasks ORDER BY category_id ASC, position ASC, created_at ASC",
         )?;
@@ -206,24 +205,16 @@ impl Database {
         &self,
         id: Uuid,
         tmux_session_name: Option<String>,
-        opencode_session_id: Option<String>,
         worktree_path: Option<String>,
     ) -> Result<()> {
         self.conn
             .execute(
                 "UPDATE tasks
                  SET tmux_session_name = ?1,
-                     opencode_session_id = ?2,
-                     worktree_path = ?3,
-                     updated_at = ?4
-                 WHERE id = ?5",
-                params![
-                    tmux_session_name,
-                    opencode_session_id,
-                    worktree_path,
-                    now_iso(),
-                    id.to_string()
-                ],
+                     worktree_path = ?2,
+                     updated_at = ?3
+                 WHERE id = ?4",
+                params![tmux_session_name, worktree_path, now_iso(), id.to_string()],
             )
             .context("failed to update task tmux metadata")?;
         Ok(())
@@ -411,7 +402,6 @@ impl Database {
                     category_id TEXT NOT NULL REFERENCES categories(id),
                     position INTEGER NOT NULL,
                     tmux_session_name TEXT,
-                    opencode_session_id TEXT,
                     worktree_path TEXT,
                     tmux_status TEXT DEFAULT 'unknown',
                     status_source TEXT NOT NULL DEFAULT 'none',
@@ -577,14 +567,13 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         category_id: parse_uuid_column(row.get::<_, String>(4)?, 4)?,
         position: row.get(5)?,
         tmux_session_name: row.get(6)?,
-        opencode_session_id: row.get(7)?,
-        worktree_path: row.get(8)?,
-        tmux_status: row.get(9)?,
-        status_source: row.get(10)?,
-        status_fetched_at: row.get(11)?,
-        status_error: row.get(12)?,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
+        worktree_path: row.get(7)?,
+        tmux_status: row.get(8)?,
+        status_source: row.get(9)?,
+        status_fetched_at: row.get(10)?,
+        status_error: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
     })
 }
 
@@ -787,7 +776,6 @@ mod tests {
         db.update_task_tmux(
             task.id,
             Some("ok-task-crud-feature-db-layer".to_string()),
-            Some(Uuid::new_v4().to_string()),
             Some("/tmp/task-crud-feature-db-layer".to_string()),
         )?;
         db.update_task_status(task.id, "running")?;
@@ -961,7 +949,6 @@ mod tests {
                 category_id TEXT NOT NULL REFERENCES categories(id),
                 position INTEGER NOT NULL,
                 tmux_session_name TEXT,
-                opencode_session_id TEXT,
                 worktree_path TEXT,
                 tmux_status TEXT DEFAULT 'unknown',
                 created_at TEXT NOT NULL,
