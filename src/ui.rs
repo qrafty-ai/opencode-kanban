@@ -13,11 +13,11 @@ use ratatui::{
 
 use crate::app::{
     ActiveDialog, App, CategoryInputField, CategoryInputMode, DeleteCategoryField, DeleteTaskField,
-    Message, NewProjectField, NewTaskField, View, WorktreeNotFoundField,
+    Message, NewProjectField, NewTaskField, View, ViewMode, WorktreeNotFoundField,
 };
 use crate::command_palette::all_commands;
 use crate::theme::{Theme, parse_color};
-use crate::types::Task;
+use crate::types::{Category, Task};
 
 #[derive(Clone, Copy)]
 pub enum OverlayAnchor {
@@ -180,7 +180,10 @@ pub fn render_board(frame: &mut Frame<'_>, app: &mut App) {
         .split(frame.area());
 
     render_header(frame, chunks[0], app);
-    render_columns(frame, chunks[1], app);
+    match app.view_mode {
+        ViewMode::Kanban => render_columns(frame, chunks[1], app),
+        ViewMode::SidePanel => render_side_panel(frame, chunks[1], app),
+    }
     render_footer(frame, chunks[2], app);
 
     if app.active_dialog != ActiveDialog::None {
@@ -443,6 +446,255 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             }
         }
     }
+}
+
+fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    if app.categories.is_empty() {
+        render_empty_state(frame, area);
+        return;
+    }
+
+    let left_width = app.side_panel_width;
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(left_width),
+            Constraint::Percentage(100 - left_width),
+        ])
+        .split(area);
+
+    render_side_panel_task_list(frame, chunks[0], app);
+    render_side_panel_details(frame, chunks[1], app);
+}
+
+fn render_side_panel_task_list(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    let theme = Theme::default();
+
+    let flat_tasks: Vec<(usize, &Category, &Task)> = app
+        .categories
+        .iter()
+        .enumerate()
+        .flat_map(|(cat_idx, cat)| {
+            let mut tasks: Vec<_> = app
+                .tasks
+                .iter()
+                .filter(|t| t.category_id == cat.id)
+                .collect();
+            tasks.sort_by_key(|t| t.position);
+            tasks.into_iter().map(move |t| (cat_idx, cat, t))
+        })
+        .collect();
+
+    if area.height < 6 {
+        return;
+    }
+
+    let block_inner_height = area.height.saturating_sub(3);
+
+    let selected_flat_index = app
+        .selected_task_index
+        .min(flat_tasks.len().saturating_sub(1));
+    let mut y_offset = 1u16;
+
+    for (flat_idx, (cat_idx, category, task)) in flat_tasks.iter().enumerate() {
+        if *cat_idx > 0 {
+            let prev_cat_idx = if flat_idx > 0 {
+                flat_tasks[flat_idx - 1].0
+            } else {
+                0
+            };
+            if *cat_idx != prev_cat_idx && y_offset < block_inner_height.saturating_sub(1) {
+                let sep_area = Rect {
+                    x: area.x,
+                    y: area.y + y_offset,
+                    width: area.width,
+                    height: 1,
+                };
+                let cat_name: String = category
+                    .name
+                    .chars()
+                    .take(area.width as usize - 6)
+                    .collect();
+                let sep_line = format!("┄{}┄", cat_name);
+                let total_width = area.width as usize;
+                let sep_len = sep_line.len();
+                let left_pad = if sep_len < total_width {
+                    (total_width - sep_len) / 2
+                } else {
+                    0
+                };
+                let sep_text = format!("{}{}", " ".repeat(left_pad), sep_line);
+                frame.render_widget(
+                    Paragraph::new(sep_text).style(Style::default().fg(theme.secondary).bold()),
+                    sep_area,
+                );
+                y_offset += 1;
+            }
+        }
+
+        if y_offset + 2 > block_inner_height {
+            break;
+        }
+
+        let is_selected = flat_idx == selected_flat_index;
+
+        let status_icon = match task.tmux_status.as_str() {
+            "running" => "●",
+            "idle" => "○",
+            "waiting" => "◐",
+            "dead" => "✕",
+            "repo_unavailable" => "!",
+            "broken" => "!",
+            _ => "?",
+        };
+
+        let status_color = match task.tmux_status.as_str() {
+            "running" => theme.focus,
+            "idle" => theme.task,
+            _ => theme.secondary,
+        };
+
+        let prefix = if is_selected { "▸" } else { " " };
+        let bg_color = if is_selected {
+            theme.secondary
+        } else {
+            Color::Reset
+        };
+
+        let repo_name = app
+            .repos
+            .iter()
+            .find(|r| r.id == task.repo_id)
+            .map(|r| r.name.as_str())
+            .unwrap_or("unknown");
+
+        let line1 = Line::from(vec![
+            Span::styled(prefix, Style::default().fg(theme.focus)),
+            Span::styled(status_icon, Style::default().fg(status_color)),
+            Span::raw(" "),
+            Span::styled(&task.title, Style::default().fg(theme.task)),
+        ]);
+
+        let line2 = Line::from(vec![
+            Span::raw("   "),
+            Span::styled(
+                format!("{}:{}", repo_name, task.branch),
+                Style::default().fg(theme.secondary),
+            ),
+        ]);
+
+        let task_area = Rect {
+            x: area.x,
+            y: area.y + y_offset,
+            width: area.width,
+            height: 2,
+        };
+
+        frame.render_widget(
+            Paragraph::new(vec![line1, line2]).style(Style::default().bg(bg_color)),
+            task_area,
+        );
+
+        app.hit_test_map
+            .push((task_area, Message::SelectTaskInSidePanel(flat_idx)));
+        y_offset += 3;
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.column))
+        .title(Span::styled(" Tasks ", Style::default().fg(theme.column)));
+    frame.render_widget(block, area);
+}
+
+fn render_side_panel_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = Theme::default();
+
+    let flat_tasks: Vec<&Task> = app
+        .categories
+        .iter()
+        .flat_map(|cat| {
+            let mut tasks: Vec<_> = app
+                .tasks
+                .iter()
+                .filter(|t| t.category_id == cat.id)
+                .collect();
+            tasks.sort_by_key(|t| t.position);
+            tasks
+        })
+        .collect();
+
+    let selected_task = flat_tasks.get(app.selected_task_index);
+
+    let content = if let Some(task) = selected_task {
+        let repo_name = app
+            .repos
+            .iter()
+            .find(|r| r.id == task.repo_id)
+            .map(|r| r.name.as_str())
+            .unwrap_or("unknown");
+
+        let mut lines = vec![
+            Line::from(vec![Span::styled(
+                "Task Details",
+                Style::default().fg(theme.focus).bold(),
+            )]),
+            Line::from(vec![Span::raw("")]),
+            Line::from(vec![
+                Span::styled("Title: ", Style::default().fg(theme.secondary)),
+                Span::raw(&task.title),
+            ]),
+            Line::from(vec![
+                Span::styled("Repo: ", Style::default().fg(theme.secondary)),
+                Span::raw(repo_name),
+            ]),
+            Line::from(vec![
+                Span::styled("Branch: ", Style::default().fg(theme.secondary)),
+                Span::raw(&task.branch),
+            ]),
+            Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(theme.secondary)),
+                Span::raw(&task.tmux_status),
+            ]),
+            Line::from(vec![Span::raw("")]),
+        ];
+
+        if let Some(ref logs) = app.current_log_buffer {
+            lines.push(Line::from(vec![Span::styled(
+                "Logs:",
+                Style::default().fg(theme.focus).bold(),
+            )]));
+            lines.push(Line::from(vec![Span::raw("")]));
+            for log_line in logs.lines().rev().take(30) {
+                lines.push(Line::from(vec![Span::raw(log_line)]));
+            }
+        } else if task.tmux_status == "running" {
+            lines.push(Line::from(vec![Span::styled(
+                "Logs: (no output yet)",
+                Style::default().fg(theme.secondary),
+            )]));
+        } else {
+            lines.push(Line::from(vec![Span::styled(
+                "Logs: (task not running)",
+                Style::default().fg(theme.secondary),
+            )]));
+        }
+
+        Paragraph::new(lines)
+    } else {
+        Paragraph::new("No task selected")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.secondary))
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.column))
+        .title(Span::styled(" Details ", Style::default().fg(theme.column)));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(content, inner);
 }
 
 fn render_empty_state(frame: &mut Frame<'_>, area: Rect) {
