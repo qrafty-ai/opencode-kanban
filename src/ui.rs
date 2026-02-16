@@ -15,7 +15,7 @@ use crate::app::{
     ActiveDialog, App, CategoryInputField, CategoryInputMode, DeleteCategoryField, DeleteTaskField,
     Message, NewProjectField, NewTaskField, View, ViewMode, WorktreeNotFoundField,
 };
-use crate::command_palette::{CommandPaletteState, all_commands};
+use crate::command_palette::all_commands;
 use crate::theme::{Theme, parse_color};
 use crate::types::{Category, Task};
 
@@ -95,6 +95,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 }
 
 fn render_project_list(frame: &mut Frame<'_>, app: &mut App) {
+    app.hit_test_map.clear();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -110,17 +112,49 @@ fn render_project_list(frame: &mut Frame<'_>, app: &mut App) {
         .title_alignment(Alignment::Center);
     frame.render_widget(header, chunks[0]);
 
-    let items: Vec<ListItem> = app
+    let inner_area = Block::default().borders(Borders::ALL).inner(chunks[1]);
+    let list_height = inner_area.height as usize;
+    let scroll_offset = app.project_list_state.offset();
+    let visible_items: Vec<ListItem> = app
         .project_list
         .iter()
-        .map(|project| ListItem::new(format!("  {}", project.name)))
+        .skip(scroll_offset)
+        .take(list_height)
+        .enumerate()
+        .map(|(i, project)| {
+            let absolute_idx = scroll_offset + i;
+            let is_selected = app.selected_project_index == absolute_idx;
+            let item_rect = Rect::new(inner_area.x, inner_area.y + i as u16, inner_area.width, 1);
+            let is_hovered = is_area_hovered(item_rect, app);
+
+            let style = if is_selected {
+                Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+            } else if is_hovered {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+
+            let prefix = if is_selected { "> " } else { "  " };
+            ListItem::new(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(&project.name, style),
+            ]))
+        })
         .collect();
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Projects "))
-        .highlight_style(Style::default().fg(Color::Yellow).bg(Color::DarkGray))
-        .highlight_symbol("> ");
+    let list =
+        List::new(visible_items).block(Block::default().borders(Borders::ALL).title(" Projects "));
     frame.render_stateful_widget(list, chunks[1], &mut app.project_list_state);
+
+    for (idx, _) in app.project_list.iter().enumerate() {
+        let item_y = inner_area.y + idx as u16 - scroll_offset as u16;
+        if item_y >= inner_area.y && item_y < inner_area.y + inner_area.height {
+            let item_rect = Rect::new(inner_area.x, item_y, inner_area.width, 1);
+            app.hit_test_map
+                .push((item_rect, Message::SelectProject(idx)));
+        }
+    }
 
     let footer = Block::default()
         .borders(Borders::ALL)
@@ -154,6 +188,10 @@ pub fn render_board(frame: &mut Frame<'_>, app: &mut App) {
 
     if app.active_dialog != ActiveDialog::None {
         render_dialog(frame, app);
+    }
+
+    if let Some(ref menu) = app.context_menu {
+        render_context_menu(frame, app, menu);
     }
 }
 
@@ -312,8 +350,19 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             };
 
             let prefix = if is_selected { "▸" } else { " " };
+            let is_hovered = app
+                .hovered_message
+                .as_ref()
+                .map(|m| m == &Message::SelectTask(i, j))
+                .unwrap_or(false);
             let bg_color = if is_selected {
-                theme.secondary
+                if is_hovered {
+                    theme.focus // Combined hover + selected: prominent highlight
+                } else {
+                    theme.secondary
+                }
+            } else if is_hovered {
+                Color::DarkGray // Just hover: subtle highlight
             } else {
                 Color::Reset
             };
@@ -668,12 +717,12 @@ fn render_empty_state(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-fn render_command_palette(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &CommandPaletteState,
-    show_results: bool,
-) {
+fn render_command_palette(frame: &mut Frame<'_>, area: Rect, app: &mut App, show_results: bool) {
+    let state = if let ActiveDialog::CommandPalette(state) = &app.active_dialog {
+        state.clone()
+    } else {
+        return;
+    };
     let theme = Theme::default();
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -759,7 +808,17 @@ fn render_command_palette(
             height: 1,
         };
 
-        frame.render_widget(Paragraph::new(Line::from(spans)).style(bg_style), row_area);
+        let is_hovered = is_area_hovered(row_area, app);
+        let hover_style = if is_hovered && !is_selected {
+            Style::default().bg(Color::DarkGray)
+        } else {
+            bg_style
+        };
+
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(hover_style),
+            row_area,
+        );
 
         if !cmd_def.keybinding.is_empty() {
             let key_hint = Span::styled(cmd_def.keybinding, Style::default().fg(theme.secondary));
@@ -768,6 +827,10 @@ fn render_command_palette(
                 row_area,
             );
         }
+
+        let absolute_idx = scroll_offset + i;
+        app.hit_test_map
+            .push((row_area, Message::SelectCommandPaletteItem(absolute_idx)));
     }
 
     if total_items > list_height {
@@ -837,11 +900,11 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
     );
 
     match &app.active_dialog {
-        ActiveDialog::CommandPalette(state) => {
+        ActiveDialog::CommandPalette(_) => {
             render_command_palette(
                 frame,
                 inner_area,
-                state,
+                app,
                 should_render_command_palette_results(app.viewport),
             );
         }
@@ -853,7 +916,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                     Constraint::Length(3),
                     Constraint::Length(3),
                     Constraint::Length(3),
-                    Constraint::Length(1),
+                    Constraint::Length(3),
                     Constraint::Length(3),
                 ])
                 .split(inner_area);
@@ -875,7 +938,11 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 "Repo (name or path)",
                 repo_name,
                 state.focused_field == NewTaskField::Repo,
+                is_area_hovered(layout[0], app),
+                true,
             );
+            app.hit_test_map
+                .push((layout[0], Message::FocusNewTaskField(NewTaskField::Repo)));
 
             render_input_field(
                 frame,
@@ -883,7 +950,11 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 "Branch",
                 &state.branch_input,
                 state.focused_field == NewTaskField::Branch,
+                is_area_hovered(layout[1], app),
+                true,
             );
+            app.hit_test_map
+                .push((layout[1], Message::FocusNewTaskField(NewTaskField::Branch)));
 
             render_input_field(
                 frame,
@@ -891,7 +962,11 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 "Base",
                 &state.base_input,
                 state.focused_field == NewTaskField::Base,
+                is_area_hovered(layout[2], app),
+                true,
             );
+            app.hit_test_map
+                .push((layout[2], Message::FocusNewTaskField(NewTaskField::Base)));
 
             render_input_field(
                 frame,
@@ -899,29 +974,23 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 "Title",
                 &state.title_input,
                 state.focused_field == NewTaskField::Title,
+                is_area_hovered(layout[3], app),
+                true,
             );
+            app.hit_test_map
+                .push((layout[3], Message::FocusNewTaskField(NewTaskField::Title)));
 
-            let checkbox_text = if state.ensure_base_up_to_date {
-                "[x] Ensure base branch up-to-date"
-            } else {
-                "[ ] Ensure base branch up-to-date"
-            };
-            let checkbox_block = Block::default()
-                .borders(Borders::NONE)
-                .style(Style::default().fg(Color::White));
-            let checkbox_paragraph = Paragraph::new(checkbox_text)
-                .block(checkbox_block)
-                .alignment(Alignment::Center);
             let checkbox_focused = state.focused_field == NewTaskField::EnsureBaseUpToDate;
-            if checkbox_focused {
-                frame.render_widget(
-                    checkbox_paragraph
-                        .style(Style::default().fg(Color::Yellow).bg(Color::DarkGray)),
-                    layout[4],
-                );
-            } else {
-                frame.render_widget(checkbox_paragraph, layout[4]);
-            }
+            render_checkbox(
+                frame,
+                layout[4],
+                "Ensure base branch up-to-date",
+                state.ensure_base_up_to_date,
+                checkbox_focused,
+                is_area_hovered(layout[4], app),
+            );
+            app.hit_test_map
+                .push((layout[4], Message::ToggleNewTaskCheckbox));
 
             let button_layout = Layout::default()
                 .direction(Direction::Horizontal)
@@ -937,12 +1006,14 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                     "[ Create ]"
                 },
                 state.focused_field == NewTaskField::Create,
+                is_area_hovered(button_layout[0], app),
             );
             render_button(
                 frame,
                 button_layout[1],
                 "[ Cancel ]",
                 state.focused_field == NewTaskField::Cancel,
+                is_area_hovered(button_layout[1], app),
             );
 
             app.hit_test_map
@@ -967,10 +1038,10 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
             let layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(2),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
                     Constraint::Length(3),
                 ])
                 .split(inner_area);
@@ -987,6 +1058,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 "Kill tmux session",
                 state.kill_tmux,
                 state.focused_field == DeleteTaskField::KillTmux,
+                is_area_hovered(layout[1], app),
             );
             render_checkbox(
                 frame,
@@ -994,6 +1066,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 "Remove worktree",
                 state.remove_worktree,
                 state.focused_field == DeleteTaskField::RemoveWorktree,
+                is_area_hovered(layout[2], app),
             );
             render_checkbox(
                 frame,
@@ -1001,6 +1074,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 "Delete branch",
                 state.delete_branch,
                 state.focused_field == DeleteTaskField::DeleteBranch,
+                is_area_hovered(layout[3], app),
             );
 
             let button_layout = Layout::default()
@@ -1013,20 +1087,28 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 button_layout[0],
                 "[ Delete ]",
                 state.focused_field == DeleteTaskField::Delete,
+                is_area_hovered(button_layout[0], app),
             );
             render_button(
                 frame,
                 button_layout[1],
                 "[ Cancel ]",
                 state.focused_field == DeleteTaskField::Cancel,
+                is_area_hovered(button_layout[1], app),
             );
 
-            app.hit_test_map
-                .push((layout[1], Message::DeleteTaskToggleKillTmux));
-            app.hit_test_map
-                .push((layout[2], Message::DeleteTaskToggleRemoveWorktree));
-            app.hit_test_map
-                .push((layout[3], Message::DeleteTaskToggleDeleteBranch));
+            app.hit_test_map.push((
+                layout[1],
+                Message::ToggleDeleteTaskCheckbox(DeleteTaskField::KillTmux),
+            ));
+            app.hit_test_map.push((
+                layout[2],
+                Message::ToggleDeleteTaskCheckbox(DeleteTaskField::RemoveWorktree),
+            ));
+            app.hit_test_map.push((
+                layout[3],
+                Message::ToggleDeleteTaskCheckbox(DeleteTaskField::DeleteBranch),
+            ));
             app.hit_test_map
                 .push((button_layout[0], Message::ConfirmDeleteTask));
             app.hit_test_map
@@ -1048,7 +1130,13 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 "Name",
                 &state.name_input,
                 state.focused_field == CategoryInputField::Name,
+                is_area_hovered(layout[0], app),
+                true,
             );
+            app.hit_test_map.push((
+                layout[0],
+                Message::FocusCategoryInputField(CategoryInputField::Name),
+            ));
 
             let buttons = Layout::default()
                 .direction(Direction::Horizontal)
@@ -1064,12 +1152,14 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                     "[ Rename ]"
                 },
                 state.focused_field == CategoryInputField::Confirm,
+                is_area_hovered(buttons[0], app),
             );
             render_button(
                 frame,
                 buttons[1],
                 "[ Cancel ]",
                 state.focused_field == CategoryInputField::Cancel,
+                is_area_hovered(buttons[1], app),
             );
 
             app.hit_test_map
@@ -1105,12 +1195,14 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 buttons[0],
                 "[ Delete ]",
                 state.focused_field == DeleteCategoryField::Delete,
+                is_area_hovered(buttons[0], app),
             );
             render_button(
                 frame,
                 buttons[1],
                 "[ Cancel ]",
                 state.focused_field == DeleteCategoryField::Cancel,
+                is_area_hovered(buttons[1], app),
             );
 
             app.hit_test_map
@@ -1151,18 +1243,21 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 buttons[0],
                 "[ Recreate ]",
                 state.focused_field == WorktreeNotFoundField::Recreate,
+                is_area_hovered(buttons[0], app),
             );
             render_button(
                 frame,
                 buttons[1],
                 "[ Mark as broken ]",
                 state.focused_field == WorktreeNotFoundField::MarkBroken,
+                is_area_hovered(buttons[1], app),
             );
             render_button(
                 frame,
                 buttons[2],
                 "[ Cancel ]",
                 state.focused_field == WorktreeNotFoundField::Cancel,
+                is_area_hovered(buttons[2], app),
             );
 
             app.hit_test_map
@@ -1186,7 +1281,13 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 .wrap(Wrap { trim: true });
             frame.render_widget(paragraph, layout[0]);
 
-            render_button(frame, layout[1], "[ Dismiss ]", true);
+            render_button(
+                frame,
+                layout[1],
+                "[ Dismiss ]",
+                true,
+                is_area_hovered(layout[1], app),
+            );
             app.hit_test_map
                 .push((layout[1], Message::RepoUnavailableDismiss));
         }
@@ -1201,7 +1302,13 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: true });
             frame.render_widget(paragraph, layout[0]);
-            render_button(frame, layout[1], "[ Dismiss ]", true);
+            render_button(
+                frame,
+                layout[1],
+                "[ Dismiss ]",
+                true,
+                is_area_hovered(layout[1], app),
+            );
             app.hit_test_map.push((layout[1], Message::DismissDialog));
         }
         ActiveDialog::NewProject(state) => {
@@ -1220,7 +1327,13 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 "Project Name",
                 &state.name_input,
                 state.focused_field == NewProjectField::Name,
+                is_area_hovered(layout[0], app),
+                true,
             );
+            app.hit_test_map.push((
+                layout[0],
+                Message::FocusNewProjectField(NewProjectField::Name),
+            ));
 
             let buttons = Layout::default()
                 .direction(Direction::Horizontal)
@@ -1232,12 +1345,14 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 buttons[0],
                 "[ Create ]",
                 state.focused_field == NewProjectField::Create,
+                is_area_hovered(buttons[0], app),
             );
             render_button(
                 frame,
                 buttons[1],
                 "[ Cancel ]",
                 state.focused_field == NewProjectField::Cancel,
+                is_area_hovered(buttons[1], app),
             );
 
             app.hit_test_map.push((buttons[0], Message::CreateProject));
@@ -1262,8 +1377,20 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(layout[1]);
-            render_button(frame, buttons[0], "[ Quit ]", true);
-            render_button(frame, buttons[1], "[ Cancel ]", false);
+            render_button(
+                frame,
+                buttons[0],
+                "[ Quit ]",
+                true,
+                is_area_hovered(buttons[0], app),
+            );
+            render_button(
+                frame,
+                buttons[1],
+                "[ Cancel ]",
+                false,
+                is_area_hovered(buttons[1], app),
+            );
             app.hit_test_map.push((buttons[0], Message::ConfirmQuit));
             app.hit_test_map.push((buttons[1], Message::CancelQuit));
         }
@@ -1289,33 +1416,66 @@ fn render_input_field(
     label: &str,
     value: &str,
     is_focused: bool,
+    is_hovered: bool,
+    show_cursor: bool,
 ) {
     let theme = Theme::default();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(label)
-        .style(if is_focused {
-            Style::default().fg(theme.focus)
-        } else {
-            Style::default().fg(theme.task)
-        });
-    frame.render_widget(Paragraph::new(value).block(block), area);
-}
-
-fn render_button(frame: &mut Frame<'_>, area: Rect, label: &str, is_focused: bool) {
-    let theme = Theme::default();
-    let (bg, fg) = if is_focused {
-        (theme.focus, Color::Black)
+    let border_color = if is_focused {
+        theme.focus
+    } else if is_hovered {
+        theme.secondary
     } else {
-        (Color::Reset, theme.task)
+        theme.task
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(if is_focused {
-            Style::default().fg(theme.focus)
-        } else {
-            Style::default().fg(theme.secondary)
-        })
+        .title(label)
+        .style(Style::default().fg(border_color));
+
+    let paragraph = if show_cursor && is_focused {
+        let cursor_style = Style::default().bg(theme.focus).fg(Color::Black);
+        let text = Line::from(vec![Span::raw(value), Span::styled("█", cursor_style)]);
+        Paragraph::new(text).block(block)
+    } else {
+        Paragraph::new(value.to_string()).block(block)
+    };
+
+    frame.render_widget(paragraph, area);
+}
+
+fn is_area_hovered(area: Rect, app: &App) -> bool {
+    if let Some(mouse) = app.last_mouse_event {
+        let x = mouse.column;
+        let y = mouse.row;
+        x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height
+    } else {
+        false
+    }
+}
+
+fn render_button(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    is_focused: bool,
+    is_hovered: bool,
+) {
+    let theme = Theme::default();
+    let (bg, fg) = if is_focused {
+        (theme.focus, Color::Black)
+    } else if is_hovered {
+        (Color::DarkGray, theme.task)
+    } else {
+        (Color::Reset, theme.task)
+    };
+    let border_color = if is_focused || is_hovered {
+        theme.focus
+    } else {
+        theme.secondary
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(bg).fg(fg));
     frame.render_widget(
         Paragraph::new(label)
@@ -1331,18 +1491,31 @@ fn render_checkbox(
     label: &str,
     checked: bool,
     is_focused: bool,
+    is_hovered: bool,
 ) {
     let theme = Theme::default();
-    let check_mark = if checked { "[x]" } else { "[ ]" };
-    let style = if is_focused {
-        Style::default().fg(theme.focus)
+    let check_mark = if checked { "■ " } else { "□ " };
+
+    let (fg, bg, border_color) = if is_focused {
+        (theme.focus, Color::DarkGray, theme.focus)
+    } else if is_hovered {
+        (Color::Yellow, Color::DarkGray, Color::Yellow)
     } else {
-        Style::default().fg(theme.task)
+        (theme.task, Color::Reset, theme.secondary)
     };
-    frame.render_widget(
-        Paragraph::new(format!("{} {}", check_mark, label)).style(style),
-        area,
-    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(bg));
+
+    let text = format!("{} {}", check_mark, label);
+    let paragraph = Paragraph::new(text)
+        .style(Style::default().fg(fg))
+        .alignment(Alignment::Center)
+        .block(block);
+
+    frame.render_widget(paragraph, area);
 }
 
 fn render_help_overlay(frame: &mut Frame<'_>) {
@@ -1406,6 +1579,68 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn render_context_menu(frame: &mut Frame<'_>, app: &App, menu: &crate::app::ContextMenuState) {
+    use crate::app::ContextMenuItem;
+
+    let theme = Theme::default();
+    let viewport = app.viewport;
+
+    let menu_width = 15u16;
+    let menu_height = menu.items.len() as u16;
+
+    let mut x = menu.position.0;
+    let mut y = menu.position.1;
+
+    if x + menu_width > viewport.0 {
+        x = viewport.0.saturating_sub(menu_width);
+    }
+    if y + menu_height > viewport.1 {
+        y = viewport.1.saturating_sub(menu_height);
+    }
+
+    let menu_rect = Rect::new(x, y, menu_width, menu_height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.focus))
+        .style(Style::default().bg(Color::Black));
+    frame.render_widget(block, menu_rect);
+
+    let is_hovered = |idx: usize| -> bool {
+        if let Some(mouse) = app.last_mouse_event {
+            let mouse_y = mouse.row;
+            mouse_y == y + idx as u16
+        } else {
+            false
+        }
+    };
+
+    for (i, item) in menu.items.iter().enumerate() {
+        let item_y = y + i as u16;
+        let item_rect = Rect::new(x, item_y, menu_width, 1);
+
+        let label = match item {
+            ContextMenuItem::Attach => " Attach ",
+            ContextMenuItem::Delete => " Delete ",
+            ContextMenuItem::Move => " Move ",
+        };
+
+        let is_selected = i == menu.selected_index;
+        let hover = is_hovered(i);
+
+        let (bg, fg) = if is_selected || hover {
+            (theme.focus, Color::Black)
+        } else {
+            (Color::Black, theme.task)
+        };
+
+        let text = Paragraph::new(label)
+            .alignment(Alignment::Left)
+            .style(Style::default().bg(bg).fg(fg));
+        frame.render_widget(text, item_rect);
+    }
 }
 
 #[cfg(test)]
