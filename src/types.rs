@@ -32,7 +32,6 @@ pub struct Task {
     pub category_id: Uuid,
     pub position: i64,
     pub tmux_session_name: Option<String>,
-    pub opencode_session_id: Option<String>,
     pub worktree_path: Option<String>,
     pub tmux_status: String,
     pub status_source: String,
@@ -48,7 +47,6 @@ pub enum SessionState {
     Waiting,
     Idle,
     Dead,
-    Unknown,
 }
 
 impl SessionState {
@@ -58,7 +56,6 @@ impl SessionState {
             SessionState::Waiting => "waiting",
             SessionState::Idle => "idle",
             SessionState::Dead => "dead",
-            SessionState::Unknown => "unknown",
         }
     }
 }
@@ -66,7 +63,6 @@ impl SessionState {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub enum SessionStatusSource {
     Server,
-    Tmux,
     None,
 }
 
@@ -74,7 +70,6 @@ impl SessionStatusSource {
     pub fn as_str(self) -> &'static str {
         match self {
             SessionStatusSource::Server => "server",
-            SessionStatusSource::Tmux => "tmux",
             SessionStatusSource::None => "none",
         }
     }

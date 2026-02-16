@@ -12,6 +12,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use opencode_kanban::{
     app::App,
     input::event_to_message,
+    logging::{init_logging, print_log_location},
     tmux::{ensure_tmux_installed, tmux_session_exists},
     ui,
 };
@@ -25,18 +26,25 @@ use opencode_kanban::{
     author
 )]
 struct Cli {
-    /// Project name to open directly
     #[arg(short, long, value_name = "PROJECT")]
     project: Option<String>,
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let log_path = init_logging().expect("Failed to initialize logging");
+    install_panic_hook_with_log(log_path.clone());
+
+    let result = run_app();
+
+    print_log_location(&log_path);
+
+    result
+}
+
+fn run_app() -> Result<()> {
     validate_runtime_environment()?;
 
     let cli = Cli::parse();
-
-    install_panic_hook();
 
     let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
@@ -44,16 +52,28 @@ fn main() -> Result<()> {
     let project_name = cli.project.as_deref();
     let mut app = App::new(project_name)?;
 
+    let mut last_tick = std::time::Instant::now();
+    let tick_rate = Duration::from_millis(500);
+
     while !app.should_quit() {
         terminal
             .draw(|frame| ui::render(frame, &mut app))
             .context("failed to render frame")?;
 
-        if event::poll(Duration::from_millis(100)).context("failed to poll events")? {
+        let timeout = tick_rate
+            .checked_sub(last_tick.elapsed())
+            .unwrap_or_else(|| Duration::from_secs(0));
+
+        if event::poll(timeout.min(Duration::from_millis(100))).context("failed to poll events")? {
             let event = event::read().context("failed to read terminal event")?;
             if let Some(message) = event_to_message(event) {
                 app.update(message)?;
             }
+        }
+
+        if last_tick.elapsed() >= tick_rate {
+            app.update(opencode_kanban::app::Message::Tick)?;
+            last_tick = std::time::Instant::now();
         }
     }
 
@@ -112,10 +132,15 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     Terminal::new(backend).context("failed to create terminal")
 }
 
-fn install_panic_hook() {
+fn install_panic_hook_with_log(log_path: std::path::PathBuf) {
     let previous_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
         let _ = restore_terminal();
+        eprintln!();
+        eprintln!("═══════════════════════════════════════════════════════════════");
+        eprintln!("  📝 Log file: {}", log_path.display());
+        eprintln!("═══════════════════════════════════════════════════════════════");
+        eprintln!();
         previous_hook(panic_info);
     }));
 }

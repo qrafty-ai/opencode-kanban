@@ -4,6 +4,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
+use urlencoding::encode;
 
 use crate::types::{SessionState, SessionStatus, SessionStatusError, SessionStatusSource};
 
@@ -42,15 +43,52 @@ impl ServerStatusProvider {
         Self { config }
     }
 
-    fn fetch_all_statuses(
-        &self,
-        fetched_at: SystemTime,
-    ) -> Result<HashMap<String, SessionStatus>, SessionStatusError> {
+    pub fn list_all_sessions(&self) -> Result<Vec<(String, String)>, SessionStatusError> {
         let mut stream = self.connect()?;
 
         let request = format!(
-            "GET /session/status HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
+            "GET /session HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
             self.config.hostname, self.config.port
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|err| map_io_error("SERVER_WRITE_FAILED", err))?;
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .map_err(|err| map_io_error("SERVER_READ_FAILED", err))?;
+
+        let (status_code, body) = parse_http_response(&response)?;
+        if status_code == 401 {
+            return Err(SessionStatusError {
+                code: "SERVER_AUTH_ERROR".to_string(),
+                message: "OpenCode server rejected session list with HTTP 401".to_string(),
+            });
+        }
+        if status_code != 200 {
+            return Err(SessionStatusError {
+                code: "SERVER_HTTP_ERROR".to_string(),
+                message: format!("OpenCode server returned HTTP {status_code} for /session"),
+            });
+        }
+
+        parse_sessions_body(body)
+    }
+
+    pub fn fetch_all_statuses(
+        &self,
+        fetched_at: SystemTime,
+        directory: Option<&str>,
+    ) -> Result<HashMap<String, SessionStatus>, SessionStatusError> {
+        let mut stream = self.connect()?;
+
+        let directory_param = directory
+            .map(|d| format!("?directory={}", encode(d)))
+            .unwrap_or_default();
+        let request = format!(
+            "GET /session/status{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
+            directory_param, self.config.hostname, self.config.port
         );
         stream
             .write_all(request.as_bytes())
@@ -128,7 +166,7 @@ impl StatusProvider for ServerStatusProvider {
         }
 
         let fetched_at = SystemTime::now();
-        match self.fetch_all_statuses(fetched_at) {
+        match self.fetch_all_statuses(fetched_at, None) {
             Ok(status_map) => session_ids
                 .iter()
                 .map(|session_id| {
@@ -216,19 +254,58 @@ fn parse_status_body(
     Ok(statuses)
 }
 
+fn parse_sessions_body(body: &str) -> Result<Vec<(String, String)>, SessionStatusError> {
+    let payload: Value = serde_json::from_str(body).map_err(|err| SessionStatusError {
+        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+        message: format!("failed to parse /session response JSON: {err}"),
+    })?;
+
+    let array = payload.as_array().ok_or_else(|| SessionStatusError {
+        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+        message: "expected /session response to be a JSON array".to_string(),
+    })?;
+
+    let mut sessions = Vec::new();
+    for item in array {
+        let obj = item.as_object().ok_or_else(|| SessionStatusError {
+            code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+            message: "expected /session array entries to be objects".to_string(),
+        })?;
+
+        let Some(session_id) = obj.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let directory = obj.get("directory").and_then(|v| v.as_str()).unwrap_or("");
+
+        sessions.push((session_id.to_string(), directory.to_string()));
+    }
+
+    Ok(sessions)
+}
+
 fn parse_session_state(value: &Value) -> Result<SessionState, &'static str> {
     if let Some(raw) = value.as_str() {
         return parse_state_str(raw);
     }
 
     if let Some(obj) = value.as_object() {
+        // OpenCode format: { "type": "idle" | "busy" | "retry" }
+        if let Some(typ) = obj.get("type").and_then(Value::as_str) {
+            return match typ {
+                "idle" => Ok(SessionState::Idle),
+                "busy" => Ok(SessionState::Running),
+                "retry" => Ok(SessionState::Waiting),
+                _ => Err("unrecognized session type value"),
+            };
+        }
+        // Legacy format: { "state": "running" } or { "status": "running" }
         if let Some(raw) = obj.get("state").and_then(Value::as_str) {
             return parse_state_str(raw);
         }
         if let Some(raw) = obj.get("status").and_then(Value::as_str) {
             return parse_state_str(raw);
         }
-        return Err("expected object entry to contain `state` or `status` string");
+        return Err("expected object entry to contain `type`, `state`, or `status` string");
     }
 
     Err("expected status entry to be a string or object")
@@ -241,14 +318,14 @@ fn parse_state_str(state: &str) -> Result<SessionState, &'static str> {
         "waiting" | "blocked" | "prompt" | "paused" => Ok(SessionState::Waiting),
         "idle" | "ready" => Ok(SessionState::Idle),
         "dead" | "stopped" | "offline" | "completed" => Ok(SessionState::Dead),
-        "unknown" => Ok(SessionState::Unknown),
+        "unknown" => Ok(SessionState::Idle),
         _ => Err("unrecognized session state value"),
     }
 }
 
 fn status_with_error(fetched_at: SystemTime, error: SessionStatusError) -> SessionStatus {
     SessionStatus {
-        state: SessionState::Unknown,
+        state: SessionState::Idle,
         source: SessionStatusSource::None,
         fetched_at,
         error: Some(error),
@@ -326,7 +403,7 @@ mod tests {
 
         let missing = &results[1].1;
         assert_eq!(missing.source, SessionStatusSource::None);
-        assert_eq!(missing.state, SessionState::Unknown);
+        assert_eq!(missing.state, SessionState::Idle);
         assert_eq!(
             missing.error.as_ref().map(|err| err.code.as_str()),
             Some("SERVER_STATUS_MISSING")
