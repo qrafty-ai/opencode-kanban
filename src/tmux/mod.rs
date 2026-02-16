@@ -4,7 +4,7 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 const TMUX_SOCKET: &str = "";
 
