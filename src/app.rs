@@ -22,7 +22,7 @@ use crate::git::{
 };
 use crate::opencode::{
     OpenCodeServerManager, ServerStatusProvider, Status, StatusProvider, TmuxStatusProvider,
-    ensure_server_ready, opencode_attach_command,
+    ensure_server_ready, opencode_attach_command, opencode_is_running_in_session,
 };
 use crate::projects::{self, ProjectInfo};
 use crate::tmux::{
@@ -2024,23 +2024,18 @@ fn attach_task_with_runtime(
     if let Some(session_name) = task.tmux_session_name.as_deref()
         && runtime.session_exists(session_name)
     {
-        let observed_status = runtime.detect_status(session_name);
-        db.update_task_status(task.id, observed_status.state.as_str())?;
-
-        if matches!(observed_status.state, Status::Dead | Status::Idle) {
+        if !opencode_is_running_in_session(session_name) {
             let command = opencode_command(None);
             runtime.send_command(session_name, &command)?;
-            db.update_task_status(task.id, Status::Idle.as_str())?;
         }
-
         runtime.switch_client(session_name)?;
         return Ok(AttachTaskResult::Attached);
     }
 
-    let Some(worktree_path) = task.worktree_path.as_deref() else {
+    let Some(worktree_path_str) = task.worktree_path.as_deref() else {
         return Ok(AttachTaskResult::WorktreeNotFound);
     };
-    let worktree_path = Path::new(worktree_path);
+    let worktree_path = Path::new(worktree_path_str);
     if !runtime.worktree_exists(worktree_path) {
         return Ok(AttachTaskResult::WorktreeNotFound);
     }
@@ -2063,6 +2058,7 @@ fn attach_task_with_runtime(
     )?;
     db.update_task_status(task.id, Status::Idle.as_str())?;
 
+    runtime.switch_client(&session_name)?;
     Ok(AttachTaskResult::Attached)
 }
 
