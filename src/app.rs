@@ -135,11 +135,6 @@ pub struct RepoUnavailableDialogState {
     pub repo_path: String,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ConfirmQuitDialogState {
-    pub active_session_count: usize,
-}
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ActiveDialog {
@@ -152,7 +147,6 @@ pub enum ActiveDialog {
     MoveTask(MoveTaskDialogState),
     WorktreeNotFound(WorktreeNotFoundDialogState),
     RepoUnavailable(RepoUnavailableDialogState),
-    ConfirmQuit(ConfirmQuitDialogState),
     Help,
 }
 
@@ -188,8 +182,6 @@ pub enum Message {
     WorktreeNotFoundRecreate,
     WorktreeNotFoundMarkBroken,
     RepoUnavailableDismiss,
-    ConfirmQuit,
-    CancelQuit,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -543,8 +535,6 @@ impl App {
             Message::WorktreeNotFoundMarkBroken => self.mark_worktree_missing_as_broken()?,
             Message::RepoUnavailableDismiss => self.active_dialog = ActiveDialog::None,
             Message::CreateTask => self.confirm_new_task()?,
-            Message::ConfirmQuit => self.should_quit = true,
-            Message::CancelQuit => self.active_dialog = ActiveDialog::None,
             Message::DeleteTaskToggleKillTmux
             | Message::DeleteTaskToggleRemoveWorktree
             | Message::DeleteTaskToggleDeleteBranch => {}
@@ -569,16 +559,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('?') => self.active_dialog = ActiveDialog::Help,
-            KeyCode::Char('q') => {
-                let active_session_count = self.active_session_count();
-                if active_session_count > 0 {
-                    self.active_dialog = ActiveDialog::ConfirmQuit(ConfirmQuitDialogState {
-                        active_session_count,
-                    });
-                } else {
-                    self.should_quit = true;
-                }
-            }
+            KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('h') | KeyCode::Left => {
                 self.update(Message::NavigateLeft)?;
             }
@@ -922,13 +903,6 @@ impl App {
                     follow_up = Some(Message::RepoUnavailableDismiss);
                 }
             }
-            ActiveDialog::ConfirmQuit(_) => match key.code {
-                KeyCode::Esc => follow_up = Some(Message::CancelQuit),
-                KeyCode::Left | KeyCode::Char('h') => follow_up = Some(Message::CancelQuit),
-                KeyCode::Right | KeyCode::Char('l') => follow_up = Some(Message::ConfirmQuit),
-                KeyCode::Enter => follow_up = Some(Message::ConfirmQuit),
-                _ => {}
-            },
             ActiveDialog::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
                     self.active_dialog = ActiveDialog::None;
@@ -1370,14 +1344,6 @@ impl App {
         Ok(())
     }
 
-    fn active_session_count(&self) -> usize {
-        self.tasks
-            .iter()
-            .filter_map(|task| task.tmux_session_name.as_deref())
-            .filter(|session_name| tmux_session_exists(session_name))
-            .count()
-    }
-
     fn maybe_show_tmux_mouse_hint(&mut self) {
         if self.mouse_hint_shown || self.mouse_seen {
             return;
@@ -1396,7 +1362,14 @@ impl Drop for App {
     fn drop(&mut self) {
         self.poller_stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.poller_thread.take() {
-            let _ = handle.join();
+            let deadline = Instant::now() + Duration::from_millis(200);
+            while !handle.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -1619,7 +1592,7 @@ fn create_task_pipeline_with_runtime(
         });
 
         runtime
-            .tmux_create_session(&session_name, &worktree_path, Some("opencode"))
+            .tmux_create_session(&session_name, &worktree_path, None)
             .context("tmux session creation failed")?;
         created_session_name = Some(session_name.clone());
 
@@ -1772,14 +1745,14 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
                 let db = match Database::open(&db_path) {
                     Ok(db) => db,
                     Err(_) => {
-                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        interruptible_sleep(Duration::from_secs(3), &stop).await;
                         continue;
                     }
                 };
 
                 let tasks = db.list_tasks().unwrap_or_default();
                 if tasks.is_empty() {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    interruptible_sleep(Duration::from_secs(3), &stop).await;
                     continue;
                 }
 
@@ -1799,7 +1772,7 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
 
                     if !repo_available {
                         let _ = db.update_task_status(task.id, STATUS_REPO_UNAVAILABLE);
-                        tokio::time::sleep(staggered_poll_delay(index)).await;
+                        interruptible_sleep(staggered_poll_delay(index), &stop).await;
                         continue;
                     }
 
@@ -1812,7 +1785,7 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
                         let _ = db.update_task_status(task.id, status.as_str());
                     }
 
-                    tokio::time::sleep(staggered_poll_delay(index)).await;
+                    interruptible_sleep(staggered_poll_delay(index), &stop).await;
                 }
             }
         });
@@ -1842,6 +1815,16 @@ fn current_jitter_ms(task_index: usize) -> u64 {
         .map(|d| d.subsec_nanos() as u64)
         .unwrap_or(0);
     (nanos + task_index as u64 * 97) % 700
+}
+
+async fn interruptible_sleep(duration: Duration, stop: &AtomicBool) {
+    let chunk = Duration::from_millis(100);
+    let mut remaining = duration;
+    while remaining > Duration::ZERO && !stop.load(Ordering::Relaxed) {
+        let sleep_duration = remaining.min(chunk);
+        tokio::time::sleep(sleep_duration).await;
+        remaining = remaining.saturating_sub(sleep_duration);
+    }
 }
 
 fn default_db_path() -> Result<PathBuf> {
