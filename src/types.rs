@@ -38,3 +38,10 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct CommandFrequency {
+    pub command_id: String,
+    pub use_count: i64,
+    pub last_used: String,
+}

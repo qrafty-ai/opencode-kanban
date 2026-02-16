@@ -1,4 +1,5 @@
 pub mod app;
+pub mod command_palette;
 pub mod db;
 pub mod git;
 pub mod input;
