@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use crate::db::Database;
 use crate::git::{
-    derive_worktree_path, git_create_worktree, git_delete_branch, git_detect_default_branch,
-    git_fetch, git_is_valid_repo, git_remove_worktree,
+    derive_worktree_path, git_check_branch_up_to_date, git_create_worktree, git_delete_branch,
+    git_detect_default_branch, git_fetch, git_is_valid_repo, git_remove_worktree,
 };
 use crate::opencode::{Status, opencode_detect_status, opencode_is_running_in_session};
 use crate::tmux::{
@@ -34,6 +34,7 @@ pub enum NewTaskField {
     Branch,
     Base,
     Title,
+    EnsureBaseUpToDate,
     Create,
     Cancel,
 }
@@ -45,6 +46,7 @@ pub struct NewTaskDialogState {
     pub branch_input: String,
     pub base_input: String,
     pub title_input: String,
+    pub ensure_base_up_to_date: bool,
     pub loading_message: Option<String>,
     pub focused_field: NewTaskField,
 }
@@ -251,6 +253,7 @@ trait CreateTaskRuntime {
     fn git_detect_default_branch(&self, repo_path: &Path) -> String;
     fn git_fetch(&self, repo_path: &Path) -> Result<()>;
     fn git_validate_branch(&self, repo_path: &Path, branch_name: &str) -> Result<()>;
+    fn git_check_branch_up_to_date(&self, repo_path: &Path, base_ref: &str) -> Result<()>;
     fn git_create_worktree(
         &self,
         repo_path: &Path,
@@ -305,6 +308,10 @@ impl CreateTaskRuntime for RealCreateTaskRuntime {
                 String::from_utf8_lossy(&output.stderr).trim()
             )
         }
+    }
+
+    fn git_check_branch_up_to_date(&self, repo_path: &Path, base_ref: &str) -> Result<()> {
+        git_check_branch_up_to_date(repo_path, base_ref)
     }
 
     fn git_create_worktree(
@@ -488,6 +495,7 @@ impl App {
                     branch_input: String::new(),
                     base_input: default_base,
                     title_input: String::new(),
+                    ensure_base_up_to_date: true,
                     loading_message: None,
                     focused_field: NewTaskField::Repo,
                 });
@@ -679,6 +687,7 @@ impl App {
                     NewTaskField::Branch,
                     NewTaskField::Base,
                     NewTaskField::Title,
+                    NewTaskField::EnsureBaseUpToDate,
                     NewTaskField::Create,
                     NewTaskField::Cancel,
                 ];
@@ -727,6 +736,11 @@ impl App {
                     }
                     KeyCode::Right if state.focused_field == NewTaskField::Cancel => {
                         state.focused_field = NewTaskField::Create;
+                    }
+                    KeyCode::Char(' ') | KeyCode::Enter
+                        if state.focused_field == NewTaskField::EnsureBaseUpToDate =>
+                    {
+                        state.ensure_base_up_to_date = !state.ensure_base_up_to_date;
                     }
                     KeyCode::Backspace => match state.focused_field {
                         NewTaskField::Repo => {
@@ -1570,6 +1584,12 @@ fn create_task_pipeline_with_runtime(
         warning = Some(message);
     }
 
+    if state.ensure_base_up_to_date {
+        runtime
+            .git_check_branch_up_to_date(&repo_path, &base_ref)
+            .context("base branch check failed")?;
+    }
+
     let worktrees_root = worktrees_root_for_repo(&repo_path);
     fs::create_dir_all(&worktrees_root).with_context(|| {
         format!(
@@ -1958,6 +1978,7 @@ mod tests {
             branch_input: "feature/create-flow".to_string(),
             base_input: "origin/main".to_string(),
             title_input: "Create flow task".to_string(),
+            ensure_base_up_to_date: false,
             loading_message: None,
             focused_field: NewTaskField::Create,
         };
@@ -1999,6 +2020,7 @@ mod tests {
             branch_input: "feature/create-flow-rollback".to_string(),
             base_input: "origin/main".to_string(),
             title_input: String::new(),
+            ensure_base_up_to_date: false,
             loading_message: None,
             focused_field: NewTaskField::Create,
         };
@@ -2052,6 +2074,13 @@ mod tests {
         fn git_validate_branch(&self, _repo_path: &Path, branch_name: &str) -> Result<()> {
             if branch_name.contains(' ') {
                 anyhow::bail!("invalid branch")
+            }
+            Ok(())
+        }
+
+        fn git_check_branch_up_to_date(&self, _repo_path: &Path, _base_ref: &str) -> Result<()> {
+            if *self.fail_fetch.borrow() {
+                anyhow::bail!("branch check failed")
             }
             Ok(())
         }
