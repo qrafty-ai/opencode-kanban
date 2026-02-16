@@ -7,12 +7,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::widgets::ScrollbarState;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
+use crate::command_palette::{CommandPaletteState, all_commands};
 use crate::db::Database;
 use crate::git::{
     derive_worktree_path, git_create_worktree, git_delete_branch, git_detect_default_branch,
@@ -141,10 +142,11 @@ pub struct ConfirmQuitDialogState {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ActiveDialog {
     None,
     NewTask(NewTaskDialogState),
+    CommandPalette(CommandPaletteState),
     CategoryInput(CategoryInputDialogState),
     DeleteCategory(DeleteCategoryDialogState),
     Error(ErrorDialogState),
@@ -167,6 +169,7 @@ pub enum Message {
     SelectDown,
     AttachSelectedTask,
     OpenNewTaskDialog,
+    OpenCommandPalette,
     DismissDialog,
     FocusColumn(usize),
     SelectTask(usize, usize),
@@ -190,6 +193,7 @@ pub enum Message {
     RepoUnavailableDismiss,
     ConfirmQuit,
     CancelQuit,
+    ExecuteCommand(String),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -500,6 +504,11 @@ impl App {
                     focused_field: NewTaskField::Repo,
                 });
             }
+            Message::OpenCommandPalette => {
+                let frequencies = self.db.get_command_frequencies().unwrap_or_default();
+                self.active_dialog =
+                    ActiveDialog::CommandPalette(CommandPaletteState::new(frequencies));
+            }
             Message::DismissDialog => self.active_dialog = ActiveDialog::None,
             Message::FocusColumn(index) => {
                 if index < self.categories.len() {
@@ -545,6 +554,35 @@ impl App {
             Message::CreateTask => self.confirm_new_task()?,
             Message::ConfirmQuit => self.should_quit = true,
             Message::CancelQuit => self.active_dialog = ActiveDialog::None,
+            Message::ExecuteCommand(command_id) => {
+                self.active_dialog = ActiveDialog::None;
+
+                match command_id.as_str() {
+                    "help" => self.active_dialog = ActiveDialog::Help,
+                    "quit" => {
+                        let active_session_count = self.active_session_count();
+                        if active_session_count > 0 {
+                            self.active_dialog =
+                                ActiveDialog::ConfirmQuit(ConfirmQuitDialogState {
+                                    active_session_count,
+                                });
+                        } else {
+                            self.should_quit = true;
+                        }
+                    }
+                    _ => {
+                        if let Some(message) = all_commands()
+                            .into_iter()
+                            .find(|command| command.id == command_id)
+                            .and_then(|command| command.message)
+                        {
+                            self.update(message)?;
+                        }
+                    }
+                }
+
+                let _ = self.db.increment_command_usage(&command_id);
+            }
             Message::DeleteTaskToggleKillTmux
             | Message::DeleteTaskToggleRemoveWorktree
             | Message::DeleteTaskToggleDeleteBranch => {}
@@ -569,6 +607,9 @@ impl App {
 
         match key.code {
             KeyCode::Char('?') => self.active_dialog = ActiveDialog::Help,
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.update(Message::OpenCommandPalette)?;
+            }
             KeyCode::Char('q') => {
                 let active_session_count = self.active_session_count();
                 if active_session_count > 0 {
@@ -831,6 +872,36 @@ impl App {
                     _ => {}
                 }
             }
+            ActiveDialog::CommandPalette(state) => match key.code {
+                KeyCode::Esc => self.active_dialog = ActiveDialog::None,
+                KeyCode::Enter => {
+                    follow_up = state.selected_command_id().map(Message::ExecuteCommand);
+                }
+                KeyCode::Up => state.move_selection(-1),
+                KeyCode::Down => state.move_selection(1),
+                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    state.move_selection(-1)
+                }
+                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    state.move_selection(1)
+                }
+                KeyCode::Backspace => {
+                    if state.query.is_empty() {
+                        self.active_dialog = ActiveDialog::None;
+                    } else {
+                        state.query.pop();
+                        state.update_query();
+                    }
+                }
+                KeyCode::Char(ch)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    state.query.push(ch);
+                    state.update_query();
+                }
+                _ => {}
+            },
             ActiveDialog::DeleteCategory(state) => match key.code {
                 KeyCode::Esc => self.active_dialog = ActiveDialog::None,
                 KeyCode::Left | KeyCode::Char('h') => {
@@ -1864,12 +1935,89 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Instant;
 
     use anyhow::Result;
+    use crossterm::event::{KeyCode, KeyEvent};
+    use ratatui::widgets::ScrollbarState;
+    use rusqlite::Connection;
     use tempfile::TempDir;
     use uuid::Uuid;
 
     use super::*;
+
+    fn build_test_app(db: Database) -> Result<App> {
+        let categories = db.list_categories()?;
+
+        Ok(App {
+            should_quit: false,
+            layout_epoch: 0,
+            viewport: (80, 24),
+            last_mouse_event: None,
+            db,
+            tasks: Vec::new(),
+            categories,
+            repos: Vec::new(),
+            focused_column: 0,
+            selected_task_per_column: HashMap::new(),
+            scroll_offset_per_column: HashMap::new(),
+            column_scroll_states: vec![ScrollbarState::default()],
+            active_dialog: ActiveDialog::None,
+            footer_notice: None,
+            hit_test_map: Vec::new(),
+            started_at: Instant::now(),
+            mouse_seen: false,
+            mouse_hint_shown: false,
+            poller_stop: Arc::new(AtomicBool::new(true)),
+            poller_thread: None,
+        })
+    }
+
+    fn test_app() -> Result<App> {
+        build_test_app(Database::open(":memory:")?)
+    }
+
+    #[test]
+    fn test_command_palette_backspace_on_empty_query_closes_palette() -> Result<()> {
+        let mut app = test_app()?;
+        app.active_dialog = ActiveDialog::CommandPalette(CommandPaletteState::new(HashMap::new()));
+
+        app.update(Message::Key(KeyEvent::from(KeyCode::Backspace)))?;
+
+        assert_eq!(app.active_dialog, ActiveDialog::None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_command_for_dialog_closes_palette_then_opens_dialog() -> Result<()> {
+        let mut app = test_app()?;
+        app.active_dialog = ActiveDialog::CommandPalette(CommandPaletteState::new(HashMap::new()));
+
+        app.update(Message::ExecuteCommand("new_task".to_string()))?;
+
+        assert!(matches!(app.active_dialog, ActiveDialog::NewTask(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_command_ignores_command_usage_db_failures() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("app.sqlite");
+        let db = Database::open(&db_path)?;
+        let mut app = build_test_app(db)?;
+
+        let conn = Connection::open(&db_path)?;
+        conn.execute("DROP TABLE command_frequency", [])?;
+
+        app.active_dialog = ActiveDialog::CommandPalette(CommandPaletteState::new(HashMap::new()));
+        let result = app.update(Message::ExecuteCommand("new_task".to_string()));
+
+        assert!(result.is_ok());
+        assert!(matches!(app.active_dialog, ActiveDialog::NewTask(_)));
+        Ok(())
+    }
 
     #[test]
     fn test_staggered_poll_delay_increases_per_task() {
@@ -2041,7 +2189,6 @@ mod tests {
     struct FakeCreateTaskRuntime {
         fail_fetch: RefCell<bool>,
         fail_tmux_create: RefCell<bool>,
-        fail_switch: RefCell<bool>,
         created_worktrees: RefCell<Vec<PathBuf>>,
         removed_worktrees: RefCell<Vec<PathBuf>>,
         sessions: RefCell<HashMap<String, bool>>,

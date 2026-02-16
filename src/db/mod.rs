@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 
-use std::{fs, path::Path, process::Command};
+use std::{collections::HashMap, fs, path::Path, process::Command};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use rusqlite::{Connection, params, types::Type};
 use uuid::Uuid;
 
-use crate::types::{Category, Repo, Task};
+use crate::types::{Category, CommandFrequency, Repo, Task};
 
 const DEFAULT_TMUX_STATUS: &str = "unknown";
 
@@ -295,6 +295,44 @@ impl Database {
         Ok(())
     }
 
+    pub fn increment_command_usage(&self, command_id: &str) -> Result<()> {
+        let now = now_iso();
+        self.conn
+            .execute(
+                "INSERT INTO command_frequency (command_id, use_count, last_used)
+                 VALUES (?1, 1, ?2)
+                 ON CONFLICT(command_id) DO UPDATE SET
+                     use_count = use_count + 1,
+                     last_used = ?2",
+                params![command_id, now],
+            )
+            .context("failed to increment command usage")?;
+        Ok(())
+    }
+
+    pub fn get_command_frequencies(&self) -> Result<HashMap<String, CommandFrequency>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT command_id, use_count, last_used FROM command_frequency ORDER BY use_count DESC",
+        )?;
+
+        let rows = stmt
+            .query_map(params![], |row| {
+                Ok(CommandFrequency {
+                    command_id: row.get(0)?,
+                    use_count: row.get(1)?,
+                    last_used: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load command frequencies")?;
+
+        let mut map = HashMap::new();
+        for freq in rows {
+            map.insert(freq.command_id.clone(), freq);
+        }
+        Ok(map)
+    }
+
     fn run_migrations(&self) -> Result<()> {
         self.conn
             .execute_batch(
@@ -329,6 +367,12 @@ impl Database {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(repo_id, branch)
+                );
+
+                CREATE TABLE IF NOT EXISTS command_frequency (
+                    command_id TEXT PRIMARY KEY,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    last_used TEXT NOT NULL
                 );",
             )
             .context("failed to run sqlite migrations")?;
@@ -667,6 +711,64 @@ mod tests {
         assert!(delete_in_use_category.is_err());
 
         std::fs::remove_dir_all(&repo_dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_increment_new_command() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        db.increment_command_usage("create-worktree")?;
+
+        let freqs = db.get_command_frequencies()?;
+        assert_eq!(freqs.len(), 1);
+        let freq = freqs.get("create-worktree").unwrap();
+        assert_eq!(freq.use_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_increment_existing_command() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        db.increment_command_usage("create-worktree")?;
+        db.increment_command_usage("create-worktree")?;
+        db.increment_command_usage("create-worktree")?;
+
+        let freqs = db.get_command_frequencies()?;
+        let freq = freqs.get("create-worktree").unwrap();
+        assert_eq!(freq.use_count, 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_frequencies_empty() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        let freqs = db.get_command_frequencies()?;
+        assert!(freqs.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_frequencies_with_data() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        db.increment_command_usage("cmd-a")?;
+        db.increment_command_usage("cmd-a")?;
+        db.increment_command_usage("cmd-b")?;
+
+        let freqs = db.get_command_frequencies()?;
+        assert_eq!(freqs.len(), 2);
+
+        let cmd_a = freqs.get("cmd-a").unwrap();
+        let cmd_b = freqs.get("cmd-b").unwrap();
+        assert_eq!(cmd_a.use_count, 2);
+        assert_eq!(cmd_b.use_count, 1);
+
         Ok(())
     }
 
