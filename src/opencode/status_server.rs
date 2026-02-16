@@ -4,6 +4,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
+use urlencoding::encode;
 
 use crate::types::{SessionState, SessionStatus, SessionStatusError, SessionStatusSource};
 
@@ -78,12 +79,16 @@ impl ServerStatusProvider {
     pub fn fetch_all_statuses(
         &self,
         fetched_at: SystemTime,
+        directory: Option<&str>,
     ) -> Result<HashMap<String, SessionStatus>, SessionStatusError> {
         let mut stream = self.connect()?;
 
+        let directory_param = directory
+            .map(|d| format!("?directory={}", encode(d)))
+            .unwrap_or_default();
         let request = format!(
-            "GET /session/status HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
-            self.config.hostname, self.config.port
+            "GET /session/status{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
+            directory_param, self.config.hostname, self.config.port
         );
         stream
             .write_all(request.as_bytes())
@@ -161,7 +166,7 @@ impl StatusProvider for ServerStatusProvider {
         }
 
         let fetched_at = SystemTime::now();
-        match self.fetch_all_statuses(fetched_at) {
+        match self.fetch_all_statuses(fetched_at, None) {
             Ok(status_map) => session_ids
                 .iter()
                 .map(|session_id| {

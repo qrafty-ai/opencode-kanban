@@ -2,13 +2,12 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 use std::sync::LazyLock;
-use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 
-use crate::tmux::{tmux_capture_pane, tmux_get_pane_pid};
-use crate::types::{SessionState, SessionStatus, SessionStatusError, SessionStatusSource};
+use crate::tmux::tmux_get_pane_pid;
+use crate::types::SessionStatus;
 
 pub mod server;
 pub mod status_server;
@@ -61,95 +60,10 @@ pub trait StatusProvider {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct TmuxStatusProvider;
-
-impl StatusProvider for TmuxStatusProvider {
-    fn get_status(&self, session_id: &str) -> SessionStatus {
-        if !opencode_is_running_in_session(session_id) {
-            return SessionStatus {
-                state: SessionState::Dead,
-                source: SessionStatusSource::Tmux,
-                fetched_at: SystemTime::now(),
-                error: None,
-            };
-        }
-
-        match tmux_capture_pane(session_id, 50) {
-            Ok(pane) => SessionStatus {
-                state: opencode_detect_status(&pane),
-                source: SessionStatusSource::Tmux,
-                fetched_at: SystemTime::now(),
-                error: None,
-            },
-            Err(err) => SessionStatus {
-                state: SessionState::Idle,
-                source: SessionStatusSource::Tmux,
-                fetched_at: SystemTime::now(),
-                error: Some(SessionStatusError {
-                    code: "TMUX_CAPTURE_FAILED".to_string(),
-                    message: err.to_string(),
-                }),
-            },
-        }
-    }
-}
-
-#[derive(Debug)]
-struct PatternConfig {
-    running: Regex,
-    waiting: Regex,
-    idle: Regex,
-}
-
-static ANSI_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").expect("valid ansi regex"));
-
 static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
         .expect("valid uuid regex")
 });
-
-static STATUS_PATTERNS: LazyLock<PatternConfig> = LazyLock::new(PatternConfig::from_env);
-
-impl PatternConfig {
-    fn from_env() -> Self {
-        let running = env_or_default(
-            "OPENCODE_STATUS_RUNNING_RE",
-            r"(?i)(thinking|executing|processing|esc\s+to\s+interrupt|\bworking\b|\bloading\b)",
-        );
-        let waiting = env_or_default(
-            "OPENCODE_STATUS_WAITING_RE",
-            r"(?i)(press\s+enter\s+to\s+continue|continue\?\s*\[y/n\]|confirm|yes/no|allow\s+once|allow\s+always)",
-        );
-        let idle = env_or_default(
-            "OPENCODE_STATUS_IDLE_RE",
-            r"(?i)(i['’]?m\s+ready|what\s+would\s+you\s+like\s+to\s+do\?|(^|\s)>\s*$|(^|\s)\$\s*$)",
-        );
-
-        Self {
-            running: Regex::new(&running).unwrap_or_else(|_| {
-                Regex::new(r"(?i)(thinking|executing|processing)").expect("valid fallback running")
-            }),
-            waiting: Regex::new(&waiting).unwrap_or_else(|_| {
-                Regex::new(r"(?i)(press\s+enter\s+to\s+continue|continue\?)")
-                    .expect("valid fallback waiting")
-            }),
-            idle: Regex::new(&idle).unwrap_or_else(|_| {
-                Regex::new(r"(?i)(i['’]?m\s+ready|what\s+would\s+you\s+like\s+to\s+do\?)")
-                    .expect("valid fallback idle")
-            }),
-        }
-    }
-}
-
-fn env_or_default(key: &str, default: &str) -> String {
-    env::var(key)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| default.to_string())
-}
 
 pub fn opencode_launch(working_dir: &Path, session_id: Option<String>) -> Result<String> {
     let binary = opencode_binary();
@@ -238,40 +152,6 @@ pub fn opencode_resume_session(session_id: &str, working_dir: &Path) -> Result<(
     )
 }
 
-pub fn opencode_detect_status(pane_output: &str) -> Status {
-    let cleaned = strip_ansi(pane_output);
-    let tail = cleaned
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(str::trim)
-        .rev()
-        .take(30)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if tail.trim().is_empty()
-        || tail.contains("connection refused")
-        || tail.contains("no server running")
-    {
-        return Status::Dead;
-    }
-
-    if STATUS_PATTERNS.waiting.is_match(&tail) {
-        return Status::Waiting;
-    }
-    if STATUS_PATTERNS.running.is_match(&tail) {
-        return Status::Running;
-    }
-    if STATUS_PATTERNS.idle.is_match(&tail) {
-        return Status::Idle;
-    }
-
-    Status::Idle
-}
-
 pub fn opencode_is_running_in_session(tmux_session_name: &str) -> bool {
     let Some(pane_pid) = tmux_get_pane_pid(tmux_session_name) else {
         return false;
@@ -283,24 +163,10 @@ pub fn opencode_is_running_in_session(tmux_session_name: &str) -> bool {
 
     if let Ok(output) = process_output {
         let command_line = String::from_utf8_lossy(&output.stdout).to_lowercase();
-        if command_line.contains("opencode") {
-            return true;
-        }
-    }
-
-    let pane = tmux_capture_pane(tmux_session_name, 50).ok();
-    if let Some(content) = pane {
-        return matches!(
-            opencode_detect_status(&content),
-            Status::Running | Status::Waiting | Status::Idle
-        );
+        return command_line.contains("opencode");
     }
 
     false
-}
-
-fn strip_ansi(content: &str) -> String {
-    ANSI_RE.replace_all(content, "").to_string()
 }
 
 fn opencode_binary() -> String {
@@ -323,11 +189,14 @@ fn ensure_opencode_available(binary: &str) -> Result<()> {
     }
 }
 
-pub fn opencode_attach_command(session_id: Option<&str>) -> String {
+pub fn opencode_attach_command(session_id: Option<&str>, worktree_dir: Option<&str>) -> String {
     let url = DEFAULT_SERVER_URL;
+    let dir_arg = worktree_dir
+        .map(|d| format!(" --dir {}", d))
+        .unwrap_or_default();
     match session_id {
-        Some(id) => format!("opencode attach {url} --session {id}"),
-        None => format!("opencode attach {url}"),
+        Some(id) => format!("opencode attach {url} --session {id}{dir_arg}"),
+        None => format!("opencode attach {url}{dir_arg}"),
     }
 }
 
@@ -392,43 +261,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::types::{SessionState, SessionStatusError, SessionStatusSource};
 
     static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    #[test]
-    fn test_detect_running_status() {
-        let pane = "OpenCode\nthinking about refactor\nexecuting tool call";
-        assert_eq!(opencode_detect_status(pane), Status::Running);
-    }
-
-    #[test]
-    fn test_detect_waiting_status() {
-        let pane = "Need confirmation\nContinue? [y/n]";
-        assert_eq!(opencode_detect_status(pane), Status::Waiting);
-    }
-
-    #[test]
-    fn test_detect_idle_status() {
-        let pane = "I'm ready\nWhat would you like to do?";
-        assert_eq!(opencode_detect_status(pane), Status::Idle);
-    }
-
-    #[test]
-    fn test_detect_dead_status_empty_pane() {
-        assert_eq!(opencode_detect_status("\n\n"), Status::Dead);
-    }
-
-    #[test]
-    fn test_detect_status_strips_ansi_sequences() {
-        let pane = "\x1b[32mthinking\x1b[0m";
-        assert_eq!(opencode_detect_status(pane), Status::Running);
-    }
-
-    #[test]
-    fn test_detect_status_waiting_precedes_running() {
-        let pane = "thinking about next action\nContinue? [y/n]";
-        assert_eq!(opencode_detect_status(pane), Status::Waiting);
-    }
 
     #[test]
     fn test_status_provider_list_statuses_preserves_order_and_metadata() {
@@ -447,7 +282,7 @@ mod tests {
                     "b".to_string(),
                     SessionStatus {
                         state: Status::Dead,
-                        source: SessionStatusSource::Tmux,
+                        source: SessionStatusSource::Server,
                         fetched_at: SystemTime::UNIX_EPOCH,
                         error: Some(SessionStatusError {
                             code: "TEST".to_string(),
@@ -462,7 +297,7 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].0, "b");
         assert_eq!(listed[0].1.state, Status::Dead);
-        assert_eq!(listed[0].1.source, SessionStatusSource::Tmux);
+        assert_eq!(listed[0].1.source, SessionStatusSource::Server);
         assert_eq!(
             listed[0].1.error.as_ref().map(|err| err.code.as_str()),
             Some("TEST")

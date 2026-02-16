@@ -21,17 +21,15 @@ use crate::git::{
     git_detect_default_branch, git_fetch, git_is_valid_repo, git_remove_worktree,
 };
 use crate::opencode::{
-    OpenCodeServerManager, ServerStatusProvider, Status, StatusProvider, TmuxStatusProvider,
-    ensure_server_ready, opencode_attach_command, opencode_is_running_in_session,
+    OpenCodeServerManager, ServerStatusProvider, Status, ensure_server_ready,
+    opencode_attach_command, opencode_is_running_in_session,
 };
 use crate::projects::{self, ProjectInfo};
 use crate::tmux::{
     sanitize_session_name_for_project, tmux_capture_pane, tmux_create_session, tmux_kill_session,
     tmux_send_keys, tmux_session_exists, tmux_switch_client,
 };
-use crate::types::{
-    Category, Repo, SessionState, SessionStatus, SessionStatusError, SessionStatusSource, Task,
-};
+use crate::types::{Category, Repo, SessionStatus, SessionStatusSource, Task};
 
 pub const STATUS_REPO_UNAVAILABLE: &str = "repo_unavailable";
 pub const STATUS_BROKEN: &str = "broken";
@@ -264,10 +262,9 @@ enum AttachTaskResult {
 }
 
 trait RecoveryRuntime {
-    fn repo_exists(&self, repo_path: &Path) -> bool;
+    fn repo_exists(&self, path: &Path) -> bool;
     fn worktree_exists(&self, worktree_path: &Path) -> bool;
     fn session_exists(&self, session_name: &str) -> bool;
-    fn detect_status(&self, session_name: &str) -> SessionStatus;
     fn create_session(&self, session_name: &str, working_dir: &Path, command: &str) -> Result<()>;
     fn send_command(&self, session_name: &str, command: &str) -> Result<()>;
     fn switch_client(&self, session_name: &str) -> Result<()>;
@@ -286,10 +283,6 @@ impl RecoveryRuntime for RealRecoveryRuntime {
 
     fn session_exists(&self, session_name: &str) -> bool {
         tmux_session_exists(session_name)
-    }
-
-    fn detect_status(&self, session_name: &str) -> SessionStatus {
-        detect_session_status(session_name)
     }
 
     fn create_session(&self, session_name: &str, working_dir: &Path, command: &str) -> Result<()> {
@@ -597,6 +590,8 @@ impl App {
             Message::Key(key) => self.handle_key(key)?,
             Message::Mouse(mouse) => self.handle_mouse(mouse)?,
             Message::Tick => {
+                self.refresh_data()?;
+
                 if self.view_mode == ViewMode::SidePanel {
                     let Some(task) = self.selected_task() else {
                         self.current_log_buffer = None;
@@ -1942,7 +1937,7 @@ fn observed_state_for_task(
     ObservedTaskState {
         repo_available: true,
         session_exists: true,
-        session_status: Some(runtime.detect_status(session_name)),
+        session_status: None,
     }
 }
 
@@ -1973,7 +1968,7 @@ fn reconcile_desired_vs_observed(
         .session_status
         .as_ref()
         .map(|status| status.state.as_str().to_string())
-        .unwrap_or_else(|| Status::Idle.as_str().to_string())
+        .unwrap_or_else(|| current_status.to_string())
 }
 
 fn reconcile_startup_tasks(
@@ -2025,7 +2020,7 @@ fn attach_task_with_runtime(
         && runtime.session_exists(session_name)
     {
         if !opencode_is_running_in_session(session_name) {
-            let command = opencode_command(None);
+            let command = opencode_command(None, task.worktree_path.as_deref());
             runtime.send_command(session_name, &command)?;
         }
         runtime.switch_client(session_name)?;
@@ -2048,7 +2043,7 @@ fn attach_task_with_runtime(
         runtime,
     );
 
-    let command = opencode_command(None);
+    let command = opencode_command(None, task.worktree_path.as_deref());
 
     runtime.create_session(&session_name, worktree_path, &command)?;
     db.update_task_tmux(
@@ -2212,8 +2207,8 @@ fn repo_default_base(repo: &Repo, runtime: &impl CreateTaskRuntime) -> String {
         .unwrap_or_else(|| runtime.git_detect_default_branch(Path::new(&repo.path)))
 }
 
-fn opencode_command(session_id: Option<&str>) -> String {
-    opencode_attach_command(session_id)
+fn opencode_command(session_id: Option<&str>, worktree_dir: Option<&str>) -> String {
+    opencode_attach_command(session_id, worktree_dir)
 }
 
 fn next_available_session_name(
@@ -2278,14 +2273,14 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
                 let db = match Database::open(&db_path) {
                     Ok(db) => db,
                     Err(_) => {
-                        interruptible_sleep(Duration::from_secs(3), &stop).await;
+                        interruptible_sleep(Duration::from_secs(1), &stop).await;
                         continue;
                     }
                 };
 
                 let tasks = db.list_tasks().unwrap_or_default();
                 if tasks.is_empty() {
-                    interruptible_sleep(Duration::from_secs(3), &stop).await;
+                    interruptible_sleep(Duration::from_secs(1), &stop).await;
                     continue;
                 }
 
@@ -2295,17 +2290,6 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
                 let server_provider = ServerStatusProvider::default();
 
                 let fetched_at = SystemTime::now();
-                let directory_to_status: HashMap<String, SessionStatus> =
-                    match fetch_directory_statuses(&server_provider, fetched_at) {
-                        Ok(statuses) => statuses,
-                        Err(err) => {
-                            tracing::warn!(
-                                "Failed to fetch directory statuses from server: {:?}",
-                                err
-                            );
-                            HashMap::new()
-                        }
-                    };
 
                 for (index, task) in tasks.iter().enumerate() {
                     if stop.load(Ordering::Relaxed) {
@@ -2323,33 +2307,37 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
                         continue;
                     }
 
-                    if let Some(session_name) = task.tmux_session_name.as_deref() {
-                        tracing::debug!(
-                            "Checking status for task {} in session {}",
-                            task.id,
-                            session_name
-                        );
+                    if let Some(worktree_path) = task.worktree_path.as_deref() {
+                        tracing::debug!("Fetching status for task {} at {}", task.id, worktree_path);
 
-                        let status = resolve_status_by_directory(
-                            task.worktree_path.as_deref(),
-                            &directory_to_status,
-                            fetched_at,
-                        );
+                        match server_provider.fetch_all_statuses(fetched_at, Some(worktree_path)) {
+                            Ok(statuses) => {
+                                tracing::debug!("Got {} statuses for task {}", statuses.len(), task.id);
+                                if let Some((session_id, session_status)) = statuses.iter().next() {
+                                    tracing::debug!("Task {} matched to session {} with status {:?}", task.id, session_id, session_status.state);
 
-                        tracing::debug!(
-                            "Task {} status: {:?} (source: {:?})",
-                            task.id,
-                            status.state,
-                            status.source
-                        );
-
-                        let _ = db.update_task_status(task.id, status.state.as_str());
-                        let _ = db.update_task_status_metadata(
-                            task.id,
-                            status.source.as_str(),
-                            Some(to_iso8601(status.fetched_at)),
-                            status.error.as_ref().map(format_status_error),
-                        );
+                                    let _ = db.update_task_status(task.id, session_status.state.as_str());
+                                    let _ = db.update_task_status_metadata(
+                                        task.id,
+                                        SessionStatusSource::Server.as_str(),
+                                        Some(to_iso8601(fetched_at)),
+                                        None,
+                                    );
+                                } else {
+                                    tracing::debug!("No active session for task {} - setting status to idle", task.id);
+                                    let _ = db.update_task_status(task.id, Status::Idle.as_str());
+                                    let _ = db.update_task_status_metadata(
+                                        task.id,
+                                        SessionStatusSource::Server.as_str(),
+                                        Some(to_iso8601(fetched_at)),
+                                        None,
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!("Failed to fetch status for task {} - skipping status update: {:?}", task.id, err);
+                            }
+                        }
                     }
 
                     interruptible_sleep(staggered_poll_delay(index), &stop).await;
@@ -2359,111 +2347,12 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
     })
 }
 
-fn detect_session_status_with_provider(
-    session_name: &str,
-    provider: &impl StatusProvider,
-) -> SessionStatus {
-    provider.get_status(session_name)
-}
-
-fn detect_session_status(session_name: &str) -> SessionStatus {
-    detect_session_status_with_provider(session_name, &TmuxStatusProvider)
-}
-
-fn fetch_directory_statuses(
-    server_provider: &ServerStatusProvider,
-    fetched_at: SystemTime,
-) -> Result<HashMap<String, SessionStatus>, SessionStatusError> {
-    let sessions = server_provider.list_all_sessions()?;
-    let statuses = server_provider.fetch_all_statuses(fetched_at)?;
-
-    let mut directory_to_status: HashMap<String, SessionStatus> = HashMap::new();
-
-    for (session_id, directory) in sessions {
-        if let Some(status) = statuses.get(&session_id) {
-            let normalized_dir = normalize_directory(&directory);
-            if let Some(existing) = directory_to_status.get(&normalized_dir) {
-                if should_replace_status(existing, status) {
-                    directory_to_status.insert(normalized_dir, status.clone());
-                }
-            } else {
-                directory_to_status.insert(normalized_dir, status.clone());
-            }
-        }
-    }
-
-    Ok(directory_to_status)
-}
-
-fn normalize_directory(dir: &str) -> String {
-    let normalized = dir.trim_end_matches('/').to_string();
-    if normalized.is_empty() {
-        return String::new();
-    }
-    let path = Path::new(&normalized);
-    path.to_string_lossy().to_string()
-}
-
-fn should_replace_status(existing: &SessionStatus, new: &SessionStatus) -> bool {
-    if existing.source != SessionStatusSource::Server {
-        return true;
-    }
-    if new.source != SessionStatusSource::Server {
-        return false;
-    }
-    match (existing.state, new.state) {
-        (SessionState::Running, _) => false,
-        (_, SessionState::Running) => true,
-        (SessionState::Waiting, _) => false,
-        (_, SessionState::Waiting) => true,
-        _ => false,
-    }
-}
-
-fn resolve_status_by_directory(
-    worktree_path: Option<&str>,
-    directory_to_status: &HashMap<String, SessionStatus>,
-    fetched_at: SystemTime,
-) -> SessionStatus {
-    let Some(worktree) = worktree_path else {
-        return SessionStatus {
-            state: Status::Dead,
-            source: SessionStatusSource::None,
-            fetched_at,
-            error: Some(SessionStatusError {
-                code: "NO_WORKTREE".to_string(),
-                message: "task has no worktree path".to_string(),
-            }),
-        };
-    };
-
-    let normalized = normalize_directory(worktree);
-
-    if let Some(status) = directory_to_status.get(&normalized) {
-        return status.clone();
-    }
-
-    SessionStatus {
-        state: Status::Dead,
-        source: SessionStatusSource::None,
-        fetched_at,
-        error: Some(SessionStatusError {
-            code: "SESSION_NOT_FOUND".to_string(),
-            message: format!("no active session found for directory {}", worktree),
-        }),
-    }
-}
-
 fn to_iso8601(time: SystemTime) -> String {
     DateTime::<Utc>::from(time).to_rfc3339()
 }
 
-fn format_status_error(error: &SessionStatusError) -> String {
-    format!("{}: {}", error.code, error.message)
-}
-
 pub fn staggered_poll_delay(task_index: usize) -> Duration {
-    let base_seconds = 3 + task_index as u64;
+    let base_seconds = 1 + task_index as u64;
     let jitter_ms = current_jitter_ms(task_index);
     Duration::from_secs(base_seconds) + Duration::from_millis(jitter_ms)
 }
@@ -2608,24 +2497,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_session_status_with_provider_returns_normalized_metadata() {
-        let provider = FakeStatusProvider {
-            response: SessionStatus {
-                state: Status::Waiting,
-                source: SessionStatusSource::Server,
-                fetched_at: SystemTime::UNIX_EPOCH,
-                error: None,
-            },
-            calls: RefCell::new(Vec::new()),
-        };
-
-        let status = detect_session_status_with_provider("session-1", &provider);
-        assert_eq!(status.state, Status::Waiting);
-        assert_eq!(status.source, SessionStatusSource::Server);
-        assert_eq!(*provider.calls.borrow(), vec!["session-1".to_string()]);
-    }
-
-    #[test]
     fn test_spawn_status_poller_startup_is_non_blocking_with_stop_requested() {
         let temp = TempDir::new().expect("temp dir should be created");
         let db_path = temp.path().join("kanban.sqlite");
@@ -2711,7 +2582,7 @@ mod tests {
             session_name.clone(),
             SessionStatus {
                 state: Status::Dead,
-                source: SessionStatusSource::Tmux,
+                source: SessionStatusSource::Server,
                 fetched_at: SystemTime::UNIX_EPOCH,
                 error: None,
             },
@@ -2726,7 +2597,10 @@ mod tests {
             *runtime.sent_commands.borrow(),
             vec![(
                 session_name,
-                "opencode attach http://127.0.0.1:4096".to_string()
+                format!(
+                    "opencode attach http://127.0.0.1:4096 --dir {}",
+                    fixture.worktree().display()
+                )
             )]
         );
         assert!(runtime.created_sessions.borrow().is_empty());
@@ -2972,19 +2846,6 @@ mod tests {
             self.sessions.borrow().contains_key(session_name)
         }
 
-        fn detect_status(&self, session_name: &str) -> SessionStatus {
-            self.sessions
-                .borrow()
-                .get(session_name)
-                .cloned()
-                .unwrap_or(SessionStatus {
-                    state: Status::Dead,
-                    source: SessionStatusSource::None,
-                    fetched_at: SystemTime::now(),
-                    error: None,
-                })
-        }
-
         fn create_session(
             &self,
             session_name: &str,
@@ -3072,65 +2933,5 @@ mod tests {
         fn worktree(&self) -> PathBuf {
             self.temp.path().join("worktree")
         }
-    }
-
-    struct FakeStatusProvider {
-        response: SessionStatus,
-        calls: RefCell<Vec<String>>,
-    }
-
-    impl StatusProvider for FakeStatusProvider {
-        fn get_status(&self, session_id: &str) -> SessionStatus {
-            self.calls.borrow_mut().push(session_id.to_string());
-            self.response.clone()
-        }
-    }
-
-    #[test]
-    fn test_status_source_indicator_mapping_server() {
-        assert_eq!(SessionStatusSource::Server.as_str(), "server");
-        assert_ne!(SessionStatusSource::Server.as_str(), "tmux");
-    }
-
-    #[test]
-    fn test_status_source_indicator_mapping_tmux() {
-        assert_eq!(SessionStatusSource::Tmux.as_str(), "tmux");
-        assert_ne!(SessionStatusSource::Tmux.as_str(), "server");
-    }
-
-    #[test]
-    fn test_status_source_indicator_mapping_none() {
-        assert_eq!(SessionStatusSource::None.as_str(), "none");
-        assert_ne!(SessionStatusSource::None.as_str(), "tmux");
-    }
-
-    #[test]
-    fn test_ui_should_show_degraded_indicator_when_tmux_source() {
-        let task_with_tmux_source = "tmux";
-        let show_indicator = task_with_tmux_source == "tmux";
-        assert!(
-            show_indicator,
-            "Should show degraded indicator when status_source is 'tmux'"
-        );
-    }
-
-    #[test]
-    fn test_ui_should_not_show_degraded_indicator_when_server_source() {
-        let task_with_server_source = "server";
-        let show_indicator = task_with_server_source == "tmux";
-        assert!(
-            !show_indicator,
-            "Should NOT show degraded indicator when status_source is 'server'"
-        );
-    }
-
-    #[test]
-    fn test_ui_should_not_show_degraded_indicator_when_none_source() {
-        let task_with_none_source = "none";
-        let show_indicator = task_with_none_source == "tmux";
-        assert!(
-            !show_indicator,
-            "Should NOT show degraded indicator when status_source is 'none'"
-        );
     }
 }

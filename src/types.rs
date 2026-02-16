@@ -63,7 +63,6 @@ impl SessionState {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub enum SessionStatusSource {
     Server,
-    Tmux,
     None,
 }
 
@@ -71,7 +70,6 @@ impl SessionStatusSource {
     pub fn as_str(self) -> &'static str {
         match self {
             SessionStatusSource::Server => "server",
-            SessionStatusSource::Tmux => "tmux",
             SessionStatusSource::None => "none",
         }
     }

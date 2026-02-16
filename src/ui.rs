@@ -168,7 +168,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ))
         .title_alignment(Alignment::Left);
 
-    let refresh_info = format!(" {} tasks - auto-refresh: 3s ", app.tasks.len());
+    let refresh_info = format!(" {} tasks - auto-refresh: 0.5s ", app.tasks.len());
     let header_right = Block::default()
         .title(Span::styled(
             refresh_info,
@@ -318,19 +318,11 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 Color::Reset
             };
 
-            // Add degraded mode indicator when status source is "tmux"
-            let status_source_suffix = if task.status_source == "tmux" {
-                " (tmux)"
-            } else {
-                ""
-            };
-
             let line1 = Line::from(vec![
                 Span::styled(prefix, Style::default().fg(theme.focus)),
                 Span::styled(status_icon, Style::default().fg(status_color)),
                 Span::raw(" "),
                 Span::styled(&task.title, Style::default().fg(theme.task)),
-                Span::styled(status_source_suffix, Style::default().fg(Color::DarkGray)),
             ]);
 
             let repo = app.repos.iter().find(|repo| repo.id == task.repo_id);

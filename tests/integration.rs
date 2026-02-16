@@ -17,12 +17,10 @@ use opencode_kanban::db::Database;
 use opencode_kanban::git::{
     git_create_worktree, git_delete_branch, git_fetch, git_remove_worktree,
 };
-use opencode_kanban::opencode::{
-    OpenCodeBindingState, Status, classify_binding_state, opencode_detect_status,
-};
+use opencode_kanban::opencode::{OpenCodeBindingState, Status, classify_binding_state};
 use opencode_kanban::tmux::{
-    sanitize_session_name, tmux_capture_pane, tmux_create_session, tmux_kill_session,
-    tmux_send_keys, tmux_session_exists,
+    sanitize_session_name, tmux_create_session, tmux_kill_session, tmux_send_keys,
+    tmux_session_exists,
 };
 use opencode_kanban::types::{
     SessionState, SessionStatus, SessionStatusError, SessionStatusSource, Task,
@@ -79,21 +77,12 @@ fn integration_test_full_lifecycle() -> Result<()> {
     )?;
 
     thread::sleep(Duration::from_millis(250));
-    let pane = tmux_capture_pane(&session_name, 60)?;
-    let status = opencode_detect_status(&pane);
-    db.update_task_status(task.id, status.as_str())?;
+    db.update_task_status(task.id, Status::Idle.as_str())?;
 
     let created = db.get_task(task.id)?;
     assert_eq!(
         created.tmux_session_name.as_deref(),
         Some(session_name.as_str())
-    );
-    assert!(
-        matches!(
-            status,
-            Status::Idle | Status::Running | Status::Waiting | Status::Dead
-        ),
-        "unexpected status: {status:?}"
     );
 
     db.update_task_category(task.id, in_progress, 0)?;

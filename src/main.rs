@@ -52,16 +52,28 @@ fn run_app() -> Result<()> {
     let project_name = cli.project.as_deref();
     let mut app = App::new(project_name)?;
 
+    let mut last_tick = std::time::Instant::now();
+    let tick_rate = Duration::from_millis(500);
+
     while !app.should_quit() {
         terminal
             .draw(|frame| ui::render(frame, &mut app))
             .context("failed to render frame")?;
 
-        if event::poll(Duration::from_millis(100)).context("failed to poll events")? {
+        let timeout = tick_rate
+            .checked_sub(last_tick.elapsed())
+            .unwrap_or_else(|| Duration::from_secs(0));
+
+        if event::poll(timeout.min(Duration::from_millis(100))).context("failed to poll events")? {
             let event = event::read().context("failed to read terminal event")?;
             if let Some(message) = event_to_message(event) {
                 app.update(message)?;
             }
+        }
+
+        if last_tick.elapsed() >= tick_rate {
+            app.update(opencode_kanban::app::Message::Tick)?;
+            last_tick = std::time::Instant::now();
         }
     }
 
