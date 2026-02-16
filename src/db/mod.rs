@@ -1,15 +1,16 @@
 #![allow(dead_code)]
 
-use std::{fs, path::Path, process::Command};
+use std::{collections::HashMap, fs, path::Path, process::Command};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use rusqlite::{Connection, params, types::Type};
 use uuid::Uuid;
 
-use crate::types::{Category, Repo, Task};
+use crate::types::{Category, CommandFrequency, Repo, Task};
 
 const DEFAULT_TMUX_STATUS: &str = "unknown";
+const DEFAULT_STATUS_SOURCE: &str = "none";
 
 pub struct Database {
     conn: Connection,
@@ -127,8 +128,9 @@ impl Database {
             .execute(
                 "INSERT INTO tasks (
                     id, title, repo_id, branch, category_id, position, tmux_session_name,
-                    opencode_session_id, worktree_path, tmux_status, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    opencode_session_id, worktree_path, tmux_status, status_source,
+                    status_fetched_at, status_error, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     id.to_string(),
                     title,
@@ -140,6 +142,9 @@ impl Database {
                     Option::<String>::None,
                     Option::<String>::None,
                     DEFAULT_TMUX_STATUS,
+                    DEFAULT_STATUS_SOURCE,
+                    Option::<String>::None,
+                    Option::<String>::None,
                     now,
                     now
                 ],
@@ -153,7 +158,8 @@ impl Database {
         self.conn
             .query_row(
                 "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
-                        opencode_session_id, worktree_path, tmux_status, created_at, updated_at
+                        opencode_session_id, worktree_path, tmux_status, status_source,
+                        status_fetched_at, status_error, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 params![id.to_string()],
                 map_task_row,
@@ -164,7 +170,8 @@ impl Database {
     pub fn list_tasks(&self) -> Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
-                    opencode_session_id, worktree_path, tmux_status, created_at, updated_at
+                    opencode_session_id, worktree_path, tmux_status, status_source,
+                    status_fetched_at, status_error, created_at, updated_at
              FROM tasks ORDER BY category_id ASC, position ASC, created_at ASC",
         )?;
 
@@ -229,6 +236,33 @@ impl Database {
                 params![status.as_ref(), now_iso(), id.to_string()],
             )
             .context("failed to update task status")?;
+        Ok(())
+    }
+
+    pub fn update_task_status_metadata(
+        &self,
+        id: Uuid,
+        status_source: impl AsRef<str>,
+        status_fetched_at: Option<String>,
+        status_error: Option<String>,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE tasks
+                 SET status_source = ?1,
+                     status_fetched_at = ?2,
+                     status_error = ?3,
+                     updated_at = ?4
+                 WHERE id = ?5",
+                params![
+                    status_source.as_ref(),
+                    status_fetched_at,
+                    status_error,
+                    now_iso(),
+                    id.to_string()
+                ],
+            )
+            .context("failed to update task status metadata")?;
         Ok(())
     }
 
@@ -310,6 +344,44 @@ impl Database {
         Ok(())
     }
 
+    pub fn increment_command_usage(&self, command_id: &str) -> Result<()> {
+        let now = now_iso();
+        self.conn
+            .execute(
+                "INSERT INTO command_frequency (command_id, use_count, last_used)
+                 VALUES (?1, 1, ?2)
+                 ON CONFLICT(command_id) DO UPDATE SET
+                     use_count = use_count + 1,
+                     last_used = ?2",
+                params![command_id, now],
+            )
+            .context("failed to increment command usage")?;
+        Ok(())
+    }
+
+    pub fn get_command_frequencies(&self) -> Result<HashMap<String, CommandFrequency>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT command_id, use_count, last_used FROM command_frequency ORDER BY use_count DESC",
+        )?;
+
+        let rows = stmt
+            .query_map(params![], |row| {
+                Ok(CommandFrequency {
+                    command_id: row.get(0)?,
+                    use_count: row.get(1)?,
+                    last_used: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load command frequencies")?;
+
+        let mut map = HashMap::new();
+        for freq in rows {
+            map.insert(freq.command_id.clone(), freq);
+        }
+        Ok(map)
+    }
+
     fn run_migrations(&self) -> Result<()> {
         self.conn
             .execute_batch(
@@ -342,12 +414,67 @@ impl Database {
                     opencode_session_id TEXT,
                     worktree_path TEXT,
                     tmux_status TEXT DEFAULT 'unknown',
+                    status_source TEXT NOT NULL DEFAULT 'none',
+                    status_fetched_at TEXT,
+                    status_error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(repo_id, branch)
+                );
+
+                CREATE TABLE IF NOT EXISTS command_frequency (
+                    command_id TEXT PRIMARY KEY,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    last_used TEXT NOT NULL
                 );",
             )
             .context("failed to run sqlite migrations")?;
+
+        self.conn
+            .execute(
+                "ALTER TABLE tasks ADD COLUMN status_source TEXT NOT NULL DEFAULT 'none'",
+                params![],
+            )
+            .or_else(|err| {
+                if is_duplicate_column_err(&err) {
+                    Ok(0)
+                } else {
+                    Err(err)
+                }
+            })
+            .context("failed to migrate tasks.status_source")?;
+
+        self.conn
+            .execute(
+                "ALTER TABLE tasks ADD COLUMN status_fetched_at TEXT",
+                params![],
+            )
+            .or_else(|err| {
+                if is_duplicate_column_err(&err) {
+                    Ok(0)
+                } else {
+                    Err(err)
+                }
+            })
+            .context("failed to migrate tasks.status_fetched_at")?;
+
+        self.conn
+            .execute("ALTER TABLE tasks ADD COLUMN status_error TEXT", params![])
+            .or_else(|err| {
+                if is_duplicate_column_err(&err) {
+                    Ok(0)
+                } else {
+                    Err(err)
+                }
+            })
+            .context("failed to migrate tasks.status_error")?;
+
+        self.conn
+            .execute(
+                "UPDATE tasks SET status_source = 'none' WHERE status_source IS NULL",
+                params![],
+            )
+            .context("failed to backfill tasks.status_source")?;
 
         self.migrate_categories_color_column()?;
         Ok(())
@@ -453,9 +580,19 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         opencode_session_id: row.get(7)?,
         worktree_path: row.get(8)?,
         tmux_status: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        status_source: row.get(10)?,
+        status_fetched_at: row.get(11)?,
+        status_error: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
+}
+
+fn is_duplicate_column_err(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(_, Some(msg)) if msg.contains("duplicate column name")
+    )
 }
 
 fn parse_uuid_column(value: String, idx: usize) -> rusqlite::Result<Uuid> {
@@ -509,7 +646,7 @@ mod tests {
     use std::{path::PathBuf, process::Command};
 
     use anyhow::Result;
-    use rusqlite::params;
+    use rusqlite::{Connection, params};
     use uuid::Uuid;
 
     use super::Database;
@@ -638,6 +775,9 @@ mod tests {
         );
         assert_eq!(task.position, 0);
         assert_eq!(task.tmux_status, "unknown");
+        assert_eq!(task.status_source, "none");
+        assert_eq!(task.status_fetched_at, None);
+        assert_eq!(task.status_error, None);
 
         let fetched = db.get_task(task.id)?;
         assert_eq!(fetched.id, task.id);
@@ -651,11 +791,23 @@ mod tests {
             Some("/tmp/task-crud-feature-db-layer".to_string()),
         )?;
         db.update_task_status(task.id, "running")?;
+        db.update_task_status_metadata(
+            task.id,
+            "tmux",
+            Some("2026-02-15T12:34:56Z".to_string()),
+            Some("transient timeout".to_string()),
+        )?;
 
         let updated = db.get_task(task.id)?;
         assert_eq!(updated.position, 1);
         assert_eq!(updated.category_id, done_category);
         assert_eq!(updated.tmux_status, "running");
+        assert_eq!(updated.status_source, "tmux");
+        assert_eq!(
+            updated.status_fetched_at.as_deref(),
+            Some("2026-02-15T12:34:56Z")
+        );
+        assert_eq!(updated.status_error.as_deref(), Some("transient timeout"));
         assert_eq!(
             updated.tmux_session_name.as_deref(),
             Some("ok-task-crud-feature-db-layer")
@@ -773,6 +925,166 @@ mod tests {
         assert!(delete_in_use_category.is_err());
 
         std::fs::remove_dir_all(&repo_dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_migration_adds_status_metadata_columns_for_existing_db() -> Result<()> {
+        let path = temp_path("migration-status-metadata").join("opencode-kanban.sqlite");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE repos (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                default_base TEXT,
+                remote_url TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE TABLE categories (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                position INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+             );
+             CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                repo_id TEXT NOT NULL REFERENCES repos(id),
+                branch TEXT NOT NULL,
+                category_id TEXT NOT NULL REFERENCES categories(id),
+                position INTEGER NOT NULL,
+                tmux_session_name TEXT,
+                opencode_session_id TEXT,
+                worktree_path TEXT,
+                tmux_status TEXT DEFAULT 'unknown',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(repo_id, branch)
+             );",
+        )?;
+
+        let repo_id = Uuid::new_v4();
+        let category_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO repos (id, path, name, default_base, remote_url, created_at, updated_at)
+             VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?4)",
+            params![
+                repo_id.to_string(),
+                "/tmp/legacy-repo",
+                "legacy-repo",
+                "2026-02-15T00:00:00Z"
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO categories (id, name, position, created_at) VALUES (?1, ?2, 0, ?3)",
+            params![category_id.to_string(), "TODO", "2026-02-15T00:00:00Z"],
+        )?;
+        conn.execute(
+            "INSERT INTO tasks (
+                id, title, repo_id, branch, category_id, position, tmux_session_name,
+                opencode_session_id, worktree_path, tmux_status, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, NULL, NULL, ?6, ?7, ?7)",
+            params![
+                task_id.to_string(),
+                "legacy task",
+                repo_id.to_string(),
+                "feature/legacy",
+                category_id.to_string(),
+                "running",
+                "2026-02-15T00:00:00Z"
+            ],
+        )?;
+        drop(conn);
+
+        let db = Database::open(&path)?;
+        let migrated_task = db.get_task(task_id)?;
+        assert_eq!(migrated_task.tmux_status, "running");
+        assert_eq!(migrated_task.status_source, "none");
+        assert_eq!(migrated_task.status_fetched_at, None);
+        assert_eq!(migrated_task.status_error, None);
+
+        let status_source_type: String = db.conn.query_row(
+            "SELECT type FROM pragma_table_info('tasks') WHERE name = 'status_source'",
+            params![],
+            |row| row.get(0),
+        )?;
+        assert_eq!(status_source_type, "TEXT");
+
+        db.update_task_status(task_id, "dead")?;
+        db.update_task_status_metadata(task_id, "server", None, None)?;
+        let updated = db.get_task(task_id)?;
+        assert_eq!(updated.tmux_status, "dead");
+        assert_eq!(updated.status_source, "server");
+
+        if let Some(parent) = path.parent() {
+            std::fs::remove_dir_all(parent)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_increment_new_command() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        db.increment_command_usage("create-worktree")?;
+
+        let freqs = db.get_command_frequencies()?;
+        assert_eq!(freqs.len(), 1);
+        let freq = freqs.get("create-worktree").unwrap();
+        assert_eq!(freq.use_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_increment_existing_command() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        db.increment_command_usage("create-worktree")?;
+        db.increment_command_usage("create-worktree")?;
+        db.increment_command_usage("create-worktree")?;
+
+        let freqs = db.get_command_frequencies()?;
+        let freq = freqs.get("create-worktree").unwrap();
+        assert_eq!(freq.use_count, 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_frequencies_empty() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        let freqs = db.get_command_frequencies()?;
+        assert!(freqs.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_frequencies_with_data() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        db.increment_command_usage("cmd-a")?;
+        db.increment_command_usage("cmd-a")?;
+        db.increment_command_usage("cmd-b")?;
+
+        let freqs = db.get_command_frequencies()?;
+        assert_eq!(freqs.len(), 2);
+
+        let cmd_a = freqs.get("cmd-a").unwrap();
+        let cmd_b = freqs.get("cmd-b").unwrap();
+        assert_eq!(cmd_a.use_count, 2);
+        assert_eq!(cmd_b.use_count, 1);
+
         Ok(())
     }
 

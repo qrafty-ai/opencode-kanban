@@ -7,23 +7,29 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use chrono::{DateTime, Utc};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use ratatui::widgets::ScrollbarState;
+use ratatui::widgets::{ListState, ScrollbarState};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
+use crate::command_palette::{CommandPaletteState, all_commands};
 use crate::db::Database;
 use crate::git::{
     derive_worktree_path, git_check_branch_up_to_date, git_create_worktree, git_delete_branch,
     git_detect_default_branch, git_fetch, git_is_valid_repo, git_remove_worktree,
 };
-use crate::opencode::{Status, opencode_detect_status, opencode_is_running_in_session};
+use crate::opencode::{
+    OpenCodeBindingState, OpenCodeServerManager, ServerStatusProvider, Status, StatusProvider,
+    TmuxStatusProvider, classify_binding_state, ensure_server_ready,
+};
+use crate::projects::{self, ProjectInfo};
 use crate::tmux::{
-    sanitize_session_name, tmux_capture_pane, tmux_create_session, tmux_kill_session,
+    sanitize_session_name_for_project, tmux_capture_pane, tmux_create_session, tmux_kill_session,
     tmux_send_keys, tmux_session_exists, tmux_switch_client,
 };
-use crate::types::{Category, Repo, Task};
+use crate::types::{Category, Repo, SessionStatus, SessionStatusError, SessionStatusSource, Task};
 
 pub const STATUS_REPO_UNAVAILABLE: &str = "repo_unavailable";
 pub const STATUS_BROKEN: &str = "broken";
@@ -52,9 +58,28 @@ pub struct NewTaskDialogState {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub enum NewProjectField {
+    Name,
+    Create,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NewProjectDialogState {
+    pub name_input: String,
+    pub focused_field: NewProjectField,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ErrorDialogState {
     pub title: String,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ConfirmQuitDialogState {
+    pub active_session_count: usize,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -83,16 +108,22 @@ pub struct MoveTaskDialogState {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CategoryInputField {
+    Name,
+    Confirm,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CategoryInputMode {
     Add,
     Rename,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum CategoryInputField {
-    Name,
-    Confirm,
-    Cancel,
+pub enum View {
+    ProjectList,
+    Board,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -144,10 +175,12 @@ pub enum ViewMode {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ActiveDialog {
     None,
     NewTask(NewTaskDialogState),
+    CommandPalette(CommandPaletteState),
+    NewProject(NewProjectDialogState),
     CategoryInput(CategoryInputDialogState),
     DeleteCategory(DeleteCategoryDialogState),
     Error(ErrorDialogState),
@@ -155,6 +188,7 @@ pub enum ActiveDialog {
     MoveTask(MoveTaskDialogState),
     WorktreeNotFound(WorktreeNotFoundDialogState),
     RepoUnavailable(RepoUnavailableDialogState),
+    ConfirmQuit(ConfirmQuitDialogState),
     Help,
 }
 
@@ -170,6 +204,7 @@ pub enum Message {
     SelectDown,
     AttachSelectedTask,
     OpenNewTaskDialog,
+    OpenCommandPalette,
     DismissDialog,
     FocusColumn(usize),
     SelectTask(usize, usize),
@@ -194,7 +229,15 @@ pub enum Message {
     RepoUnavailableDismiss,
     ConfirmQuit,
     CancelQuit,
+    ExecuteCommand(String),
     CycleCategoryColor(usize),
+    SwitchToProjectList,
+    SwitchToBoard(PathBuf),
+    ProjectListSelectUp,
+    ProjectListSelectDown,
+    ProjectListConfirm,
+    OpenNewProjectDialog,
+    CreateProject,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -207,7 +250,7 @@ struct DesiredTaskState {
 struct ObservedTaskState {
     repo_available: bool,
     session_exists: bool,
-    session_status: Option<Status>,
+    session_status: Option<SessionStatus>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -221,7 +264,8 @@ trait RecoveryRuntime {
     fn repo_exists(&self, repo_path: &Path) -> bool;
     fn worktree_exists(&self, worktree_path: &Path) -> bool;
     fn session_exists(&self, session_name: &str) -> bool;
-    fn detect_status(&self, session_name: &str) -> Status;
+    fn binding_state(&self, opencode_session_id: Option<&str>) -> OpenCodeBindingState;
+    fn detect_status(&self, session_name: &str) -> SessionStatus;
     fn create_session(&self, session_name: &str, working_dir: &Path, command: &str) -> Result<()>;
     fn send_command(&self, session_name: &str, command: &str) -> Result<()>;
     fn switch_client(&self, session_name: &str) -> Result<()>;
@@ -242,7 +286,16 @@ impl RecoveryRuntime for RealRecoveryRuntime {
         tmux_session_exists(session_name)
     }
 
-    fn detect_status(&self, session_name: &str) -> Status {
+    fn binding_state(&self, opencode_session_id: Option<&str>) -> OpenCodeBindingState {
+        let Some(session_id) = opencode_session_id else {
+            return OpenCodeBindingState::Unbound;
+        };
+
+        let status = ServerStatusProvider::default().get_status(session_id);
+        classify_binding_state(Some(session_id), Some(&status))
+    }
+
+    fn detect_status(&self, session_name: &str) -> SessionStatus {
         detect_session_status(session_name)
     }
 
@@ -378,9 +431,15 @@ pub struct App {
     pub active_dialog: ActiveDialog,
     pub footer_notice: Option<String>,
     pub hit_test_map: Vec<(Rect, Message)>,
+    pub current_view: View,
+    pub current_project_path: Option<PathBuf>,
+    pub project_list: Vec<ProjectInfo>,
+    pub selected_project_index: usize,
+    pub project_list_state: ListState,
     started_at: Instant,
     mouse_seen: bool,
     mouse_hint_shown: bool,
+    _server_manager: OpenCodeServerManager,
     poller_stop: Arc<AtomicBool>,
     poller_thread: Option<thread::JoinHandle<()>>,
     pub view_mode: ViewMode,
@@ -390,9 +449,17 @@ pub struct App {
 }
 
 impl App {
+    pub fn active_session_count(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|t| t.tmux_status == "running")
+            .count()
+    }
+
     pub fn new() -> Result<Self> {
         let db_path = default_db_path()?;
         let db = Database::open(&db_path)?;
+        let server_manager = ensure_server_ready();
         let poller_stop = Arc::new(AtomicBool::new(false));
 
         let mut app = Self {
@@ -411,9 +478,15 @@ impl App {
             active_dialog: ActiveDialog::None,
             footer_notice: None,
             hit_test_map: Vec::new(),
+            current_view: View::ProjectList,
+            current_project_path: None,
+            project_list: Vec::new(),
+            selected_project_index: 0,
+            project_list_state: ListState::default(),
             started_at: Instant::now(),
             mouse_seen: false,
             mouse_hint_shown: false,
+            _server_manager: server_manager,
             poller_stop,
             poller_thread: None,
             view_mode: ViewMode::SidePanel,
@@ -423,6 +496,7 @@ impl App {
         };
 
         app.refresh_data()?;
+        app.refresh_projects()?;
         app.reconcile_startup_with_runtime(&RealRecoveryRuntime)?;
         app.refresh_data()?;
 
@@ -466,6 +540,50 @@ impl App {
         }
 
         Ok(())
+    }
+
+    pub fn refresh_projects(&mut self) -> Result<()> {
+        self.project_list = projects::list_projects().context("failed to list projects")?;
+        if !self.project_list.is_empty() {
+            self.selected_project_index =
+                self.selected_project_index.min(self.project_list.len() - 1);
+            self.project_list_state
+                .select(Some(self.selected_project_index));
+        } else {
+            self.selected_project_index = 0;
+            self.project_list_state.select(None);
+        }
+        Ok(())
+    }
+
+    pub fn switch_project(&mut self, path: PathBuf) -> Result<()> {
+        self.poller_stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.poller_thread.take() {
+            let _ = handle.join();
+        }
+
+        let db = Database::open(&path)?;
+        self.db = db;
+        self.refresh_data()?;
+
+        self.poller_stop.store(false, Ordering::Relaxed);
+        self.poller_thread = Some(spawn_status_poller(
+            path.clone(),
+            Arc::clone(&self.poller_stop),
+        ));
+
+        self.current_project_path = Some(path);
+        Ok(())
+    }
+
+    fn current_project_slug_for_tmux(&self) -> Option<String> {
+        let path = self.current_project_path.as_ref()?;
+        let stem = path.file_stem()?.to_str()?;
+        if stem == projects::DEFAULT_PROJECT {
+            None
+        } else {
+            Some(stem.to_string())
+        }
     }
 
     pub fn update(&mut self, message: Message) -> Result<()> {
@@ -546,6 +664,11 @@ impl App {
                     focused_field: NewTaskField::Repo,
                 });
             }
+            Message::OpenCommandPalette => {
+                let frequencies = self.db.get_command_frequencies().unwrap_or_default();
+                self.active_dialog =
+                    ActiveDialog::CommandPalette(CommandPaletteState::new(frequencies));
+            }
             Message::DismissDialog => self.active_dialog = ActiveDialog::None,
             Message::FocusColumn(index) => {
                 if index < self.categories.len() {
@@ -594,6 +717,25 @@ impl App {
             Message::CreateTask => self.confirm_new_task()?,
             Message::ConfirmQuit => self.should_quit = true,
             Message::CancelQuit => self.active_dialog = ActiveDialog::None,
+            Message::ExecuteCommand(command_id) => {
+                self.active_dialog = ActiveDialog::None;
+
+                match command_id.as_str() {
+                    "help" => self.active_dialog = ActiveDialog::Help,
+                    "quit" => self.should_quit = true,
+                    _ => {
+                        if let Some(message) = all_commands()
+                            .into_iter()
+                            .find(|command| command.id == command_id)
+                            .and_then(|command| command.message)
+                        {
+                            self.update(message)?;
+                        }
+                    }
+                }
+
+                let _ = self.db.increment_command_usage(&command_id);
+            }
             Message::CycleCategoryColor(col_idx) => {
                 let color_cycle = [
                     None,
@@ -605,10 +747,10 @@ impl App {
                     Some("red".to_string()),
                 ];
                 if let Some(category) = self.categories.get(col_idx) {
-                    let current_color = &category.color;
+                    let current_color = category.color.as_ref();
                     let next_idx = color_cycle
                         .iter()
-                        .position(|c| c.as_ref() == current_color.as_ref())
+                        .position(|c| c.as_ref() == current_color)
                         .map(|i| (i + 1) % color_cycle.len())
                         .unwrap_or(0);
                     let next_color = color_cycle[next_idx].clone();
@@ -622,6 +764,69 @@ impl App {
             | Message::DeleteTaskToggleRemoveWorktree
             | Message::DeleteTaskToggleDeleteBranch => {}
             Message::ConfirmDeleteTask => self.confirm_delete_task()?,
+            Message::SwitchToProjectList => {
+                self.current_view = View::ProjectList;
+            }
+            Message::SwitchToBoard(path) => {
+                self.switch_project(path)?;
+                self.current_view = View::Board;
+            }
+            Message::ProjectListSelectUp => {
+                if self.selected_project_index > 0 {
+                    self.selected_project_index -= 1;
+                    self.project_list_state
+                        .select(Some(self.selected_project_index));
+                }
+            }
+            Message::ProjectListSelectDown => {
+                if self.selected_project_index + 1 < self.project_list.len() {
+                    self.selected_project_index += 1;
+                    self.project_list_state
+                        .select(Some(self.selected_project_index));
+                }
+            }
+            Message::ProjectListConfirm => {
+                if let Some(project) = self.project_list.get(self.selected_project_index) {
+                    self.switch_project(project.path.clone())?;
+                    self.current_view = View::Board;
+                }
+            }
+            Message::OpenNewProjectDialog => {
+                self.active_dialog = ActiveDialog::NewProject(NewProjectDialogState {
+                    name_input: String::new(),
+                    focused_field: NewProjectField::Name,
+                    error_message: None,
+                });
+            }
+            Message::CreateProject => {
+                if let ActiveDialog::NewProject(state) = &self.active_dialog {
+                    let name = state.name_input.trim();
+                    if name.is_empty() {
+                        // Do nothing if empty
+                    } else {
+                        match projects::create_project(name) {
+                            Ok(path) => {
+                                self.active_dialog = ActiveDialog::None;
+                                self.refresh_projects()?;
+                                if let Some(idx) =
+                                    self.project_list.iter().position(|p| p.path == path)
+                                {
+                                    self.selected_project_index = idx;
+                                    self.project_list_state.select(Some(idx));
+                                }
+                                self.switch_project(path)?;
+                                self.current_view = View::Board;
+                            }
+                            Err(e) => {
+                                self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                                    title: "Failed to create project".to_string(),
+                                    detail: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         self.maybe_show_tmux_mouse_hint();
@@ -642,6 +847,9 @@ impl App {
 
         match key.code {
             KeyCode::Char('?') => self.active_dialog = ActiveDialog::Help,
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.update(Message::OpenCommandPalette)?;
+            }
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('v') => {
                 self.current_log_buffer = None;
@@ -676,6 +884,23 @@ impl App {
             KeyCode::Char('>') => {
                 self.side_panel_width = self.side_panel_width.saturating_add(5).min(80);
             }
+            _ => {}
+        }
+
+        if self.current_view == View::ProjectList {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.update(Message::ProjectListSelectUp)?,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.update(Message::ProjectListSelectDown)?
+                }
+                KeyCode::Enter => self.update(Message::ProjectListConfirm)?,
+                KeyCode::Char('n') => self.update(Message::OpenNewProjectDialog)?,
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        match key.code {
             KeyCode::Char('h') | KeyCode::Left => {
                 self.update(Message::NavigateLeft)?;
             }
@@ -912,6 +1137,59 @@ impl App {
                     _ => {}
                 }
             }
+            ActiveDialog::NewProject(state) => {
+                let fields = [
+                    NewProjectField::Name,
+                    NewProjectField::Create,
+                    NewProjectField::Cancel,
+                ];
+
+                let mut focus_index = fields
+                    .iter()
+                    .position(|field| *field == state.focused_field)
+                    .unwrap_or(0);
+
+                let move_focus = |current: usize, delta: isize| -> usize {
+                    let len = fields.len() as isize;
+                    let next = (current as isize + delta).rem_euclid(len);
+                    next as usize
+                };
+
+                match key.code {
+                    KeyCode::Esc => self.active_dialog = ActiveDialog::None,
+                    KeyCode::Tab | KeyCode::Down => {
+                        focus_index = move_focus(focus_index, 1);
+                        state.focused_field = fields[focus_index].clone();
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        focus_index = move_focus(focus_index, -1);
+                        state.focused_field = fields[focus_index].clone();
+                    }
+                    KeyCode::Left if state.focused_field == NewProjectField::Create => {
+                        state.focused_field = NewProjectField::Cancel;
+                    }
+                    KeyCode::Right if state.focused_field == NewProjectField::Cancel => {
+                        state.focused_field = NewProjectField::Create;
+                    }
+                    KeyCode::Backspace => {
+                        if state.focused_field == NewProjectField::Name {
+                            state.name_input.pop();
+                        }
+                    }
+                    KeyCode::Enter => {
+                        follow_up = Some(match state.focused_field {
+                            NewProjectField::Cancel => Message::DismissDialog,
+                            _ => Message::CreateProject,
+                        });
+                    }
+                    KeyCode::Char(ch) => {
+                        if state.focused_field == NewProjectField::Name {
+                            state.name_input.push(ch);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             ActiveDialog::CategoryInput(state) => {
                 let fields = [
                     CategoryInputField::Name,
@@ -965,6 +1243,36 @@ impl App {
                     _ => {}
                 }
             }
+            ActiveDialog::CommandPalette(state) => match key.code {
+                KeyCode::Esc => self.active_dialog = ActiveDialog::None,
+                KeyCode::Enter => {
+                    follow_up = state.selected_command_id().map(Message::ExecuteCommand);
+                }
+                KeyCode::Up => state.move_selection(-1),
+                KeyCode::Down => state.move_selection(1),
+                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    state.move_selection(-1)
+                }
+                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    state.move_selection(1)
+                }
+                KeyCode::Backspace => {
+                    if state.query.is_empty() {
+                        self.active_dialog = ActiveDialog::None;
+                    } else {
+                        state.query.pop();
+                        state.update_query();
+                    }
+                }
+                KeyCode::Char(ch)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    state.query.push(ch);
+                    state.update_query();
+                }
+                _ => {}
+            },
             ActiveDialog::DeleteCategory(state) => match key.code {
                 KeyCode::Esc => self.active_dialog = ActiveDialog::None,
                 KeyCode::Left | KeyCode::Char('h') => {
@@ -1433,7 +1741,14 @@ impl App {
             return Ok(());
         };
 
-        let result = attach_task_with_runtime(&self.db, &task, &repo, &RealRecoveryRuntime)?;
+        let project_slug = self.current_project_slug_for_tmux();
+        let result = attach_task_with_runtime(
+            &self.db,
+            project_slug.as_deref(),
+            &task,
+            &repo,
+            &RealRecoveryRuntime,
+        )?;
         match result {
             AttachTaskResult::Attached => {
                 self.active_dialog = ActiveDialog::None;
@@ -1523,11 +1838,13 @@ impl App {
             .map(|category| category.id)
             .context("no category available for new task")?;
 
+        let project_slug = self.current_project_slug_for_tmux();
         let result = create_task_pipeline_with_runtime(
             &self.db,
             &mut self.repos,
             todo_category,
             &dialog_state,
+            project_slug.as_deref(),
             &RealCreateTaskRuntime,
         );
 
@@ -1650,9 +1967,9 @@ fn reconcile_desired_vs_observed(
 
     observed
         .session_status
-        .unwrap_or(Status::Unknown)
-        .as_str()
-        .to_string()
+        .as_ref()
+        .map(|status| status.state.as_str().to_string())
+        .unwrap_or_else(|| Status::Unknown.as_str().to_string())
 }
 
 fn reconcile_startup_tasks(
@@ -1664,6 +1981,7 @@ fn reconcile_startup_tasks(
     let repos_by_id: HashMap<Uuid, &Repo> = repos.iter().map(|repo| (repo.id, repo)).collect();
 
     for task in tasks {
+        let binding_state = runtime.binding_state(task.opencode_session_id.as_deref());
         let repo_available = repos_by_id
             .get(&task.repo_id)
             .map(|repo| runtime.repo_exists(Path::new(&repo.path)))
@@ -1683,6 +2001,8 @@ fn reconcile_startup_tasks(
             );
             db.update_task_status(task.id, &reconciled_status)?;
         }
+
+        persist_binding_state(db, task, binding_state)?;
     }
 
     Ok(())
@@ -1690,10 +2010,14 @@ fn reconcile_startup_tasks(
 
 fn attach_task_with_runtime(
     db: &Database,
+    project_slug: Option<&str>,
     task: &Task,
     repo: &Repo,
     runtime: &impl RecoveryRuntime,
 ) -> Result<AttachTaskResult> {
+    let binding_state = runtime.binding_state(task.opencode_session_id.as_deref());
+    persist_binding_state(db, task, binding_state)?;
+
     if !runtime.repo_exists(Path::new(&repo.path)) {
         db.update_task_status(task.id, STATUS_REPO_UNAVAILABLE)?;
         return Ok(AttachTaskResult::RepoUnavailable);
@@ -1703,10 +2027,10 @@ fn attach_task_with_runtime(
         && runtime.session_exists(session_name)
     {
         let observed_status = runtime.detect_status(session_name);
-        db.update_task_status(task.id, observed_status.as_str())?;
+        db.update_task_status(task.id, observed_status.state.as_str())?;
 
-        if matches!(observed_status, Status::Dead | Status::Unknown) {
-            let command = opencode_command(task.opencode_session_id.as_deref());
+        if matches!(observed_status.state, Status::Dead | Status::Unknown) {
+            let command = binding_aware_opencode_command(task, binding_state);
             runtime.send_command(session_name, &command)?;
             db.update_task_status(task.id, Status::Unknown.as_str())?;
         }
@@ -1725,16 +2049,13 @@ fn attach_task_with_runtime(
 
     let session_name = next_available_session_name(
         task.tmux_session_name.as_deref(),
+        project_slug,
         &repo.name,
         &task.branch,
         runtime,
     );
 
-    let command = if task.tmux_session_name.is_some() {
-        opencode_command(task.opencode_session_id.as_deref())
-    } else {
-        "opencode".to_string()
-    };
+    let command = binding_aware_opencode_command(task, binding_state);
 
     runtime.create_session(&session_name, worktree_path, &command)?;
     db.update_task_tmux(
@@ -1753,6 +2074,7 @@ fn create_task_pipeline_with_runtime(
     repos: &mut Vec<Repo>,
     todo_category_id: Uuid,
     state: &NewTaskDialogState,
+    project_slug: Option<&str>,
     runtime: &impl CreateTaskRuntime,
 ) -> Result<CreateTaskOutcome> {
     let mut warning = None;
@@ -1802,9 +2124,10 @@ fn create_task_pipeline_with_runtime(
     let mut created_task_id: Option<Uuid> = None;
 
     let mut operation = || -> Result<()> {
-        let session_name = next_available_session_name_by(None, &repo.name, branch, |name| {
-            runtime.tmux_session_exists(name)
-        });
+        let session_name =
+            next_available_session_name_by(None, project_slug, &repo.name, branch, |name| {
+                runtime.tmux_session_exists(name)
+            });
 
         runtime
             .tmux_create_session(&session_name, &worktree_path, None)
@@ -1904,19 +2227,57 @@ fn opencode_command(session_id: Option<&str>) -> String {
     }
 }
 
+fn binding_aware_opencode_command(task: &Task, binding_state: OpenCodeBindingState) -> String {
+    if matches!(binding_state, OpenCodeBindingState::Bound) {
+        return opencode_command(task.opencode_session_id.as_deref());
+    }
+
+    "opencode".to_string()
+}
+
+fn persist_binding_state(
+    db: &Database,
+    task: &Task,
+    binding_state: OpenCodeBindingState,
+) -> Result<()> {
+    if !matches!(binding_state, OpenCodeBindingState::Stale) {
+        return Ok(());
+    }
+
+    let Some(opencode_session_id) = task.opencode_session_id.as_deref() else {
+        return Ok(());
+    };
+
+    let stale_message = format!(
+        "BINDING_STALE: OpenCode server does not recognize session id {opencode_session_id}"
+    );
+    db.update_task_status_metadata(
+        task.id,
+        SessionStatusSource::Server.as_str(),
+        Some(to_iso8601(SystemTime::now())),
+        Some(stale_message),
+    )
+}
+
 fn next_available_session_name(
     existing_name: Option<&str>,
+    project_slug: Option<&str>,
     repo_name: &str,
     branch_name: &str,
     runtime: &impl RecoveryRuntime,
 ) -> String {
-    next_available_session_name_by(existing_name, repo_name, branch_name, |name| {
-        runtime.session_exists(name)
-    })
+    next_available_session_name_by(
+        existing_name,
+        project_slug,
+        repo_name,
+        branch_name,
+        |name| runtime.session_exists(name),
+    )
 }
 
 fn next_available_session_name_by<F>(
     existing_name: Option<&str>,
+    project_slug: Option<&str>,
     repo_name: &str,
     branch_name: &str,
     session_exists: F,
@@ -1930,7 +2291,7 @@ where
         return existing_name.to_string();
     }
 
-    let base = sanitize_session_name(repo_name, branch_name);
+    let base = sanitize_session_name_for_project(project_slug, repo_name, branch_name);
     if !session_exists(&base) {
         return base;
     }
@@ -1974,6 +2335,17 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
                 let repos = db.list_repos().unwrap_or_default();
                 let repo_paths: HashMap<Uuid, String> =
                     repos.into_iter().map(|repo| (repo.id, repo.path)).collect();
+                let server_provider = ServerStatusProvider::default();
+                let tmux_provider = TmuxStatusProvider;
+
+                let server_known_ids: Vec<String> = tasks
+                    .iter()
+                    .filter_map(|task| task.opencode_session_id.clone())
+                    .collect();
+                let server_statuses: HashMap<String, SessionStatus> = server_provider
+                    .list_statuses(&server_known_ids)
+                    .into_iter()
+                    .collect();
 
                 for (index, task) in tasks.iter().enumerate() {
                     if stop.load(Ordering::Relaxed) {
@@ -1992,12 +2364,19 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
                     }
 
                     if let Some(session_name) = task.tmux_session_name.as_deref() {
-                        let status = if tmux_session_exists(session_name) {
-                            detect_session_status(session_name)
-                        } else {
-                            Status::Dead
-                        };
-                        let _ = db.update_task_status(task.id, status.as_str());
+                        let status = resolve_server_first_status(
+                            session_name,
+                            task.opencode_session_id.as_deref(),
+                            &server_statuses,
+                            &tmux_provider,
+                        );
+                        let _ = db.update_task_status(task.id, status.state.as_str());
+                        let _ = db.update_task_status_metadata(
+                            task.id,
+                            status.source.as_str(),
+                            Some(to_iso8601(status.fetched_at)),
+                            status.error.as_ref().map(format_status_error),
+                        );
                     }
 
                     interruptible_sleep(staggered_poll_delay(index), &stop).await;
@@ -2007,15 +2386,71 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
     })
 }
 
-fn detect_session_status(session_name: &str) -> Status {
-    if !opencode_is_running_in_session(session_name) {
-        return Status::Dead;
+fn detect_session_status_with_provider(
+    session_name: &str,
+    provider: &impl StatusProvider,
+) -> SessionStatus {
+    provider.get_status(session_name)
+}
+
+fn detect_session_status(session_name: &str) -> SessionStatus {
+    detect_session_status_with_provider(session_name, &TmuxStatusProvider)
+}
+
+fn resolve_server_first_status(
+    tmux_session_name: &str,
+    opencode_session_id: Option<&str>,
+    server_statuses: &HashMap<String, SessionStatus>,
+    tmux_provider: &impl StatusProvider,
+) -> SessionStatus {
+    let server_candidate = opencode_session_id
+        .and_then(|session_id| server_statuses.get(session_id).cloned())
+        .unwrap_or_else(|| SessionStatus {
+            state: Status::Unknown,
+            source: SessionStatusSource::None,
+            fetched_at: SystemTime::now(),
+            error: Some(SessionStatusError {
+                code: "SERVER_STATUS_MISSING".to_string(),
+                message: "session was not included in server status map".to_string(),
+            }),
+        });
+
+    if matches!(server_candidate.source, SessionStatusSource::Server)
+        && server_candidate.error.is_none()
+    {
+        return server_candidate;
     }
 
-    match tmux_capture_pane(session_name, 50) {
-        Ok(pane) => opencode_detect_status(&pane),
-        Err(_) => Status::Unknown,
+    let mut fallback = detect_session_status_with_provider(tmux_session_name, tmux_provider);
+    if let Some(reason) = server_candidate.error {
+        fallback.error = Some(merge_fallback_errors(reason, fallback.error));
     }
+    fallback
+}
+
+fn merge_fallback_errors(
+    fallback_reason: SessionStatusError,
+    fallback_error: Option<SessionStatusError>,
+) -> SessionStatusError {
+    if let Some(tmux_error) = fallback_error {
+        SessionStatusError {
+            code: format!("{}+{}", fallback_reason.code, tmux_error.code),
+            message: format!(
+                "fallback_reason={} | tmux_error={}",
+                fallback_reason.message, tmux_error.message
+            ),
+        }
+    } else {
+        fallback_reason
+    }
+}
+
+fn to_iso8601(time: SystemTime) -> String {
+    DateTime::<Utc>::from(time).to_rfc3339()
+}
+
+fn format_status_error(error: &SessionStatusError) -> String {
+    format!("{}: {}", error.code, error.message)
 }
 
 pub fn staggered_poll_delay(task_index: usize) -> Duration {
@@ -2043,11 +2478,12 @@ async fn interruptible_sleep(duration: Duration, stop: &AtomicBool) {
 }
 
 fn default_db_path() -> Result<PathBuf> {
-    let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    let app_dir = base.join("opencode-kanban");
-    std::fs::create_dir_all(&app_dir)
-        .with_context(|| format!("failed to create data dir {}", app_dir.display()))?;
-    Ok(app_dir.join("opencode-kanban.sqlite"))
+    let path = projects::get_project_path(projects::DEFAULT_PROJECT);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create data dir {}", parent.display()))?;
+    }
+    Ok(path)
 }
 
 fn point_in_rect(x: u16, y: u16, rect: Rect) -> bool {
@@ -2062,18 +2498,338 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
 
     use anyhow::Result;
+    use crossterm::event::{KeyCode, KeyEvent};
+    use ratatui::widgets::ScrollbarState;
+    use rusqlite::Connection;
     use tempfile::TempDir;
     use uuid::Uuid;
 
     use super::*;
+
+    fn build_test_app(db: Database) -> Result<App> {
+        let categories = db.list_categories()?;
+
+        Ok(App {
+            should_quit: false,
+            layout_epoch: 0,
+            viewport: (80, 24),
+            last_mouse_event: None,
+            db,
+            tasks: Vec::new(),
+            categories,
+            repos: Vec::new(),
+            focused_column: 0,
+            selected_task_per_column: HashMap::new(),
+            scroll_offset_per_column: HashMap::new(),
+            column_scroll_states: vec![ScrollbarState::default()],
+            active_dialog: ActiveDialog::None,
+            footer_notice: None,
+            hit_test_map: Vec::new(),
+            started_at: Instant::now(),
+            mouse_seen: false,
+            mouse_hint_shown: false,
+            poller_stop: Arc::new(AtomicBool::new(true)),
+            poller_thread: None,
+            current_view: View::Board,
+            current_project_path: None,
+            project_list: Vec::new(),
+            selected_project_index: 0,
+            project_list_state: ListState::default(),
+            _server_manager: OpenCodeServerManager::default(),
+            view_mode: ViewMode::SidePanel,
+            side_panel_width: 40,
+            selected_task_index: 0,
+            current_log_buffer: None,
+        })
+    }
+
+    fn test_app() -> Result<App> {
+        build_test_app(Database::open(":memory:")?)
+    }
+
+    #[test]
+    fn test_command_palette_backspace_on_empty_query_closes_palette() -> Result<()> {
+        let mut app = test_app()?;
+        app.active_dialog = ActiveDialog::CommandPalette(CommandPaletteState::new(HashMap::new()));
+
+        app.update(Message::Key(KeyEvent::from(KeyCode::Backspace)))?;
+
+        assert_eq!(app.active_dialog, ActiveDialog::None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_command_for_dialog_closes_palette_then_opens_dialog() -> Result<()> {
+        let mut app = test_app()?;
+        app.active_dialog = ActiveDialog::CommandPalette(CommandPaletteState::new(HashMap::new()));
+
+        app.update(Message::ExecuteCommand("new_task".to_string()))?;
+
+        assert!(matches!(app.active_dialog, ActiveDialog::NewTask(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_command_ignores_command_usage_db_failures() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("app.sqlite");
+        let db = Database::open(&db_path)?;
+        let mut app = build_test_app(db)?;
+
+        let conn = Connection::open(&db_path)?;
+        conn.execute("DROP TABLE command_frequency", [])?;
+
+        app.active_dialog = ActiveDialog::CommandPalette(CommandPaletteState::new(HashMap::new()));
+        let result = app.update(Message::ExecuteCommand("new_task".to_string()));
+
+        assert!(result.is_ok());
+        assert!(matches!(app.active_dialog, ActiveDialog::NewTask(_)));
+        Ok(())
+    }
 
     #[test]
     fn test_staggered_poll_delay_increases_per_task() {
         let one = staggered_poll_delay(0);
         let two = staggered_poll_delay(1);
         assert!(two > one);
+    }
+
+    #[test]
+    fn test_detect_session_status_with_provider_returns_normalized_metadata() {
+        let provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Waiting,
+                source: SessionStatusSource::Server,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let status = detect_session_status_with_provider("session-1", &provider);
+        assert_eq!(status.state, Status::Waiting);
+        assert_eq!(status.source, SessionStatusSource::Server);
+        assert_eq!(*provider.calls.borrow(), vec!["session-1".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_uses_server_when_available() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Dead,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let server_statuses = HashMap::from([(
+            "sid-1".to_string(),
+            SessionStatus {
+                state: Status::Running,
+                source: SessionStatusSource::Server,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+        )]);
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &server_statuses, &tmux_provider);
+
+        assert_eq!(status.state, Status::Running);
+        assert_eq!(status.source, SessionStatusSource::Server);
+        assert!(status.error.is_none());
+        assert!(tmux_provider.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_partial_map_falls_back_per_session() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Idle,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &HashMap::new(), &tmux_provider);
+
+        assert_eq!(status.state, Status::Idle);
+        assert_eq!(status.source, SessionStatusSource::Tmux);
+        assert_eq!(
+            status.error.as_ref().map(|err| err.code.as_str()),
+            Some("SERVER_STATUS_MISSING")
+        );
+        assert_eq!(*tmux_provider.calls.borrow(), vec!["tmux-1".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_timeout_falls_back_to_tmux() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Waiting,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let server_statuses = HashMap::from([(
+            "sid-1".to_string(),
+            SessionStatus {
+                state: Status::Unknown,
+                source: SessionStatusSource::None,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: Some(SessionStatusError {
+                    code: "SERVER_TIMEOUT".to_string(),
+                    message: "request timed out".to_string(),
+                }),
+            },
+        )]);
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &server_statuses, &tmux_provider);
+
+        assert_eq!(status.state, Status::Waiting);
+        assert_eq!(status.source, SessionStatusSource::Tmux);
+        assert_eq!(
+            status.error.as_ref().map(|err| err.code.as_str()),
+            Some("SERVER_TIMEOUT")
+        );
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_auth_error_falls_back_to_tmux() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Running,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let server_statuses = HashMap::from([(
+            "sid-1".to_string(),
+            SessionStatus {
+                state: Status::Unknown,
+                source: SessionStatusSource::None,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: Some(SessionStatusError {
+                    code: "SERVER_AUTH_ERROR".to_string(),
+                    message: "unauthorized".to_string(),
+                }),
+            },
+        )]);
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &server_statuses, &tmux_provider);
+
+        assert_eq!(status.state, Status::Running);
+        assert_eq!(status.source, SessionStatusSource::Tmux);
+        assert_eq!(
+            status.error.as_ref().map(|err| err.code.as_str()),
+            Some("SERVER_AUTH_ERROR")
+        );
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_server_down_falls_back_to_tmux() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Running,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let server_statuses = HashMap::from([(
+            "sid-1".to_string(),
+            SessionStatus {
+                state: Status::Unknown,
+                source: SessionStatusSource::None,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: Some(SessionStatusError {
+                    code: "SERVER_CONNECT_FAILED".to_string(),
+                    message: "connection refused".to_string(),
+                }),
+            },
+        )]);
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &server_statuses, &tmux_provider);
+
+        assert_eq!(status.state, Status::Running);
+        assert_eq!(status.source, SessionStatusSource::Tmux);
+        assert_eq!(
+            status.error.as_ref().map(|err| err.code.as_str()),
+            Some("SERVER_CONNECT_FAILED")
+        );
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_parse_mismatch_falls_back_to_tmux() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Idle,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let server_statuses = HashMap::from([(
+            "sid-1".to_string(),
+            SessionStatus {
+                state: Status::Unknown,
+                source: SessionStatusSource::None,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: Some(SessionStatusError {
+                    code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+                    message: "invalid contract".to_string(),
+                }),
+            },
+        )]);
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &server_statuses, &tmux_provider);
+
+        assert_eq!(status.state, Status::Idle);
+        assert_eq!(status.source, SessionStatusSource::Tmux);
+        assert_eq!(
+            status.error.as_ref().map(|err| err.code.as_str()),
+            Some("SERVER_CONTRACT_PARSE_ERROR")
+        );
+    }
+
+    #[test]
+    fn test_spawn_status_poller_startup_is_non_blocking_with_stop_requested() {
+        let temp = TempDir::new().expect("temp dir should be created");
+        let db_path = temp.path().join("kanban.sqlite");
+        let stop = Arc::new(AtomicBool::new(true));
+
+        let started = Instant::now();
+        let handle = spawn_status_poller(db_path, Arc::clone(&stop));
+        handle.join().expect("poller should join cleanly");
+
+        assert!(
+            started.elapsed() <= Duration::from_millis(100),
+            "status poller startup should remain non-blocking"
+        );
+        assert!(stop.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -2104,6 +2860,49 @@ mod tests {
     }
 
     #[test]
+    fn test_recovery_reconcile_stale_binding_preserves_session_id() -> Result<()> {
+        let fixture = RecoveryFixture::new()?;
+        let task = fixture.new_task("startup-stale-binding")?;
+        let session_id = Uuid::new_v4().to_string();
+
+        fixture.db.update_task_tmux(
+            task.id,
+            Some("ok-startup-stale-binding".to_string()),
+            Some(session_id.clone()),
+            Some(fixture.worktree().display().to_string()),
+        )?;
+
+        let runtime = FakeRecoveryRuntime::default();
+        runtime
+            .binding_states
+            .borrow_mut()
+            .insert(session_id.clone(), OpenCodeBindingState::Stale);
+
+        reconcile_startup_tasks(
+            &fixture.db,
+            &fixture.db.list_tasks()?,
+            &fixture.db.list_repos()?,
+            &runtime,
+        )?;
+
+        let updated = fixture.db.get_task(task.id)?;
+        assert_eq!(updated.opencode_session_id, Some(session_id.clone()));
+        assert_eq!(updated.status_source, SessionStatusSource::Server.as_str());
+        assert_eq!(
+            updated.status_error.as_deref(),
+            Some(
+                format!(
+                    "BINDING_STALE: OpenCode server does not recognize session id {session_id}"
+                )
+                .as_str()
+            )
+        );
+        assert!(updated.status_fetched_at.is_some());
+        assert_eq!(*runtime.binding_checks.borrow(), vec![Some(session_id)]);
+        Ok(())
+    }
+
+    #[test]
     fn test_recovery_attach_dead_task_with_existing_worktree_recreates_session() -> Result<()> {
         let fixture = RecoveryFixture::new()?;
         let task = fixture.new_task("attach-recreate")?;
@@ -2122,7 +2921,8 @@ mod tests {
 
         let runtime = FakeRecoveryRuntime::default();
         let updated_task = fixture.db.get_task(task.id)?;
-        let result = attach_task_with_runtime(&fixture.db, &updated_task, &fixture.repo, &runtime)?;
+        let result =
+            attach_task_with_runtime(&fixture.db, None, &updated_task, &fixture.repo, &runtime)?;
 
         assert_eq!(result, AttachTaskResult::Attached);
         let created = runtime.created_sessions.borrow();
@@ -2153,11 +2953,97 @@ mod tests {
 
         let runtime = FakeRecoveryRuntime::default();
         let updated_task = fixture.db.get_task(task.id)?;
-        let result = attach_task_with_runtime(&fixture.db, &updated_task, &fixture.repo, &runtime)?;
+        let result =
+            attach_task_with_runtime(&fixture.db, None, &updated_task, &fixture.repo, &runtime)?;
 
         assert_eq!(result, AttachTaskResult::WorktreeNotFound);
         assert!(runtime.created_sessions.borrow().is_empty());
         assert!(runtime.switched_sessions.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_recovery_attach_stale_binding_recreates_without_resume_arg() -> Result<()> {
+        let fixture = RecoveryFixture::new()?;
+        let task = fixture.new_task("attach-stale-binding")?;
+        let session_id = Uuid::new_v4().to_string();
+        let session_name = "ok-attach-stale-binding".to_string();
+
+        fixture.db.update_task_tmux(
+            task.id,
+            Some(session_name.clone()),
+            Some(session_id.clone()),
+            Some(fixture.worktree().display().to_string()),
+        )?;
+
+        let runtime = FakeRecoveryRuntime::default();
+        runtime
+            .binding_states
+            .borrow_mut()
+            .insert(session_id.clone(), OpenCodeBindingState::Stale);
+
+        let updated_task = fixture.db.get_task(task.id)?;
+        let result =
+            attach_task_with_runtime(&fixture.db, None, &updated_task, &fixture.repo, &runtime)?;
+
+        assert_eq!(result, AttachTaskResult::Attached);
+        let created = runtime.created_sessions.borrow();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, session_name);
+        assert_eq!(created[0].2, "opencode");
+
+        let persisted = fixture.db.get_task(task.id)?;
+        assert_eq!(persisted.opencode_session_id, Some(session_id.clone()));
+        assert_eq!(
+            persisted.status_source,
+            SessionStatusSource::Server.as_str()
+        );
+        assert_eq!(
+            persisted.status_error.as_deref(),
+            Some(
+                format!(
+                    "BINDING_STALE: OpenCode server does not recognize session id {session_id}"
+                )
+                .as_str()
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_recovery_attach_unbound_binding_uses_plain_opencode() -> Result<()> {
+        let fixture = RecoveryFixture::new()?;
+        let task = fixture.new_task("attach-unbound-binding")?;
+        let session_name = "ok-attach-unbound-binding".to_string();
+
+        fixture.db.update_task_tmux(
+            task.id,
+            Some(session_name.clone()),
+            None,
+            Some(fixture.worktree().display().to_string()),
+        )?;
+
+        let runtime = FakeRecoveryRuntime::default();
+        runtime.sessions.borrow_mut().insert(
+            session_name.clone(),
+            SessionStatus {
+                state: Status::Dead,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+        );
+
+        let updated_task = fixture.db.get_task(task.id)?;
+        let result =
+            attach_task_with_runtime(&fixture.db, None, &updated_task, &fixture.repo, &runtime)?;
+
+        assert_eq!(result, AttachTaskResult::Attached);
+        assert_eq!(
+            *runtime.sent_commands.borrow(),
+            vec![(session_name, "opencode".to_string())]
+        );
+        assert!(runtime.created_sessions.borrow().is_empty());
         Ok(())
     }
 
@@ -2183,6 +3069,7 @@ mod tests {
             &mut repos,
             fixture.todo_category,
             &state,
+            None,
             &runtime,
         )?;
 
@@ -2199,6 +3086,38 @@ mod tests {
         assert_eq!(runtime.created_worktrees.borrow().len(), 1);
         assert_eq!(runtime.created_sessions.borrow().len(), 1);
         assert!(runtime.switched_sessions.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_flow_session_namespaced_by_project_slug() -> Result<()> {
+        let fixture = RecoveryFixture::new()?;
+        let mut repos = fixture.db.list_repos()?;
+        let runtime = FakeCreateTaskRuntime::default();
+
+        let state = NewTaskDialogState {
+            repo_idx: 0,
+            repo_input: String::new(),
+            branch_input: "feature/create-flow-project".to_string(),
+            base_input: "origin/main".to_string(),
+            title_input: "Create flow task".to_string(),
+            ensure_base_up_to_date: false,
+            loading_message: None,
+            focused_field: NewTaskField::Create,
+        };
+
+        let _outcome = create_task_pipeline_with_runtime(
+            &fixture.db,
+            &mut repos,
+            fixture.todo_category,
+            &state,
+            Some("my-project"),
+            &runtime,
+        )?;
+
+        let created = runtime.created_sessions.borrow();
+        assert_eq!(created.len(), 1);
+        assert!(created[0].starts_with("ok-my-project-"));
         Ok(())
     }
 
@@ -2225,6 +3144,7 @@ mod tests {
             &mut repos,
             fixture.todo_category,
             &state,
+            None,
             &runtime,
         )
         .expect_err("create flow should fail when tmux creation fails");
@@ -2339,7 +3259,9 @@ mod tests {
     struct FakeRecoveryRuntime {
         repo_paths: RefCell<HashMap<PathBuf, bool>>,
         worktree_paths: RefCell<HashMap<PathBuf, bool>>,
-        sessions: RefCell<HashMap<String, Status>>,
+        sessions: RefCell<HashMap<String, SessionStatus>>,
+        binding_states: RefCell<HashMap<String, OpenCodeBindingState>>,
+        binding_checks: RefCell<Vec<Option<String>>>,
         created_sessions: RefCell<Vec<(String, PathBuf, String)>>,
         sent_commands: RefCell<Vec<(String, String)>>,
         switched_sessions: RefCell<Vec<String>>,
@@ -2366,12 +3288,33 @@ mod tests {
             self.sessions.borrow().contains_key(session_name)
         }
 
-        fn detect_status(&self, session_name: &str) -> Status {
+        fn binding_state(&self, opencode_session_id: Option<&str>) -> OpenCodeBindingState {
+            self.binding_checks
+                .borrow_mut()
+                .push(opencode_session_id.map(str::to_string));
+
+            let Some(opencode_session_id) = opencode_session_id else {
+                return OpenCodeBindingState::Unbound;
+            };
+
+            self.binding_states
+                .borrow()
+                .get(opencode_session_id)
+                .copied()
+                .unwrap_or(OpenCodeBindingState::Bound)
+        }
+
+        fn detect_status(&self, session_name: &str) -> SessionStatus {
             self.sessions
                 .borrow()
                 .get(session_name)
-                .copied()
-                .unwrap_or(Status::Dead)
+                .cloned()
+                .unwrap_or(SessionStatus {
+                    state: Status::Dead,
+                    source: SessionStatusSource::None,
+                    fetched_at: SystemTime::now(),
+                    error: None,
+                })
         }
 
         fn create_session(
@@ -2385,9 +3328,15 @@ mod tests {
                 working_dir.to_path_buf(),
                 command.to_string(),
             ));
-            self.sessions
-                .borrow_mut()
-                .insert(session_name.to_string(), Status::Unknown);
+            self.sessions.borrow_mut().insert(
+                session_name.to_string(),
+                SessionStatus {
+                    state: Status::Unknown,
+                    source: SessionStatusSource::None,
+                    fetched_at: SystemTime::now(),
+                    error: None,
+                },
+            );
             Ok(())
         }
 
@@ -2395,9 +3344,15 @@ mod tests {
             self.sent_commands
                 .borrow_mut()
                 .push((session_name.to_string(), command.to_string()));
-            self.sessions
-                .borrow_mut()
-                .insert(session_name.to_string(), Status::Unknown);
+            self.sessions.borrow_mut().insert(
+                session_name.to_string(),
+                SessionStatus {
+                    state: Status::Unknown,
+                    source: SessionStatusSource::None,
+                    fetched_at: SystemTime::now(),
+                    error: None,
+                },
+            );
             Ok(())
         }
 
@@ -2449,5 +3404,65 @@ mod tests {
         fn worktree(&self) -> PathBuf {
             self.temp.path().join("worktree")
         }
+    }
+
+    struct FakeStatusProvider {
+        response: SessionStatus,
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl StatusProvider for FakeStatusProvider {
+        fn get_status(&self, session_id: &str) -> SessionStatus {
+            self.calls.borrow_mut().push(session_id.to_string());
+            self.response.clone()
+        }
+    }
+
+    #[test]
+    fn test_status_source_indicator_mapping_server() {
+        assert_eq!(SessionStatusSource::Server.as_str(), "server");
+        assert_ne!(SessionStatusSource::Server.as_str(), "tmux");
+    }
+
+    #[test]
+    fn test_status_source_indicator_mapping_tmux() {
+        assert_eq!(SessionStatusSource::Tmux.as_str(), "tmux");
+        assert_ne!(SessionStatusSource::Tmux.as_str(), "server");
+    }
+
+    #[test]
+    fn test_status_source_indicator_mapping_none() {
+        assert_eq!(SessionStatusSource::None.as_str(), "none");
+        assert_ne!(SessionStatusSource::None.as_str(), "tmux");
+    }
+
+    #[test]
+    fn test_ui_should_show_degraded_indicator_when_tmux_source() {
+        let task_with_tmux_source = "tmux";
+        let show_indicator = task_with_tmux_source == "tmux";
+        assert!(
+            show_indicator,
+            "Should show degraded indicator when status_source is 'tmux'"
+        );
+    }
+
+    #[test]
+    fn test_ui_should_not_show_degraded_indicator_when_server_source() {
+        let task_with_server_source = "server";
+        let show_indicator = task_with_server_source == "tmux";
+        assert!(
+            !show_indicator,
+            "Should NOT show degraded indicator when status_source is 'server'"
+        );
+    }
+
+    #[test]
+    fn test_ui_should_not_show_degraded_indicator_when_none_source() {
+        let task_with_none_source = "none";
+        let show_indicator = task_with_none_source == "tmux";
+        assert!(
+            !show_indicator,
+            "Should NOT show degraded indicator when status_source is 'none'"
+        );
     }
 }

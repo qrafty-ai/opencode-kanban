@@ -6,18 +6,134 @@ use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, Wrap,
+        Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
 
 use crate::app::{
     ActiveDialog, App, CategoryInputField, CategoryInputMode, DeleteCategoryField, DeleteTaskField,
-    Message, NewTaskField, ViewMode, WorktreeNotFoundField,
+    Message, NewProjectField, NewTaskField, View, ViewMode, WorktreeNotFoundField,
 };
+use crate::command_palette::{CommandPaletteState, all_commands};
 use crate::theme::{Theme, parse_color};
 use crate::types::{Category, Task};
 
+#[derive(Clone, Copy)]
+pub enum OverlayAnchor {
+    Center,
+    Top,
+}
+
+pub struct OverlayConfig<'a> {
+    pub title: &'a str,
+    pub anchor: OverlayAnchor,
+    pub width_percent: u16,
+    pub height_percent: u16,
+}
+
+fn calculate_overlay_area(
+    anchor: OverlayAnchor,
+    width_percent: u16,
+    height_percent: u16,
+    area: Rect,
+) -> Rect {
+    match anchor {
+        OverlayAnchor::Center => centered_rect(width_percent, height_percent, area),
+        OverlayAnchor::Top => {
+            let popup_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Percentage(height_percent),
+                    Constraint::Min(0),
+                ])
+                .split(area);
+
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage((100 - width_percent) / 2),
+                    Constraint::Percentage(width_percent),
+                    Constraint::Percentage((100 - width_percent) / 2),
+                ])
+                .split(popup_layout[1])[1]
+        }
+    }
+}
+
+fn render_overlay_frame(frame: &mut Frame<'_>, config: OverlayConfig) -> Rect {
+    let theme = Theme::default();
+    let area = calculate_overlay_area(
+        config.anchor,
+        config.width_percent,
+        config.height_percent,
+        frame.area(),
+    );
+
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(theme.focus))
+        .title(Span::styled(config.title, Style::default().fg(theme.focus)))
+        .title_alignment(Alignment::Center)
+        .style(Style::default().bg(Color::Black));
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    inner_area
+}
+
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    match app.current_view {
+        View::ProjectList => render_project_list(frame, app),
+        View::Board => render_board(frame, app),
+    }
+}
+
+fn render_project_list(frame: &mut Frame<'_>, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(frame.area());
+
+    let header = Block::default()
+        .borders(Borders::ALL)
+        .title(" Select Project ")
+        .title_alignment(Alignment::Center);
+    frame.render_widget(header, chunks[0]);
+
+    let items: Vec<ListItem> = app
+        .project_list
+        .iter()
+        .map(|project| ListItem::new(format!("  {}", project.name)))
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Projects "))
+        .highlight_style(Style::default().fg(Color::Yellow).bg(Color::DarkGray))
+        .highlight_symbol("> ");
+    frame.render_stateful_widget(list, chunks[1], &mut app.project_list_state);
+
+    let footer = Block::default()
+        .borders(Borders::ALL)
+        .title(" n: New Project, Enter: Select, q: Quit ")
+        .title_alignment(Alignment::Center);
+    frame.render_widget(footer, chunks[2]);
+
+    if app.active_dialog != ActiveDialog::None {
+        render_dialog(frame, app);
+    }
+}
+
+pub fn render_board(frame: &mut Frame<'_>, app: &mut App) {
     app.hit_test_map.clear();
 
     let chunks = Layout::default()
@@ -67,7 +183,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = Theme::default();
     let notice = app.footer_notice.as_deref().unwrap_or(
-        " n: new task  Enter: attach  c/r/x: category  H/L: move task left/right  J/K: reorder task  tmux Prefix+K: previous session ",
+        " n: new task  Enter: attach  Ctrl+P: command palette  c/r/x: category  H/L: move task left/right  J/K: reorder task  tmux Prefix+K: previous session ",
     );
     let footer = Block::default()
         .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
@@ -202,11 +318,19 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 Color::Reset
             };
 
+            // Add degraded mode indicator when status source is "tmux"
+            let status_source_suffix = if task.status_source == "tmux" {
+                " (tmux)"
+            } else {
+                ""
+            };
+
             let line1 = Line::from(vec![
                 Span::styled(prefix, Style::default().fg(theme.focus)),
                 Span::styled(status_icon, Style::default().fg(status_color)),
                 Span::raw(" "),
                 Span::styled(&task.title, Style::default().fg(theme.task)),
+                Span::styled(status_source_suffix, Style::default().fg(Color::DarkGray)),
             ]);
 
             let repo = app.repos.iter().find(|repo| repo.id == task.repo_id);
@@ -544,14 +668,127 @@ fn render_empty_state(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
+fn render_command_palette(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &CommandPaletteState,
+    show_results: bool,
+) {
     let theme = Theme::default();
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(area);
+
+    let search_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Search ")
+        .border_style(Style::default().fg(theme.focus));
+
+    let search_text = Paragraph::new(state.query.as_str()).block(search_block);
+    frame.render_widget(search_text, layout[0]);
+
+    if !show_results {
+        return;
+    }
+
+    if state.filtered.is_empty() {
+        let no_match = Paragraph::new("No matching commands")
+            .style(Style::default().fg(theme.secondary))
+            .alignment(Alignment::Center);
+        frame.render_widget(no_match, layout[1]);
+        return;
+    }
+
+    let all_cmds = all_commands();
+    let list_height = layout[1].height as usize;
+    let total_items = state.filtered.len();
+
+    let scroll_offset = if total_items <= list_height {
+        0
+    } else {
+        let half_height = list_height / 2;
+        if state.selected_index > half_height {
+            (state.selected_index - half_height).min(total_items - list_height)
+        } else {
+            0
+        }
+    };
+
+    let visible_commands = state.filtered.iter().skip(scroll_offset).take(list_height);
+
+    for (i, ranked_cmd) in visible_commands.enumerate() {
+        let cmd_def = &all_cmds[ranked_cmd.command_idx];
+        let is_selected = (scroll_offset + i) == state.selected_index;
+
+        let (prefix, bg_style) = if is_selected {
+            ("▸ ", Style::default().bg(theme.secondary))
+        } else {
+            ("  ", Style::default())
+        };
+
+        let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.focus))];
+
+        let name = cmd_def.display_name;
+        let mut last_idx = 0;
+
+        for &idx in &ranked_cmd.matched_indices {
+            if idx >= name.len() {
+                continue;
+            }
+
+            if idx > last_idx {
+                spans.push(Span::raw(&name[last_idx..idx]));
+            }
+            spans.push(Span::styled(
+                &name[idx..idx + 1],
+                Style::default()
+                    .fg(theme.focus)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ));
+            last_idx = idx + 1;
+        }
+        if last_idx < name.len() {
+            spans.push(Span::raw(&name[last_idx..]));
+        }
+
+        let row_area = Rect {
+            x: layout[1].x,
+            y: layout[1].y + i as u16,
+            width: layout[1].width,
+            height: 1,
+        };
+
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(bg_style), row_area);
+
+        if !cmd_def.keybinding.is_empty() {
+            let key_hint = Span::styled(cmd_def.keybinding, Style::default().fg(theme.secondary));
+            frame.render_widget(
+                Paragraph::new(Line::from(key_hint)).alignment(Alignment::Right),
+                row_area,
+            );
+        }
+    }
+
+    if total_items > list_height {
+        let mut scrollbar_state =
+            ScrollbarState::new(total_items.saturating_sub(1)).position(scroll_offset);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::default().fg(theme.secondary).bg(theme.secondary))
+            .track_symbol(Some("│"))
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+
+        frame.render_stateful_widget(scrollbar, layout[1], &mut scrollbar_state);
+    }
+}
+
+fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
     if matches!(app.active_dialog, ActiveDialog::Help) {
         render_help_overlay(frame);
         return;
     }
 
-    // Use larger dialog for forms that need more space
     let (percent_x, percent_y) = match &app.active_dialog {
         ActiveDialog::NewTask(_) => (80, 72),
         ActiveDialog::DeleteTask(_) => (50, 50),
@@ -560,13 +797,12 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::WorktreeNotFound(_) => (60, 50),
         ActiveDialog::RepoUnavailable(_) => (60, 50),
         ActiveDialog::Error(_) => (60, 60),
+        ActiveDialog::CommandPalette(_) => command_palette_overlay_size(app.viewport),
+        ActiveDialog::NewProject(_) => (50, 30),
         _ => (60, 20),
     };
 
-    let area = centered_rect(percent_x, percent_y, frame.area());
-    frame.render_widget(Clear, area);
-
-    let title_text = match &app.active_dialog {
+    let title = match &app.active_dialog {
         ActiveDialog::NewTask(_) => " New Task ",
         ActiveDialog::CategoryInput(state) => match state.mode {
             CategoryInputMode::Add => " Add Category ",
@@ -575,24 +811,40 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::DeleteCategory(_) => " Delete Category ",
         ActiveDialog::Error(_) => " Error ",
         ActiveDialog::DeleteTask(_) => " Delete Task ",
+        ActiveDialog::CommandPalette(_) => " Command Palette ",
         ActiveDialog::MoveTask(_) => " Move Task ",
         ActiveDialog::WorktreeNotFound(_) => " Worktree Not Found ",
         ActiveDialog::RepoUnavailable(_) => " Repo Unavailable ",
         ActiveDialog::Help => " Help ",
+        ActiveDialog::NewProject(_) => " New Project ",
+        ActiveDialog::ConfirmQuit(_) => " Confirm Quit ",
         ActiveDialog::None => "",
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(theme.focus))
-        .title(Span::styled(title_text, Style::default().fg(theme.focus)))
-        .title_alignment(Alignment::Center);
+    let anchor = match &app.active_dialog {
+        ActiveDialog::CommandPalette(_) => OverlayAnchor::Top,
+        _ => OverlayAnchor::Center,
+    };
 
-    let inner_area = block.inner(area);
-    frame.render_widget(block, area);
+    let inner_area = render_overlay_frame(
+        frame,
+        OverlayConfig {
+            title,
+            anchor,
+            width_percent: percent_x,
+            height_percent: percent_y,
+        },
+    );
 
     match &app.active_dialog {
+        ActiveDialog::CommandPalette(state) => {
+            render_command_palette(
+                frame,
+                inner_area,
+                state,
+                should_render_command_palette_results(app.viewport),
+            );
+        }
         ActiveDialog::NewTask(state) => {
             let layout = Layout::default()
                 .direction(Direction::Vertical)
@@ -952,8 +1204,83 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
             render_button(frame, layout[1], "[ Dismiss ]", true);
             app.hit_test_map.push((layout[1], Message::DismissDialog));
         }
-        _ => {}
+        ActiveDialog::NewProject(state) => {
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                ])
+                .split(inner_area);
+
+            render_input_field(
+                frame,
+                layout[0],
+                "Project Name",
+                &state.name_input,
+                state.focused_field == NewProjectField::Name,
+            );
+
+            let buttons = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(layout[2]);
+
+            render_button(
+                frame,
+                buttons[0],
+                "[ Create ]",
+                state.focused_field == NewProjectField::Create,
+            );
+            render_button(
+                frame,
+                buttons[1],
+                "[ Cancel ]",
+                state.focused_field == NewProjectField::Cancel,
+            );
+
+            app.hit_test_map.push((buttons[0], Message::CreateProject));
+            app.hit_test_map.push((buttons[1], Message::DismissDialog));
+        }
+        ActiveDialog::ConfirmQuit(state) => {
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(4), Constraint::Length(3)])
+                .split(inner_area);
+
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} active tmux session(s) still running.\nQuit anyway?",
+                    state.active_session_count
+                ))
+                .alignment(Alignment::Center),
+                layout[0],
+            );
+
+            let buttons = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(layout[1]);
+            render_button(frame, buttons[0], "[ Quit ]", true);
+            render_button(frame, buttons[1], "[ Cancel ]", false);
+            app.hit_test_map.push((buttons[0], Message::ConfirmQuit));
+            app.hit_test_map.push((buttons[1], Message::CancelQuit));
+        }
+        ActiveDialog::MoveTask(_) => {
+            // MoveTask dialog handled in columns - this is a placeholder
+        }
+        ActiveDialog::None => {}
     }
+}
+
+fn command_palette_overlay_size(viewport: (u16, u16)) -> (u16, u16) {
+    let width = if viewport.0 < 30 { 90 } else { 60 };
+    (width, 50)
+}
+
+fn should_render_command_palette_results(viewport: (u16, u16)) -> bool {
+    viewport.1 >= 10
 }
 
 fn render_input_field(
@@ -1020,17 +1347,15 @@ fn render_checkbox(
 
 fn render_help_overlay(frame: &mut Frame<'_>) {
     let theme = Theme::default();
-    let area = centered_rect(70, 80, frame.area());
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(theme.focus))
-        .title(Span::styled(" Help ", Style::default().fg(theme.focus)))
-        .title_alignment(Alignment::Center)
-        .style(Style::default().bg(Color::Black).fg(theme.task));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
+    let inner = render_overlay_frame(
+        frame,
+        OverlayConfig {
+            title: " Help ",
+            anchor: OverlayAnchor::Center,
+            width_percent: 70,
+            height_percent: 80,
+        },
+    );
     let text = [
         "Navigation",
         "  h/l or arrows: switch columns",
@@ -1050,13 +1375,17 @@ fn render_help_overlay(frame: &mut Frame<'_>) {
         "  scroll: move through focused column",
         "  click outside this panel: dismiss",
         "General",
+        "  Ctrl+P: open command palette",
         "  ?: toggle help",
         "  Esc: dismiss",
         "  q: quit (asks confirmation if sessions are active)",
     ]
     .join("\n");
 
-    frame.render_widget(Paragraph::new(text), inner);
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().fg(theme.task)),
+        inner,
+    );
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -1077,4 +1406,36 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn test_calculate_overlay_area_center() {
+        let area = Rect::new(0, 0, 100, 100);
+        let result = calculate_overlay_area(OverlayAnchor::Center, 50, 50, area);
+        assert_eq!(result, Rect::new(25, 25, 50, 50));
+    }
+
+    #[test]
+    fn test_calculate_overlay_area_top() {
+        let area = Rect::new(0, 0, 100, 100);
+        let result = calculate_overlay_area(OverlayAnchor::Top, 50, 50, area);
+        assert_eq!(result, Rect::new(25, 2, 50, 50));
+    }
+
+    #[test]
+    fn test_command_palette_overlay_uses_90_percent_width_on_narrow_terminal() {
+        assert_eq!(command_palette_overlay_size((29, 40)), (90, 50));
+        assert_eq!(command_palette_overlay_size((30, 40)), (60, 50));
+    }
+
+    #[test]
+    fn test_command_palette_hides_results_on_short_terminal() {
+        assert!(!should_render_command_palette_results((120, 9)));
+        assert!(should_render_command_palette_results((120, 10)));
+    }
 }
