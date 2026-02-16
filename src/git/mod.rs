@@ -495,7 +495,10 @@ mod tests {
             let seed = temp.path().join("seed");
             fs::create_dir_all(&seed).context("failed to create seed dir")?;
 
-            run_git_in(&temp.path().to_path_buf(), ["init", "--bare", "origin.git"])?;
+            run_git_in(
+                &temp.path().to_path_buf(),
+                ["init", "--bare", "-b", "main", "origin.git"],
+            )?;
 
             let seed_path = seed.to_string_lossy().to_string();
             run_git_in(
