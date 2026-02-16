@@ -205,6 +205,7 @@ pub enum Message {
     AttachSelectedTask,
     OpenNewTaskDialog,
     OpenCommandPalette,
+    OpenProjectList,
     DismissDialog,
     FocusColumn(usize),
     SelectTask(usize, usize),
@@ -456,7 +457,7 @@ impl App {
             .count()
     }
 
-    pub fn new() -> Result<Self> {
+    pub fn new(project_name: Option<&str>) -> Result<Self> {
         let db_path = default_db_path()?;
         let db = Database::open(&db_path)?;
         let server_manager = ensure_server_ready();
@@ -497,6 +498,19 @@ impl App {
 
         app.refresh_data()?;
         app.refresh_projects()?;
+
+        if let Some(name) = project_name {
+            if let Some(idx) = app.project_list.iter().position(|p| p.name == name) {
+                app.selected_project_index = idx;
+                if let Some(project) = app.project_list.get(idx) {
+                    app.switch_project(project.path.clone())?;
+                    app.current_view = View::Board;
+                }
+            } else {
+                anyhow::bail!("project '{}' not found", name);
+            }
+        }
+
         app.reconcile_startup_with_runtime(&RealRecoveryRuntime)?;
         app.refresh_data()?;
 
@@ -668,6 +682,10 @@ impl App {
                 let frequencies = self.db.get_command_frequencies().unwrap_or_default();
                 self.active_dialog =
                     ActiveDialog::CommandPalette(CommandPaletteState::new(frequencies));
+            }
+            Message::OpenProjectList => {
+                self.current_view = View::ProjectList;
+                self.active_dialog = ActiveDialog::None;
             }
             Message::DismissDialog => self.active_dialog = ActiveDialog::None,
             Message::FocusColumn(index) => {

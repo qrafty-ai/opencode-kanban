@@ -151,6 +151,12 @@ fn frequency_bonus(
 pub fn all_commands() -> Vec<CommandDef> {
     vec![
         CommandDef {
+            id: "switch_project",
+            display_name: "Switch Project",
+            keybinding: "Ctrl-p",
+            message: Some(Message::OpenProjectList),
+        },
+        CommandDef {
             id: "new_task",
             display_name: "New Task",
             keybinding: "n",
@@ -296,8 +302,8 @@ mod tests {
         let commands = all_commands();
         assert_eq!(
             commands.len(),
-            16,
-            "Expected 16 commands, found {}",
+            17,
+            "Expected 17 commands, found {}",
             commands.len()
         );
     }

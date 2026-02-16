@@ -20,10 +20,12 @@ fn main() -> Result<()> {
     validate_runtime_environment()?;
     install_panic_hook();
 
+    let project_name = parse_project_arg();
+
     let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
 
-    let mut app = App::new()?;
+    let mut app = App::new(project_name)?;
 
     while !app.should_quit() {
         terminal
@@ -39,6 +41,23 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_project_arg() -> Option<&'static str> {
+    let args: Vec<String> = env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-p" | "--project" => {
+                if i + 1 < args.len() {
+                    return Some(Box::leak(args[i + 1].clone().into_boxed_str()));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 fn validate_runtime_environment() -> Result<()> {
