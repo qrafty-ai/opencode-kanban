@@ -63,6 +63,7 @@ fn calculate_overlay_area(
 }
 
 fn render_overlay_frame(frame: &mut Frame<'_>, config: OverlayConfig) -> Rect {
+    let theme = Theme::default();
     let area = calculate_overlay_area(
         config.anchor,
         config.width_percent,
@@ -75,7 +76,8 @@ fn render_overlay_frame(frame: &mut Frame<'_>, config: OverlayConfig) -> Rect {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
-        .title(config.title)
+        .border_style(Style::default().fg(theme.focus))
+        .title(Span::styled(config.title, Style::default().fg(theme.focus)))
         .title_alignment(Alignment::Center)
         .style(Style::default().bg(Color::Black));
 
@@ -366,6 +368,7 @@ fn render_command_palette(
     state: &CommandPaletteState,
     show_results: bool,
 ) {
+    let theme = Theme::default();
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(0)])
@@ -374,7 +377,7 @@ fn render_command_palette(
     let search_block = Block::default()
         .borders(Borders::ALL)
         .title(" Search ")
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(theme.focus));
 
     let search_text = Paragraph::new(state.query.as_str()).block(search_block);
     frame.render_widget(search_text, layout[0]);
@@ -385,7 +388,7 @@ fn render_command_palette(
 
     if state.filtered.is_empty() {
         let no_match = Paragraph::new("No matching commands")
-            .style(Style::default().fg(Color::Gray))
+            .style(Style::default().fg(theme.secondary))
             .alignment(Alignment::Center);
         frame.render_widget(no_match, layout[1]);
         return;
@@ -413,12 +416,12 @@ fn render_command_palette(
         let is_selected = (scroll_offset + i) == state.selected_index;
 
         let (prefix, bg_style) = if is_selected {
-            ("▸ ", Style::default().bg(Color::DarkGray))
+            ("▸ ", Style::default().bg(theme.secondary))
         } else {
             ("  ", Style::default())
         };
 
-        let mut spans = vec![Span::styled(prefix, Style::default().fg(Color::Yellow))];
+        let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.focus))];
 
         let name = cmd_def.display_name;
         let mut last_idx = 0;
@@ -434,7 +437,7 @@ fn render_command_palette(
             spans.push(Span::styled(
                 &name[idx..idx + 1],
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme.focus)
                     .add_modifier(ratatui::style::Modifier::BOLD),
             ));
             last_idx = idx + 1;
@@ -453,7 +456,7 @@ fn render_command_palette(
         frame.render_widget(Paragraph::new(Line::from(spans)).style(bg_style), row_area);
 
         if !cmd_def.keybinding.is_empty() {
-            let key_hint = Span::styled(cmd_def.keybinding, Style::default().fg(Color::Gray));
+            let key_hint = Span::styled(cmd_def.keybinding, Style::default().fg(theme.secondary));
             frame.render_widget(
                 Paragraph::new(Line::from(key_hint)).alignment(Alignment::Right),
                 row_area,
@@ -465,7 +468,7 @@ fn render_command_palette(
         let mut scrollbar_state =
             ScrollbarState::new(total_items.saturating_sub(1)).position(scroll_offset);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_style(Style::default().fg(Color::Gray).bg(Color::DarkGray))
+            .thumb_style(Style::default().fg(theme.secondary).bg(theme.secondary))
             .track_symbol(Some("│"))
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
@@ -475,7 +478,6 @@ fn render_command_palette(
 }
 
 fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
-    let theme = Theme::default();
     if matches!(app.active_dialog, ActiveDialog::Help) {
         render_help_overlay(frame);
         return;
@@ -514,13 +516,6 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::CommandPalette(_) => OverlayAnchor::Top,
         _ => OverlayAnchor::Center,
     };
-
-    let _block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(theme.focus))
-        .title(Span::styled(title, Style::default().fg(theme.focus)))
-        .title_alignment(Alignment::Center);
 
     let inner_area = render_overlay_frame(
         frame,
@@ -976,6 +971,7 @@ fn render_checkbox(
 }
 
 fn render_help_overlay(frame: &mut Frame<'_>) {
+    let theme = Theme::default();
     let inner = render_overlay_frame(
         frame,
         OverlayConfig {
@@ -1011,7 +1007,10 @@ fn render_help_overlay(frame: &mut Frame<'_>) {
     ]
     .join("\n");
 
-    frame.render_widget(Paragraph::new(text), inner);
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().fg(theme.task)),
+        inner,
+    );
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
