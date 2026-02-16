@@ -32,7 +32,7 @@ pub fn ensure_tmux_installed() -> Result<()> {
 
 pub fn tmux_session_exists(session_name: &str) -> bool {
     tmux_command()
-        .args(["has-session", "-t", session_name])
+        .args(has_session_args(session_name))
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -44,14 +44,7 @@ pub fn tmux_create_session(
     command: Option<&str>,
 ) -> Result<()> {
     let output = tmux_command()
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            session_name,
-            "-c",
-            &working_dir.to_string_lossy(),
-        ])
+        .args(new_session_args(session_name, working_dir))
         .output()
         .context("failed to run tmux new-session")?;
 
@@ -66,7 +59,7 @@ pub fn tmux_create_session(
 
 pub fn tmux_send_keys(session_name: &str, command: &str) -> Result<()> {
     let output = tmux_command()
-        .args(["send-keys", "-t", session_name, command, "Enter"])
+        .args(send_keys_args(session_name, command))
         .output()
         .context("failed to run tmux send-keys")?;
     ensure_success(&output, "send-keys")
@@ -74,47 +67,28 @@ pub fn tmux_send_keys(session_name: &str, command: &str) -> Result<()> {
 
 pub fn tmux_kill_session(session_name: &str) -> Result<()> {
     let output = tmux_command()
-        .args(["kill-session", "-t", session_name])
+        .args(kill_session_args(session_name))
         .output()
         .context("failed to run tmux kill-session")?;
     ensure_success(&output, "kill-session")
 }
 
 pub fn tmux_switch_client(session_name: &str) -> Result<()> {
-    // Try to get current client from default socket (not our dedicated socket)
-    // because the kanban runs in the user's regular tmux
-    let current_client = get_current_client_from_default_socket();
-    let output = if let Some(client) = current_client {
-        // Switch using the client we found
-        Command::new("tmux")
-            .args(["switch-client", "-c", &client, "-t", session_name])
-            .output()
-            .context("failed to run tmux switch-client")?
-    } else {
-        // Fallback: try direct switch (will fail if no current client)
-        Command::new("tmux")
-            .args(["switch-client", "-t", session_name])
-            .output()
-            .context("failed to run tmux switch-client")?
-    };
+    tmux_ensure_return_binding()?;
+
+    let output = Command::new("tmux")
+        .args(switch_client_args(session_name))
+        .output()
+        .context("failed to run tmux switch-client")?;
     ensure_success_with_output(&output, "switch-client")
 }
 
-fn get_current_client_from_default_socket() -> Option<String> {
+fn tmux_ensure_return_binding() -> Result<()> {
     let output = Command::new("tmux")
-        .args(["display-message", "-p", "#{client_name}"])
+        .args(return_binding_args())
         .output()
-        .ok()?;
-    if output.status.success() {
-        let client = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if client.is_empty() {
-            None
-        } else {
-            Some(client)
-        }
-    } else {
-        None
-    }
+        .context("failed to configure return key binding")?;
+    ensure_success_with_output(&output, "bind-key")
 }
 
 fn ensure_success_with_output(output: &std::process::Output, command: &str) -> Result<()> {
@@ -137,13 +111,7 @@ fn ensure_success_with_output(output: &std::process::Output, command: &str) -> R
 }
 
 pub fn tmux_list_sessions() -> Vec<TmuxSession> {
-    let output = tmux_command()
-        .args([
-            "list-sessions",
-            "-F",
-            "#{session_name}\t#{session_created}\t#{session_attached}",
-        ])
-        .output();
+    let output = tmux_command().args(list_sessions_args()).output();
 
     let Ok(output) = output else {
         return Vec::new();
@@ -187,9 +155,8 @@ pub fn tmux_list_sessions() -> Vec<TmuxSession> {
 
 pub fn tmux_capture_pane(session_name: &str, lines: usize) -> Result<String> {
     let start = format!("-{lines}");
-    let target = format!("{session_name}:0.0");
     let output = tmux_command()
-        .args(["capture-pane", "-t", &target, "-p", "-S", &start])
+        .args(capture_pane_window_args(session_name, &start))
         .output()
         .context("failed to run tmux capture-pane")?;
 
@@ -197,7 +164,7 @@ pub fn tmux_capture_pane(session_name: &str, lines: usize) -> Result<String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("can't find window: 0") {
             let retry = tmux_command()
-                .args(["capture-pane", "-t", session_name, "-p", "-S", &start])
+                .args(capture_pane_session_args(session_name, &start))
                 .output()
                 .context("failed to rerun tmux capture-pane")?;
             ensure_success(&retry, "capture-pane")?;
@@ -211,7 +178,7 @@ pub fn tmux_capture_pane(session_name: &str, lines: usize) -> Result<String> {
 
 pub fn tmux_get_pane_pid(session_name: &str) -> Option<u32> {
     let output = tmux_command()
-        .args(["list-panes", "-t", session_name, "-F", "#{pane_pid}"])
+        .args(list_panes_args(session_name))
         .output()
         .ok()?;
 
@@ -247,8 +214,110 @@ fn sanitize_fragment(input: &str) -> String {
 fn tmux_command() -> Command {
     let mut cmd = Command::new("tmux");
     let socket = tmux_socket();
-    cmd.args(["-L", socket.as_str()]);
+    if !socket.is_empty() {
+        cmd.args(socket_args(&socket));
+    }
     cmd
+}
+
+fn socket_args(socket: &str) -> Vec<String> {
+    vec!["-L".to_string(), socket.to_string()]
+}
+
+fn has_session_args(session_name: &str) -> Vec<String> {
+    vec![
+        "has-session".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+    ]
+}
+
+fn new_session_args(session_name: &str, working_dir: &Path) -> Vec<String> {
+    vec![
+        "new-session".to_string(),
+        "-d".to_string(),
+        "-s".to_string(),
+        session_name.to_string(),
+        "-c".to_string(),
+        working_dir.to_string_lossy().to_string(),
+    ]
+}
+
+fn send_keys_args(session_name: &str, command: &str) -> Vec<String> {
+    vec![
+        "send-keys".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+        command.to_string(),
+        "Enter".to_string(),
+    ]
+}
+
+fn kill_session_args(session_name: &str) -> Vec<String> {
+    vec![
+        "kill-session".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+    ]
+}
+
+fn switch_client_args(session_name: &str) -> Vec<String> {
+    vec![
+        "switch-client".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+    ]
+}
+
+fn return_binding_args() -> Vec<String> {
+    vec![
+        "bind-key".to_string(),
+        "-T".to_string(),
+        "prefix".to_string(),
+        "K".to_string(),
+        "switch-client".to_string(),
+        "-l".to_string(),
+    ]
+}
+
+fn list_sessions_args() -> Vec<String> {
+    vec![
+        "list-sessions".to_string(),
+        "-F".to_string(),
+        "#{session_name}\t#{session_created}\t#{session_attached}".to_string(),
+    ]
+}
+
+fn capture_pane_window_args(session_name: &str, start: &str) -> Vec<String> {
+    vec![
+        "capture-pane".to_string(),
+        "-t".to_string(),
+        format!("{session_name}:0.0"),
+        "-p".to_string(),
+        "-S".to_string(),
+        start.to_string(),
+    ]
+}
+
+fn capture_pane_session_args(session_name: &str, start: &str) -> Vec<String> {
+    vec![
+        "capture-pane".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+        "-p".to_string(),
+        "-S".to_string(),
+        start.to_string(),
+    ]
+}
+
+fn list_panes_args(session_name: &str) -> Vec<String> {
+    vec![
+        "list-panes".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+        "-F".to_string(),
+        "#{pane_pid}".to_string(),
+    ]
 }
 
 fn tmux_socket() -> String {
@@ -306,6 +375,96 @@ mod tests {
         let result = sanitize_session_name(&long_repo, &long_branch);
         assert!(result.len() <= 200);
         assert!(result.starts_with("ok-"));
+    }
+
+    #[test]
+    fn test_socket_args_builder() {
+        assert_eq!(socket_args("sock"), vec!["-L", "sock"]);
+    }
+
+    #[test]
+    fn test_has_session_args_builder() {
+        assert_eq!(
+            has_session_args("ok-test"),
+            vec!["has-session", "-t", "ok-test"]
+        );
+    }
+
+    #[test]
+    fn test_new_session_args_builder() {
+        let args = new_session_args("ok-test", Path::new("/tmp/worktree"));
+        assert_eq!(
+            args,
+            vec!["new-session", "-d", "-s", "ok-test", "-c", "/tmp/worktree"]
+        );
+    }
+
+    #[test]
+    fn test_send_keys_args_builder() {
+        assert_eq!(
+            send_keys_args("ok-test", "opencode"),
+            vec!["send-keys", "-t", "ok-test", "opencode", "Enter"]
+        );
+    }
+
+    #[test]
+    fn test_kill_session_args_builder() {
+        assert_eq!(
+            kill_session_args("ok-test"),
+            vec!["kill-session", "-t", "ok-test"]
+        );
+    }
+
+    #[test]
+    fn test_switch_client_args_builder() {
+        assert_eq!(
+            switch_client_args("ok-target"),
+            vec!["switch-client", "-t", "ok-target"]
+        );
+    }
+
+    #[test]
+    fn test_return_binding_args_builder() {
+        assert_eq!(
+            return_binding_args(),
+            vec!["bind-key", "-T", "prefix", "K", "switch-client", "-l"]
+        );
+    }
+
+    #[test]
+    fn test_list_sessions_args_builder() {
+        assert_eq!(
+            list_sessions_args(),
+            vec![
+                "list-sessions",
+                "-F",
+                "#{session_name}\t#{session_created}\t#{session_attached}"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_capture_pane_window_args_builder() {
+        assert_eq!(
+            capture_pane_window_args("ok-test", "-50"),
+            vec!["capture-pane", "-t", "ok-test:0.0", "-p", "-S", "-50"]
+        );
+    }
+
+    #[test]
+    fn test_capture_pane_session_args_builder() {
+        assert_eq!(
+            capture_pane_session_args("ok-test", "-50"),
+            vec!["capture-pane", "-t", "ok-test", "-p", "-S", "-50"]
+        );
+    }
+
+    #[test]
+    fn test_list_panes_args_builder() {
+        assert_eq!(
+            list_panes_args("ok-test"),
+            vec!["list-panes", "-t", "ok-test", "-F", "#{pane_pid}"]
+        );
     }
 
     #[test]

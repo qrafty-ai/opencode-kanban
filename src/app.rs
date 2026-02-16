@@ -174,8 +174,8 @@ pub enum Message {
     OpenDeleteCategoryDialog,
     SubmitCategoryInput,
     ConfirmDeleteCategory,
-    MoveCategoryLeft,
-    MoveCategoryRight,
+    MoveTaskLeft,
+    MoveTaskRight,
     MoveTaskUp,
     MoveTaskDown,
     CreateTask,
@@ -532,10 +532,10 @@ impl App {
             Message::OpenDeleteCategoryDialog => self.open_delete_category_dialog()?,
             Message::SubmitCategoryInput => self.confirm_category_input()?,
             Message::ConfirmDeleteCategory => self.confirm_delete_category()?,
-            Message::MoveCategoryLeft => self.move_category_left()?,
-            Message::MoveCategoryRight => self.move_category_right()?,
-            Message::MoveTaskUp => self.move_selected_task_up()?,
-            Message::MoveTaskDown => self.move_selected_task_down()?,
+            Message::MoveTaskLeft => self.move_task_left()?,
+            Message::MoveTaskRight => self.move_task_right()?,
+            Message::MoveTaskUp => self.move_task_up()?,
+            Message::MoveTaskDown => self.move_task_down()?,
             Message::WorktreeNotFoundRecreate => self.recreate_from_repo_root()?,
             Message::WorktreeNotFoundMarkBroken => self.mark_worktree_missing_as_broken()?,
             Message::RepoUnavailableDismiss => self.active_dialog = ActiveDialog::None,
@@ -601,10 +601,10 @@ impl App {
                 self.update(Message::OpenDeleteCategoryDialog)?;
             }
             KeyCode::Char('H') => {
-                self.update(Message::MoveCategoryLeft)?;
+                self.update(Message::MoveTaskLeft)?;
             }
             KeyCode::Char('L') => {
-                self.update(Message::MoveCategoryRight)?;
+                self.update(Message::MoveTaskRight)?;
             }
             KeyCode::Char('J') => {
                 self.update(Message::MoveTaskDown)?;
@@ -955,104 +955,101 @@ impl App {
             .cloned()
     }
 
-    fn sorted_tasks_in_column(&self, column_index: usize) -> Vec<Task> {
-        let Some(category) = self.categories.get(column_index) else {
-            return Vec::new();
-        };
-
-        let mut tasks: Vec<Task> = self
-            .tasks
-            .iter()
-            .filter(|task| task.category_id == category.id)
-            .cloned()
-            .collect();
-        tasks.sort_by_key(|task| task.position);
-        tasks
-    }
-
-    fn persist_task_order(&self, tasks: &[Task]) -> Result<()> {
-        for (idx, task) in tasks.iter().enumerate() {
-            self.db.update_task_position(task.id, idx as i64)?;
-        }
-        Ok(())
-    }
-
-    fn persist_category_order(&self, categories: &[Category]) -> Result<()> {
-        for (idx, category) in categories.iter().enumerate() {
-            self.db.update_category_position(category.id, idx as i64)?;
-        }
-        Ok(())
-    }
-
-    fn move_selected_task_up(&mut self) -> Result<()> {
-        let mut ordered_tasks = self.sorted_tasks_in_column(self.focused_column);
-        if ordered_tasks.len() < 2 {
+    fn move_task_left(&mut self) -> Result<()> {
+        if self.focused_column == 0 {
             return Ok(());
         }
+        let Some(task) = self.selected_task() else {
+            return Ok(());
+        };
+        let target_column = self.focused_column - 1;
+        let target_category = &self.categories[target_column];
+        self.db
+            .update_task_category(task.id, target_category.id, 0)?;
+        self.focused_column = target_column;
+        self.selected_task_per_column.insert(target_column, 0);
+        self.refresh_data()
+    }
 
+    fn move_task_right(&mut self) -> Result<()> {
+        if self.focused_column >= self.categories.len() - 1 {
+            return Ok(());
+        }
+        let Some(task) = self.selected_task() else {
+            return Ok(());
+        };
+        let target_column = self.focused_column + 1;
+        let target_category = &self.categories[target_column];
+        self.db
+            .update_task_category(task.id, target_category.id, 0)?;
+        self.focused_column = target_column;
+        self.selected_task_per_column.insert(target_column, 0);
+        self.refresh_data()
+    }
+
+    fn move_task_up(&mut self) -> Result<()> {
+        let column_index = self.focused_column;
+        let Some(category) = self.categories.get(column_index) else {
+            return Ok(());
+        };
+        let mut tasks: Vec<_> = self
+            .tasks
+            .iter()
+            .filter(|t| t.category_id == category.id)
+            .cloned()
+            .collect();
+        tasks.sort_by_key(|t| t.position);
+        if tasks.len() < 2 {
+            return Ok(());
+        }
         let selected = self
             .selected_task_per_column
-            .get(&self.focused_column)
+            .get(&column_index)
             .copied()
             .unwrap_or(0)
-            .min(ordered_tasks.len() - 1);
+            .min(tasks.len() - 1);
         if selected == 0 {
             return Ok(());
         }
-
-        ordered_tasks.swap(selected - 1, selected);
-        self.persist_task_order(&ordered_tasks)?;
+        tasks.swap(selected - 1, selected);
+        for (idx, task) in tasks.iter().enumerate() {
+            self.db.update_task_position(task.id, idx as i64)?;
+        }
         self.selected_task_per_column
-            .insert(self.focused_column, selected - 1);
+            .insert(column_index, selected - 1);
         self.refresh_data()
     }
 
-    fn move_selected_task_down(&mut self) -> Result<()> {
-        let mut ordered_tasks = self.sorted_tasks_in_column(self.focused_column);
-        if ordered_tasks.len() < 2 {
+    fn move_task_down(&mut self) -> Result<()> {
+        let column_index = self.focused_column;
+        let Some(category) = self.categories.get(column_index) else {
+            return Ok(());
+        };
+        let mut tasks: Vec<_> = self
+            .tasks
+            .iter()
+            .filter(|t| t.category_id == category.id)
+            .cloned()
+            .collect();
+        tasks.sort_by_key(|t| t.position);
+        if tasks.len() < 2 {
             return Ok(());
         }
-
         let selected = self
             .selected_task_per_column
-            .get(&self.focused_column)
+            .get(&column_index)
             .copied()
             .unwrap_or(0)
-            .min(ordered_tasks.len() - 1);
-        if selected + 1 >= ordered_tasks.len() {
+            .min(tasks.len() - 1);
+        if selected + 1 >= tasks.len() {
             return Ok(());
         }
-
-        ordered_tasks.swap(selected, selected + 1);
-        self.persist_task_order(&ordered_tasks)?;
+        tasks.swap(selected, selected + 1);
+        for (idx, task) in tasks.iter().enumerate() {
+            self.db.update_task_position(task.id, idx as i64)?;
+        }
         self.selected_task_per_column
-            .insert(self.focused_column, selected + 1);
-        self.refresh_data()
-    }
-
-    fn move_category_left(&mut self) -> Result<()> {
-        if self.focused_column == 0 || self.categories.len() < 2 {
-            return Ok(());
-        }
-
-        let mut ordered_categories = self.categories.clone();
-        let target = self.focused_column - 1;
-        ordered_categories.swap(self.focused_column, target);
-        self.persist_category_order(&ordered_categories)?;
-        self.focused_column = target;
-        self.refresh_data()
-    }
-
-    fn move_category_right(&mut self) -> Result<()> {
-        if self.categories.len() < 2 || self.focused_column + 1 >= self.categories.len() {
-            return Ok(());
-        }
-
-        let mut ordered_categories = self.categories.clone();
-        let target = self.focused_column + 1;
-        ordered_categories.swap(self.focused_column, target);
-        self.persist_category_order(&ordered_categories)?;
-        self.focused_column = target;
+            .insert(column_index, selected + 1);
         self.refresh_data()
     }
 

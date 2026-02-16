@@ -54,7 +54,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let notice = app.footer_notice.as_deref().unwrap_or(
-        " n: new task  c/r/x: category  H/L: move column  J/K: reorder task  Enter: attach ",
+        " n: new task  Enter: attach  c/r/x: category  H/L: move task left/right  J/K: reorder task  tmux Prefix+K: previous session ",
     );
     let footer = Block::default()
         .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
@@ -751,6 +751,7 @@ fn render_help_overlay(frame: &mut Frame<'_>) {
         "Task Actions",
         "  n: new task",
         "  Enter: attach selected task",
+        "  in task session: Prefix+K returns to previous session",
         "  J/K: move selected task in column",
         "Category Management",
         "  c: add category",
