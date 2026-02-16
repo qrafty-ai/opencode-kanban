@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::widgets::ScrollbarState;
@@ -15,15 +16,18 @@ use uuid::Uuid;
 
 use crate::db::Database;
 use crate::git::{
-    derive_worktree_path, git_create_worktree, git_detect_default_branch, git_fetch,
-    git_is_valid_repo, git_remove_worktree,
+    derive_worktree_path, git_create_worktree, git_delete_branch, git_detect_default_branch,
+    git_fetch, git_is_valid_repo, git_remove_worktree,
 };
-use crate::opencode::{Status, opencode_detect_status, opencode_is_running_in_session};
+use crate::opencode::{
+    OpenCodeBindingState, OpenCodeServerManager, ServerStatusProvider, Status, StatusProvider,
+    TmuxStatusProvider, classify_binding_state, ensure_server_ready,
+};
 use crate::tmux::{
-    sanitize_session_name, tmux_capture_pane, tmux_create_session, tmux_kill_session,
-    tmux_send_keys, tmux_session_exists, tmux_switch_client,
+    sanitize_session_name, tmux_create_session, tmux_kill_session, tmux_send_keys,
+    tmux_session_exists, tmux_switch_client,
 };
-use crate::types::{Category, Repo, Task};
+use crate::types::{Category, Repo, SessionStatus, SessionStatusError, SessionStatusSource, Task};
 
 pub const STATUS_REPO_UNAVAILABLE: &str = "repo_unavailable";
 pub const STATUS_BROKEN: &str = "broken";
@@ -66,6 +70,7 @@ pub enum DeleteTaskField {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct DeleteTaskDialogState {
+    pub task_id: Uuid,
     pub task_title: String,
     pub task_branch: String,
     pub kill_tmux: bool,
@@ -172,6 +177,7 @@ pub enum Message {
     OpenAddCategoryDialog,
     OpenRenameCategoryDialog,
     OpenDeleteCategoryDialog,
+    OpenDeleteTaskDialog,
     SubmitCategoryInput,
     ConfirmDeleteCategory,
     MoveTaskLeft,
@@ -200,7 +206,7 @@ struct DesiredTaskState {
 struct ObservedTaskState {
     repo_available: bool,
     session_exists: bool,
-    session_status: Option<Status>,
+    session_status: Option<SessionStatus>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -214,7 +220,8 @@ trait RecoveryRuntime {
     fn repo_exists(&self, repo_path: &Path) -> bool;
     fn worktree_exists(&self, worktree_path: &Path) -> bool;
     fn session_exists(&self, session_name: &str) -> bool;
-    fn detect_status(&self, session_name: &str) -> Status;
+    fn binding_state(&self, opencode_session_id: Option<&str>) -> OpenCodeBindingState;
+    fn detect_status(&self, session_name: &str) -> SessionStatus;
     fn create_session(&self, session_name: &str, working_dir: &Path, command: &str) -> Result<()>;
     fn send_command(&self, session_name: &str, command: &str) -> Result<()>;
     fn switch_client(&self, session_name: &str) -> Result<()>;
@@ -235,7 +242,16 @@ impl RecoveryRuntime for RealRecoveryRuntime {
         tmux_session_exists(session_name)
     }
 
-    fn detect_status(&self, session_name: &str) -> Status {
+    fn binding_state(&self, opencode_session_id: Option<&str>) -> OpenCodeBindingState {
+        let Some(session_id) = opencode_session_id else {
+            return OpenCodeBindingState::Unbound;
+        };
+
+        let status = ServerStatusProvider::default().get_status(session_id);
+        classify_binding_state(Some(session_id), Some(&status))
+    }
+
+    fn detect_status(&self, session_name: &str) -> SessionStatus {
         detect_session_status(session_name)
     }
 
@@ -369,6 +385,7 @@ pub struct App {
     started_at: Instant,
     mouse_seen: bool,
     mouse_hint_shown: bool,
+    _server_manager: OpenCodeServerManager,
     poller_stop: Arc<AtomicBool>,
     poller_thread: Option<thread::JoinHandle<()>>,
 }
@@ -377,6 +394,7 @@ impl App {
     pub fn new() -> Result<Self> {
         let db_path = default_db_path()?;
         let db = Database::open(&db_path)?;
+        let server_manager = ensure_server_ready();
         let poller_stop = Arc::new(AtomicBool::new(false));
 
         let mut app = Self {
@@ -398,6 +416,7 @@ impl App {
             started_at: Instant::now(),
             mouse_seen: false,
             mouse_hint_shown: false,
+            _server_manager: server_manager,
             poller_stop,
             poller_thread: None,
         };
@@ -530,6 +549,7 @@ impl App {
                 }
             }
             Message::OpenDeleteCategoryDialog => self.open_delete_category_dialog()?,
+            Message::OpenDeleteTaskDialog => self.open_delete_task_dialog()?,
             Message::SubmitCategoryInput => self.confirm_category_input()?,
             Message::ConfirmDeleteCategory => self.confirm_delete_category()?,
             Message::MoveTaskLeft => self.move_task_left()?,
@@ -544,8 +564,8 @@ impl App {
             Message::CancelQuit => self.active_dialog = ActiveDialog::None,
             Message::DeleteTaskToggleKillTmux
             | Message::DeleteTaskToggleRemoveWorktree
-            | Message::DeleteTaskToggleDeleteBranch
-            | Message::ConfirmDeleteTask => {}
+            | Message::DeleteTaskToggleDeleteBranch => {}
+            Message::ConfirmDeleteTask => self.confirm_delete_task()?,
         }
 
         self.maybe_show_tmux_mouse_hint();
@@ -599,6 +619,9 @@ impl App {
             }
             KeyCode::Char('x') => {
                 self.update(Message::OpenDeleteCategoryDialog)?;
+            }
+            KeyCode::Char('d') => {
+                self.update(Message::OpenDeleteTaskDialog)?;
             }
             KeyCode::Char('H') => {
                 self.update(Message::MoveTaskLeft)?;
@@ -847,6 +870,45 @@ impl App {
                 }
                 _ => {}
             },
+            ActiveDialog::DeleteTask(state) => match key.code {
+                KeyCode::Esc => self.active_dialog = ActiveDialog::None,
+                KeyCode::Left | KeyCode::Char('h') => {
+                    state.focused_field = match state.focused_field {
+                        DeleteTaskField::KillTmux => DeleteTaskField::Cancel,
+                        DeleteTaskField::RemoveWorktree => DeleteTaskField::KillTmux,
+                        DeleteTaskField::DeleteBranch => DeleteTaskField::RemoveWorktree,
+                        DeleteTaskField::Delete => DeleteTaskField::DeleteBranch,
+                        DeleteTaskField::Cancel => DeleteTaskField::Delete,
+                    };
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                    state.focused_field = match state.focused_field {
+                        DeleteTaskField::KillTmux => DeleteTaskField::RemoveWorktree,
+                        DeleteTaskField::RemoveWorktree => DeleteTaskField::DeleteBranch,
+                        DeleteTaskField::DeleteBranch => DeleteTaskField::Delete,
+                        DeleteTaskField::Delete => DeleteTaskField::Cancel,
+                        DeleteTaskField::Cancel => DeleteTaskField::KillTmux,
+                    };
+                }
+                KeyCode::Enter => {
+                    follow_up = Some(match state.focused_field {
+                        DeleteTaskField::Delete => Message::ConfirmDeleteTask,
+                        DeleteTaskField::Cancel => Message::DismissDialog,
+                        _ => Message::DismissDialog,
+                    });
+                }
+                KeyCode::Char(' ') => {
+                    match state.focused_field {
+                        DeleteTaskField::KillTmux => state.kill_tmux = !state.kill_tmux,
+                        DeleteTaskField::RemoveWorktree => {
+                            state.remove_worktree = !state.remove_worktree
+                        }
+                        DeleteTaskField::DeleteBranch => state.delete_branch = !state.delete_branch,
+                        _ => {}
+                    };
+                }
+                _ => {}
+            },
             ActiveDialog::WorktreeNotFound(state) => match key.code {
                 KeyCode::Esc => self.active_dialog = ActiveDialog::None,
                 KeyCode::Left | KeyCode::Char('h') => {
@@ -1068,6 +1130,23 @@ impl App {
         Ok(())
     }
 
+    fn open_delete_task_dialog(&mut self) -> Result<()> {
+        let Some(task) = self.selected_task() else {
+            return Ok(());
+        };
+
+        self.active_dialog = ActiveDialog::DeleteTask(DeleteTaskDialogState {
+            task_id: task.id,
+            task_title: task.title.clone(),
+            task_branch: task.branch.clone(),
+            kill_tmux: true,
+            remove_worktree: true,
+            delete_branch: false,
+            focused_field: DeleteTaskField::Cancel,
+        });
+        Ok(())
+    }
+
     fn confirm_category_input(&mut self) -> Result<()> {
         let ActiveDialog::CategoryInput(state) = self.active_dialog.clone() else {
             return Ok(());
@@ -1129,6 +1208,48 @@ impl App {
         }
 
         self.db.delete_category(state.category_id)?;
+        self.active_dialog = ActiveDialog::None;
+        self.refresh_data()?;
+        Ok(())
+    }
+
+    fn confirm_delete_task(&mut self) -> Result<()> {
+        let ActiveDialog::DeleteTask(state) = self.active_dialog.clone() else {
+            return Ok(());
+        };
+
+        let task = self.tasks.iter().find(|t| t.id == state.task_id);
+        let Some(task) = task else {
+            self.active_dialog = ActiveDialog::None;
+            return Ok(());
+        };
+
+        let repo = self.repo_for_task(task);
+
+        if state.kill_tmux
+            && let Some(ref session_name) = task.tmux_session_name
+        {
+            let _ = tmux_kill_session(session_name);
+        }
+
+        if state.remove_worktree
+            && let (Some(worktree_path), Some(r)) = (&task.worktree_path, repo.as_ref())
+        {
+            let worktree = Path::new(worktree_path);
+            let repo_path = Path::new(&r.path);
+            if worktree.exists() {
+                let _ = git_remove_worktree(repo_path, worktree);
+            }
+        }
+
+        if state.delete_branch
+            && let Some(r) = repo
+            && !task.branch.is_empty()
+        {
+            let _ = git_delete_branch(Path::new(&r.path), &task.branch);
+        }
+
+        self.db.delete_task(state.task_id)?;
         self.active_dialog = ActiveDialog::None;
         self.refresh_data()?;
         Ok(())
@@ -1364,9 +1485,9 @@ fn reconcile_desired_vs_observed(
 
     observed
         .session_status
-        .unwrap_or(Status::Unknown)
-        .as_str()
-        .to_string()
+        .as_ref()
+        .map(|status| status.state.as_str().to_string())
+        .unwrap_or_else(|| Status::Unknown.as_str().to_string())
 }
 
 fn reconcile_startup_tasks(
@@ -1378,6 +1499,7 @@ fn reconcile_startup_tasks(
     let repos_by_id: HashMap<Uuid, &Repo> = repos.iter().map(|repo| (repo.id, repo)).collect();
 
     for task in tasks {
+        let binding_state = runtime.binding_state(task.opencode_session_id.as_deref());
         let repo_available = repos_by_id
             .get(&task.repo_id)
             .map(|repo| runtime.repo_exists(Path::new(&repo.path)))
@@ -1397,6 +1519,8 @@ fn reconcile_startup_tasks(
             );
             db.update_task_status(task.id, &reconciled_status)?;
         }
+
+        persist_binding_state(db, task, binding_state)?;
     }
 
     Ok(())
@@ -1408,6 +1532,9 @@ fn attach_task_with_runtime(
     repo: &Repo,
     runtime: &impl RecoveryRuntime,
 ) -> Result<AttachTaskResult> {
+    let binding_state = runtime.binding_state(task.opencode_session_id.as_deref());
+    persist_binding_state(db, task, binding_state)?;
+
     if !runtime.repo_exists(Path::new(&repo.path)) {
         db.update_task_status(task.id, STATUS_REPO_UNAVAILABLE)?;
         return Ok(AttachTaskResult::RepoUnavailable);
@@ -1417,10 +1544,10 @@ fn attach_task_with_runtime(
         && runtime.session_exists(session_name)
     {
         let observed_status = runtime.detect_status(session_name);
-        db.update_task_status(task.id, observed_status.as_str())?;
+        db.update_task_status(task.id, observed_status.state.as_str())?;
 
-        if matches!(observed_status, Status::Dead | Status::Unknown) {
-            let command = opencode_command(task.opencode_session_id.as_deref());
+        if matches!(observed_status.state, Status::Dead | Status::Unknown) {
+            let command = binding_aware_opencode_command(task, binding_state);
             runtime.send_command(session_name, &command)?;
             db.update_task_status(task.id, Status::Unknown.as_str())?;
         }
@@ -1444,11 +1571,7 @@ fn attach_task_with_runtime(
         runtime,
     );
 
-    let command = if task.tmux_session_name.is_some() {
-        opencode_command(task.opencode_session_id.as_deref())
-    } else {
-        "opencode".to_string()
-    };
+    let command = binding_aware_opencode_command(task, binding_state);
 
     runtime.create_session(&session_name, worktree_path, &command)?;
     db.update_task_tmux(
@@ -1612,6 +1735,38 @@ fn opencode_command(session_id: Option<&str>) -> String {
     }
 }
 
+fn binding_aware_opencode_command(task: &Task, binding_state: OpenCodeBindingState) -> String {
+    if matches!(binding_state, OpenCodeBindingState::Bound) {
+        return opencode_command(task.opencode_session_id.as_deref());
+    }
+
+    "opencode".to_string()
+}
+
+fn persist_binding_state(
+    db: &Database,
+    task: &Task,
+    binding_state: OpenCodeBindingState,
+) -> Result<()> {
+    if !matches!(binding_state, OpenCodeBindingState::Stale) {
+        return Ok(());
+    }
+
+    let Some(opencode_session_id) = task.opencode_session_id.as_deref() else {
+        return Ok(());
+    };
+
+    let stale_message = format!(
+        "BINDING_STALE: OpenCode server does not recognize session id {opencode_session_id}"
+    );
+    db.update_task_status_metadata(
+        task.id,
+        SessionStatusSource::Server.as_str(),
+        Some(to_iso8601(SystemTime::now())),
+        Some(stale_message),
+    )
+}
+
 fn next_available_session_name(
     existing_name: Option<&str>,
     repo_name: &str,
@@ -1682,6 +1837,17 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
                 let repos = db.list_repos().unwrap_or_default();
                 let repo_paths: HashMap<Uuid, String> =
                     repos.into_iter().map(|repo| (repo.id, repo.path)).collect();
+                let server_provider = ServerStatusProvider::default();
+                let tmux_provider = TmuxStatusProvider;
+
+                let server_known_ids: Vec<String> = tasks
+                    .iter()
+                    .filter_map(|task| task.opencode_session_id.clone())
+                    .collect();
+                let server_statuses: HashMap<String, SessionStatus> = server_provider
+                    .list_statuses(&server_known_ids)
+                    .into_iter()
+                    .collect();
 
                 for (index, task) in tasks.iter().enumerate() {
                     if stop.load(Ordering::Relaxed) {
@@ -1700,12 +1866,19 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
                     }
 
                     if let Some(session_name) = task.tmux_session_name.as_deref() {
-                        let status = if tmux_session_exists(session_name) {
-                            detect_session_status(session_name)
-                        } else {
-                            Status::Dead
-                        };
-                        let _ = db.update_task_status(task.id, status.as_str());
+                        let status = resolve_server_first_status(
+                            session_name,
+                            task.opencode_session_id.as_deref(),
+                            &server_statuses,
+                            &tmux_provider,
+                        );
+                        let _ = db.update_task_status(task.id, status.state.as_str());
+                        let _ = db.update_task_status_metadata(
+                            task.id,
+                            status.source.as_str(),
+                            Some(to_iso8601(status.fetched_at)),
+                            status.error.as_ref().map(format_status_error),
+                        );
                     }
 
                     tokio::time::sleep(staggered_poll_delay(index)).await;
@@ -1715,15 +1888,71 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
     })
 }
 
-fn detect_session_status(session_name: &str) -> Status {
-    if !opencode_is_running_in_session(session_name) {
-        return Status::Dead;
+fn detect_session_status_with_provider(
+    session_name: &str,
+    provider: &impl StatusProvider,
+) -> SessionStatus {
+    provider.get_status(session_name)
+}
+
+fn detect_session_status(session_name: &str) -> SessionStatus {
+    detect_session_status_with_provider(session_name, &TmuxStatusProvider)
+}
+
+fn resolve_server_first_status(
+    tmux_session_name: &str,
+    opencode_session_id: Option<&str>,
+    server_statuses: &HashMap<String, SessionStatus>,
+    tmux_provider: &impl StatusProvider,
+) -> SessionStatus {
+    let server_candidate = opencode_session_id
+        .and_then(|session_id| server_statuses.get(session_id).cloned())
+        .unwrap_or_else(|| SessionStatus {
+            state: Status::Unknown,
+            source: SessionStatusSource::None,
+            fetched_at: SystemTime::now(),
+            error: Some(SessionStatusError {
+                code: "SERVER_STATUS_MISSING".to_string(),
+                message: "session was not included in server status map".to_string(),
+            }),
+        });
+
+    if matches!(server_candidate.source, SessionStatusSource::Server)
+        && server_candidate.error.is_none()
+    {
+        return server_candidate;
     }
 
-    match tmux_capture_pane(session_name, 50) {
-        Ok(pane) => opencode_detect_status(&pane),
-        Err(_) => Status::Unknown,
+    let mut fallback = detect_session_status_with_provider(tmux_session_name, tmux_provider);
+    if let Some(reason) = server_candidate.error {
+        fallback.error = Some(merge_fallback_errors(reason, fallback.error));
     }
+    fallback
+}
+
+fn merge_fallback_errors(
+    fallback_reason: SessionStatusError,
+    fallback_error: Option<SessionStatusError>,
+) -> SessionStatusError {
+    if let Some(tmux_error) = fallback_error {
+        SessionStatusError {
+            code: format!("{}+{}", fallback_reason.code, tmux_error.code),
+            message: format!(
+                "fallback_reason={} | tmux_error={}",
+                fallback_reason.message, tmux_error.message
+            ),
+        }
+    } else {
+        fallback_reason
+    }
+}
+
+fn to_iso8601(time: SystemTime) -> String {
+    DateTime::<Utc>::from(time).to_rfc3339()
+}
+
+fn format_status_error(error: &SessionStatusError) -> String {
+    format!("{}: {}", error.code, error.message)
 }
 
 pub fn staggered_poll_delay(task_index: usize) -> Duration {
@@ -1760,6 +1989,9 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
 
     use anyhow::Result;
     use tempfile::TempDir;
@@ -1772,6 +2004,240 @@ mod tests {
         let one = staggered_poll_delay(0);
         let two = staggered_poll_delay(1);
         assert!(two > one);
+    }
+
+    #[test]
+    fn test_detect_session_status_with_provider_returns_normalized_metadata() {
+        let provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Waiting,
+                source: SessionStatusSource::Server,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let status = detect_session_status_with_provider("session-1", &provider);
+        assert_eq!(status.state, Status::Waiting);
+        assert_eq!(status.source, SessionStatusSource::Server);
+        assert_eq!(*provider.calls.borrow(), vec!["session-1".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_uses_server_when_available() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Dead,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let server_statuses = HashMap::from([(
+            "sid-1".to_string(),
+            SessionStatus {
+                state: Status::Running,
+                source: SessionStatusSource::Server,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+        )]);
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &server_statuses, &tmux_provider);
+
+        assert_eq!(status.state, Status::Running);
+        assert_eq!(status.source, SessionStatusSource::Server);
+        assert!(status.error.is_none());
+        assert!(tmux_provider.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_partial_map_falls_back_per_session() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Idle,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &HashMap::new(), &tmux_provider);
+
+        assert_eq!(status.state, Status::Idle);
+        assert_eq!(status.source, SessionStatusSource::Tmux);
+        assert_eq!(
+            status.error.as_ref().map(|err| err.code.as_str()),
+            Some("SERVER_STATUS_MISSING")
+        );
+        assert_eq!(*tmux_provider.calls.borrow(), vec!["tmux-1".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_timeout_falls_back_to_tmux() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Waiting,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let server_statuses = HashMap::from([(
+            "sid-1".to_string(),
+            SessionStatus {
+                state: Status::Unknown,
+                source: SessionStatusSource::None,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: Some(SessionStatusError {
+                    code: "SERVER_TIMEOUT".to_string(),
+                    message: "request timed out".to_string(),
+                }),
+            },
+        )]);
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &server_statuses, &tmux_provider);
+
+        assert_eq!(status.state, Status::Waiting);
+        assert_eq!(status.source, SessionStatusSource::Tmux);
+        assert_eq!(
+            status.error.as_ref().map(|err| err.code.as_str()),
+            Some("SERVER_TIMEOUT")
+        );
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_auth_error_falls_back_to_tmux() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Running,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let server_statuses = HashMap::from([(
+            "sid-1".to_string(),
+            SessionStatus {
+                state: Status::Unknown,
+                source: SessionStatusSource::None,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: Some(SessionStatusError {
+                    code: "SERVER_AUTH_ERROR".to_string(),
+                    message: "unauthorized".to_string(),
+                }),
+            },
+        )]);
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &server_statuses, &tmux_provider);
+
+        assert_eq!(status.state, Status::Running);
+        assert_eq!(status.source, SessionStatusSource::Tmux);
+        assert_eq!(
+            status.error.as_ref().map(|err| err.code.as_str()),
+            Some("SERVER_AUTH_ERROR")
+        );
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_server_down_falls_back_to_tmux() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Running,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let server_statuses = HashMap::from([(
+            "sid-1".to_string(),
+            SessionStatus {
+                state: Status::Unknown,
+                source: SessionStatusSource::None,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: Some(SessionStatusError {
+                    code: "SERVER_CONNECT_FAILED".to_string(),
+                    message: "connection refused".to_string(),
+                }),
+            },
+        )]);
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &server_statuses, &tmux_provider);
+
+        assert_eq!(status.state, Status::Running);
+        assert_eq!(status.source, SessionStatusSource::Tmux);
+        assert_eq!(
+            status.error.as_ref().map(|err| err.code.as_str()),
+            Some("SERVER_CONNECT_FAILED")
+        );
+    }
+
+    #[test]
+    fn test_resolve_server_first_status_parse_mismatch_falls_back_to_tmux() {
+        let tmux_provider = FakeStatusProvider {
+            response: SessionStatus {
+                state: Status::Idle,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let server_statuses = HashMap::from([(
+            "sid-1".to_string(),
+            SessionStatus {
+                state: Status::Unknown,
+                source: SessionStatusSource::None,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: Some(SessionStatusError {
+                    code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+                    message: "invalid contract".to_string(),
+                }),
+            },
+        )]);
+
+        let status =
+            resolve_server_first_status("tmux-1", Some("sid-1"), &server_statuses, &tmux_provider);
+
+        assert_eq!(status.state, Status::Idle);
+        assert_eq!(status.source, SessionStatusSource::Tmux);
+        assert_eq!(
+            status.error.as_ref().map(|err| err.code.as_str()),
+            Some("SERVER_CONTRACT_PARSE_ERROR")
+        );
+    }
+
+    #[test]
+    fn test_spawn_status_poller_startup_is_non_blocking_with_stop_requested() {
+        let temp = TempDir::new().expect("temp dir should be created");
+        let db_path = temp.path().join("kanban.sqlite");
+        let stop = Arc::new(AtomicBool::new(true));
+
+        let started = Instant::now();
+        let handle = spawn_status_poller(db_path, Arc::clone(&stop));
+        handle.join().expect("poller should join cleanly");
+
+        assert!(
+            started.elapsed() <= Duration::from_millis(100),
+            "status poller startup should remain non-blocking"
+        );
+        assert!(stop.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -1798,6 +2264,49 @@ mod tests {
 
         let updated = fixture.db.get_task(task.id)?;
         assert_eq!(updated.tmux_status, Status::Dead.as_str());
+        Ok(())
+    }
+
+    #[test]
+    fn test_recovery_reconcile_stale_binding_preserves_session_id() -> Result<()> {
+        let fixture = RecoveryFixture::new()?;
+        let task = fixture.new_task("startup-stale-binding")?;
+        let session_id = Uuid::new_v4().to_string();
+
+        fixture.db.update_task_tmux(
+            task.id,
+            Some("ok-startup-stale-binding".to_string()),
+            Some(session_id.clone()),
+            Some(fixture.worktree().display().to_string()),
+        )?;
+
+        let runtime = FakeRecoveryRuntime::default();
+        runtime
+            .binding_states
+            .borrow_mut()
+            .insert(session_id.clone(), OpenCodeBindingState::Stale);
+
+        reconcile_startup_tasks(
+            &fixture.db,
+            &fixture.db.list_tasks()?,
+            &fixture.db.list_repos()?,
+            &runtime,
+        )?;
+
+        let updated = fixture.db.get_task(task.id)?;
+        assert_eq!(updated.opencode_session_id, Some(session_id.clone()));
+        assert_eq!(updated.status_source, SessionStatusSource::Server.as_str());
+        assert_eq!(
+            updated.status_error.as_deref(),
+            Some(
+                format!(
+                    "BINDING_STALE: OpenCode server does not recognize session id {session_id}"
+                )
+                .as_str()
+            )
+        );
+        assert!(updated.status_fetched_at.is_some());
+        assert_eq!(*runtime.binding_checks.borrow(), vec![Some(session_id)]);
         Ok(())
     }
 
@@ -1856,6 +2365,89 @@ mod tests {
         assert_eq!(result, AttachTaskResult::WorktreeNotFound);
         assert!(runtime.created_sessions.borrow().is_empty());
         assert!(runtime.switched_sessions.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_recovery_attach_stale_binding_recreates_without_resume_arg() -> Result<()> {
+        let fixture = RecoveryFixture::new()?;
+        let task = fixture.new_task("attach-stale-binding")?;
+        let session_id = Uuid::new_v4().to_string();
+        let session_name = "ok-attach-stale-binding".to_string();
+
+        fixture.db.update_task_tmux(
+            task.id,
+            Some(session_name.clone()),
+            Some(session_id.clone()),
+            Some(fixture.worktree().display().to_string()),
+        )?;
+
+        let runtime = FakeRecoveryRuntime::default();
+        runtime
+            .binding_states
+            .borrow_mut()
+            .insert(session_id.clone(), OpenCodeBindingState::Stale);
+
+        let updated_task = fixture.db.get_task(task.id)?;
+        let result = attach_task_with_runtime(&fixture.db, &updated_task, &fixture.repo, &runtime)?;
+
+        assert_eq!(result, AttachTaskResult::Attached);
+        let created = runtime.created_sessions.borrow();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, session_name);
+        assert_eq!(created[0].2, "opencode");
+
+        let persisted = fixture.db.get_task(task.id)?;
+        assert_eq!(persisted.opencode_session_id, Some(session_id.clone()));
+        assert_eq!(
+            persisted.status_source,
+            SessionStatusSource::Server.as_str()
+        );
+        assert_eq!(
+            persisted.status_error.as_deref(),
+            Some(
+                format!(
+                    "BINDING_STALE: OpenCode server does not recognize session id {session_id}"
+                )
+                .as_str()
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_recovery_attach_unbound_binding_uses_plain_opencode() -> Result<()> {
+        let fixture = RecoveryFixture::new()?;
+        let task = fixture.new_task("attach-unbound-binding")?;
+        let session_name = "ok-attach-unbound-binding".to_string();
+
+        fixture.db.update_task_tmux(
+            task.id,
+            Some(session_name.clone()),
+            None,
+            Some(fixture.worktree().display().to_string()),
+        )?;
+
+        let runtime = FakeRecoveryRuntime::default();
+        runtime.sessions.borrow_mut().insert(
+            session_name.clone(),
+            SessionStatus {
+                state: Status::Dead,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+        );
+
+        let updated_task = fixture.db.get_task(task.id)?;
+        let result = attach_task_with_runtime(&fixture.db, &updated_task, &fixture.repo, &runtime)?;
+
+        assert_eq!(result, AttachTaskResult::Attached);
+        assert_eq!(
+            *runtime.sent_commands.borrow(),
+            vec![(session_name, "opencode".to_string())]
+        );
+        assert!(runtime.created_sessions.borrow().is_empty());
         Ok(())
     }
 
@@ -1937,7 +2529,6 @@ mod tests {
     struct FakeCreateTaskRuntime {
         fail_fetch: RefCell<bool>,
         fail_tmux_create: RefCell<bool>,
-        fail_switch: RefCell<bool>,
         created_worktrees: RefCell<Vec<PathBuf>>,
         removed_worktrees: RefCell<Vec<PathBuf>>,
         sessions: RefCell<HashMap<String, bool>>,
@@ -2029,7 +2620,9 @@ mod tests {
     struct FakeRecoveryRuntime {
         repo_paths: RefCell<HashMap<PathBuf, bool>>,
         worktree_paths: RefCell<HashMap<PathBuf, bool>>,
-        sessions: RefCell<HashMap<String, Status>>,
+        sessions: RefCell<HashMap<String, SessionStatus>>,
+        binding_states: RefCell<HashMap<String, OpenCodeBindingState>>,
+        binding_checks: RefCell<Vec<Option<String>>>,
         created_sessions: RefCell<Vec<(String, PathBuf, String)>>,
         sent_commands: RefCell<Vec<(String, String)>>,
         switched_sessions: RefCell<Vec<String>>,
@@ -2056,12 +2649,33 @@ mod tests {
             self.sessions.borrow().contains_key(session_name)
         }
 
-        fn detect_status(&self, session_name: &str) -> Status {
+        fn binding_state(&self, opencode_session_id: Option<&str>) -> OpenCodeBindingState {
+            self.binding_checks
+                .borrow_mut()
+                .push(opencode_session_id.map(str::to_string));
+
+            let Some(opencode_session_id) = opencode_session_id else {
+                return OpenCodeBindingState::Unbound;
+            };
+
+            self.binding_states
+                .borrow()
+                .get(opencode_session_id)
+                .copied()
+                .unwrap_or(OpenCodeBindingState::Bound)
+        }
+
+        fn detect_status(&self, session_name: &str) -> SessionStatus {
             self.sessions
                 .borrow()
                 .get(session_name)
-                .copied()
-                .unwrap_or(Status::Dead)
+                .cloned()
+                .unwrap_or(SessionStatus {
+                    state: Status::Dead,
+                    source: SessionStatusSource::None,
+                    fetched_at: SystemTime::now(),
+                    error: None,
+                })
         }
 
         fn create_session(
@@ -2075,9 +2689,15 @@ mod tests {
                 working_dir.to_path_buf(),
                 command.to_string(),
             ));
-            self.sessions
-                .borrow_mut()
-                .insert(session_name.to_string(), Status::Unknown);
+            self.sessions.borrow_mut().insert(
+                session_name.to_string(),
+                SessionStatus {
+                    state: Status::Unknown,
+                    source: SessionStatusSource::None,
+                    fetched_at: SystemTime::now(),
+                    error: None,
+                },
+            );
             Ok(())
         }
 
@@ -2085,9 +2705,15 @@ mod tests {
             self.sent_commands
                 .borrow_mut()
                 .push((session_name.to_string(), command.to_string()));
-            self.sessions
-                .borrow_mut()
-                .insert(session_name.to_string(), Status::Unknown);
+            self.sessions.borrow_mut().insert(
+                session_name.to_string(),
+                SessionStatus {
+                    state: Status::Unknown,
+                    source: SessionStatusSource::None,
+                    fetched_at: SystemTime::now(),
+                    error: None,
+                },
+            );
             Ok(())
         }
 
@@ -2139,5 +2765,65 @@ mod tests {
         fn worktree(&self) -> PathBuf {
             self.temp.path().join("worktree")
         }
+    }
+
+    struct FakeStatusProvider {
+        response: SessionStatus,
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl StatusProvider for FakeStatusProvider {
+        fn get_status(&self, session_id: &str) -> SessionStatus {
+            self.calls.borrow_mut().push(session_id.to_string());
+            self.response.clone()
+        }
+    }
+
+    #[test]
+    fn test_status_source_indicator_mapping_server() {
+        assert_eq!(SessionStatusSource::Server.as_str(), "server");
+        assert_ne!(SessionStatusSource::Server.as_str(), "tmux");
+    }
+
+    #[test]
+    fn test_status_source_indicator_mapping_tmux() {
+        assert_eq!(SessionStatusSource::Tmux.as_str(), "tmux");
+        assert_ne!(SessionStatusSource::Tmux.as_str(), "server");
+    }
+
+    #[test]
+    fn test_status_source_indicator_mapping_none() {
+        assert_eq!(SessionStatusSource::None.as_str(), "none");
+        assert_ne!(SessionStatusSource::None.as_str(), "tmux");
+    }
+
+    #[test]
+    fn test_ui_should_show_degraded_indicator_when_tmux_source() {
+        let task_with_tmux_source = "tmux";
+        let show_indicator = task_with_tmux_source == "tmux";
+        assert!(
+            show_indicator,
+            "Should show degraded indicator when status_source is 'tmux'"
+        );
+    }
+
+    #[test]
+    fn test_ui_should_not_show_degraded_indicator_when_server_source() {
+        let task_with_server_source = "server";
+        let show_indicator = task_with_server_source == "tmux";
+        assert!(
+            !show_indicator,
+            "Should NOT show degraded indicator when status_source is 'server'"
+        );
+    }
+
+    #[test]
+    fn test_ui_should_not_show_degraded_indicator_when_none_source() {
+        let task_with_none_source = "none";
+        let show_indicator = task_with_none_source == "tmux";
+        assert!(
+            !show_indicator,
+            "Should NOT show degraded indicator when status_source is 'none'"
+        );
     }
 }

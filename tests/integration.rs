@@ -3,32 +3,44 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::Duration;
+use std::{collections::VecDeque, env, io::Read, io::Write, net::TcpListener, time::SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use tempfile::TempDir;
 
+use opencode_kanban::app::App;
 use opencode_kanban::db::Database;
 use opencode_kanban::git::{
     git_create_worktree, git_delete_branch, git_fetch, git_remove_worktree,
 };
-use opencode_kanban::opencode::{Status, opencode_detect_status};
+use opencode_kanban::opencode::{
+    OpenCodeBindingState, Status, classify_binding_state, opencode_detect_status,
+};
 use opencode_kanban::tmux::{
     sanitize_session_name, tmux_capture_pane, tmux_create_session, tmux_kill_session,
-    tmux_session_exists,
+    tmux_send_keys, tmux_session_exists,
 };
+use opencode_kanban::types::{
+    SessionState, SessionStatus, SessionStatusError, SessionStatusSource, Task,
+};
+
+static INTEGRATION_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[test]
 fn integration_test_full_lifecycle() -> Result<()> {
     if !tmux_available() {
         return Ok(());
     }
+    let _test_guard = INTEGRATION_TEST_LOCK
+        .lock()
+        .expect("integration test lock should not be poisoned");
 
     let socket = format!("ok-integration-{}", std::process::id());
-    unsafe {
-        std::env::set_var("OPENCODE_KANBAN_TMUX_SOCKET", &socket);
-    }
+    let _socket_guard = EnvVarGuard::set("OPENCODE_KANBAN_TMUX_SOCKET", &socket);
 
     cleanup_test_tmux_server();
 
@@ -100,9 +112,158 @@ fn integration_test_full_lifecycle() -> Result<()> {
     assert!(db.get_task(task.id).is_err());
 
     cleanup_test_tmux_server();
-    unsafe {
-        std::env::remove_var("OPENCODE_KANBAN_TMUX_SOCKET");
+    Ok(())
+}
+
+#[test]
+fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Result<()> {
+    if !tmux_available() {
+        return Ok(());
     }
+    let _test_guard = INTEGRATION_TEST_LOCK
+        .lock()
+        .expect("integration test lock should not be poisoned");
+
+    let fixture = GitFixture::new()?;
+    let socket = format!("ok-server-first-{}", std::process::id());
+    let _socket_guard = EnvVarGuard::set("OPENCODE_KANBAN_TMUX_SOCKET", &socket);
+
+    let xdg_data_home = fixture.temp.path().join("xdg-server-first");
+    let _xdg_guard = EnvVarGuard::set("XDG_DATA_HOME", xdg_data_home.display().to_string());
+
+    cleanup_test_tmux_server();
+
+    let _mock_server = MockStatusServer::start(
+        vec![
+            http_json_response("{\"sid-server-first\":{\"state\":\"running\"}}"),
+            http_json_response("{\"sid-server-first\":{\"state\":\"running\"}}"),
+            http_json_response("{\"sid-server-first\":{\"state\":\"running\"}}"),
+            http_json_response("{}"),
+        ],
+        http_json_response("{}"),
+    )?;
+
+    let db_path = kanban_db_path(&xdg_data_home);
+    let db = Database::open(&db_path)?;
+    let repo = db.add_repo(fixture.repo_path())?;
+    let todo = db.list_categories()?[0].id;
+
+    let session_name = sanitize_session_name(&repo.name, "feature/server-first-lifecycle");
+    tmux_create_session(
+        &session_name,
+        fixture.repo_path(),
+        Some("printf \"thinking...\\n\"; sleep 30"),
+    )?;
+
+    let task = db.add_task(
+        repo.id,
+        "feature/server-first-lifecycle",
+        "Server-first lifecycle",
+        todo,
+    )?;
+    db.update_task_tmux(
+        task.id,
+        Some(session_name.clone()),
+        Some("sid-server-first".to_string()),
+        Some(fixture.repo_path().display().to_string()),
+    )?;
+
+    {
+        let _app = App::new()?;
+
+        wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
+            current.status_source == "server" && current.status_error.is_none()
+        })?;
+
+        wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
+            current.status_source == "tmux"
+                && current
+                    .status_error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("SERVER_STATUS_MISSING:"))
+        })?;
+    }
+
+    let updated = Database::open(&db_path)?.get_task(task.id)?;
+    assert_eq!(
+        binding_state_from_task(&updated),
+        OpenCodeBindingState::Stale,
+        "missing server session should be treated as stale binding"
+    );
+
+    tmux_kill_session(&session_name)?;
+    cleanup_test_tmux_server();
+    Ok(())
+}
+
+#[test]
+fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Result<()> {
+    if !tmux_available() {
+        return Ok(());
+    }
+    let _test_guard = INTEGRATION_TEST_LOCK
+        .lock()
+        .expect("integration test lock should not be poisoned");
+
+    let fixture = GitFixture::new()?;
+    let socket = format!("ok-fallback-{}", std::process::id());
+    let _socket_guard = EnvVarGuard::set("OPENCODE_KANBAN_TMUX_SOCKET", &socket);
+
+    let xdg_data_home = fixture.temp.path().join("xdg-fallback");
+    let _xdg_guard = EnvVarGuard::set("XDG_DATA_HOME", xdg_data_home.display().to_string());
+
+    cleanup_test_tmux_server();
+
+    let _mock_server =
+        MockStatusServer::start(vec![http_error_response(500)], http_error_response(500))?;
+
+    let db_path = kanban_db_path(&xdg_data_home);
+    let db = Database::open(&db_path)?;
+    let repo = db.add_repo(fixture.repo_path())?;
+    let todo = db.list_categories()?[0].id;
+
+    let session_name = sanitize_session_name(&repo.name, "feature/fallback-lifecycle");
+    tmux_create_session(&session_name, fixture.repo_path(), Some("sleep 30"))?;
+
+    let task = db.add_task(
+        repo.id,
+        "feature/fallback-lifecycle",
+        "Fallback lifecycle",
+        todo,
+    )?;
+    db.update_task_tmux(
+        task.id,
+        Some(session_name.clone()),
+        Some("sid-fallback".to_string()),
+        Some(fixture.repo_path().display().to_string()),
+    )?;
+
+    {
+        let _app = App::new()?;
+
+        wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
+            current.tmux_status == "dead"
+                && current.status_source == "tmux"
+                && current
+                    .status_error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("SERVER_HTTP_ERROR:"))
+        })?;
+
+        tmux_send_keys(&session_name, "printf \"I'm ready\\n\"")?;
+
+        wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
+            current.tmux_status == "idle"
+                && current.status_source == "tmux"
+                && current
+                    .status_error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("SERVER_HTTP_ERROR:"))
+        })?;
+    }
+
+    tmux_kill_session(&session_name)?;
+    cleanup_test_tmux_server();
     Ok(())
 }
 
@@ -228,4 +389,186 @@ fn cleanup_test_tmux_server() {
     let _ = Command::new("tmux")
         .args(["-L", socket.as_str(), "kill-server"])
         .output();
+}
+
+fn kanban_db_path(xdg_data_home: &Path) -> PathBuf {
+    xdg_data_home
+        .join("opencode-kanban")
+        .join("opencode-kanban.sqlite")
+}
+
+fn wait_for_task(
+    db_path: &Path,
+    task_id: uuid::Uuid,
+    timeout: Duration,
+    predicate: impl Fn(&Task) -> bool,
+) -> Result<()> {
+    let start = std::time::Instant::now();
+
+    while start.elapsed() <= timeout {
+        if let Ok(db) = Database::open(db_path)
+            && let Ok(task) = db.get_task(task_id)
+        {
+            if predicate(&task) {
+                return Ok(());
+            }
+        }
+
+        thread::sleep(Duration::from_millis(120));
+    }
+
+    let task = Database::open(db_path)?.get_task(task_id)?;
+    bail!(
+        "timed out waiting for task {} after {:?}; observed status='{}' source='{}' error={:?}",
+        task_id,
+        timeout,
+        task.tmux_status,
+        task.status_source,
+        task.status_error
+    )
+}
+
+fn binding_state_from_task(task: &Task) -> OpenCodeBindingState {
+    let source = match task.status_source.as_str() {
+        "server" => SessionStatusSource::Server,
+        "tmux" => SessionStatusSource::Tmux,
+        _ => SessionStatusSource::None,
+    };
+
+    let status = SessionStatus {
+        state: SessionState::Unknown,
+        source,
+        fetched_at: SystemTime::now(),
+        error: task.status_error.as_ref().map(|raw| SessionStatusError {
+            code: raw
+                .split(':')
+                .next()
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string(),
+            message: raw.clone(),
+        }),
+    };
+
+    classify_binding_state(task.opencode_session_id.as_deref(), Some(&status))
+}
+
+fn http_json_response(body: &str) -> String {
+    format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}")
+}
+
+fn http_error_response(status_code: u16) -> String {
+    format!(
+        "HTTP/1.1 {status_code} Error\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{{\"error\":\"mock\"}}"
+    )
+}
+
+struct MockStatusServer {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl MockStatusServer {
+    fn start(
+        session_status_responses: Vec<String>,
+        default_session_status_response: String,
+    ) -> Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 4096))
+            .context("failed to bind mock status server on 127.0.0.1:4096")?;
+        listener
+            .set_nonblocking(true)
+            .context("failed to make mock status server non-blocking")?;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::clone(&stop);
+        let responses = Arc::new(Mutex::new(VecDeque::from(session_status_responses)));
+        let response_queue = Arc::clone(&responses);
+        let default_response = Arc::new(default_session_status_response);
+        let fallback_response = Arc::clone(&default_response);
+
+        let handle = thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+                        let mut request = [0u8; 2048];
+                        let read = match stream.read(&mut request) {
+                            Ok(read) => read,
+                            Err(err)
+                                if err.kind() == std::io::ErrorKind::WouldBlock
+                                    || err.kind() == std::io::ErrorKind::TimedOut =>
+                            {
+                                0
+                            }
+                            Err(_) => 0,
+                        };
+                        let request = String::from_utf8_lossy(&request[..read]);
+
+                        let response = if request.starts_with("GET /global/health") {
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"healthy\":true}"
+                                .to_string()
+                        } else if request.starts_with("GET /session/status") {
+                            response_queue
+                                .lock()
+                                .expect("mock response queue lock should not be poisoned")
+                                .pop_front()
+                                .unwrap_or_else(|| (*fallback_response).clone())
+                        } else {
+                            "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_string()
+                        };
+
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.flush();
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(15));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+}
+
+impl Drop for MockStatusServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<str>) -> Self {
+        let previous = env::var(key).ok();
+        unsafe {
+            env::set_var(key, value.as_ref());
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            unsafe {
+                env::set_var(self.key, previous);
+            }
+        } else {
+            unsafe {
+                env::remove_var(self.key);
+            }
+        }
+    }
 }

@@ -34,6 +34,61 @@ pub struct Task {
     pub opencode_session_id: Option<String>,
     pub worktree_path: Option<String>,
     pub tmux_status: String,
+    pub status_source: String,
+    pub status_fetched_at: Option<String>,
+    pub status_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+pub enum SessionState {
+    Running,
+    Waiting,
+    Idle,
+    Dead,
+    Unknown,
+}
+
+impl SessionState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionState::Running => "running",
+            SessionState::Waiting => "waiting",
+            SessionState::Idle => "idle",
+            SessionState::Dead => "dead",
+            SessionState::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+pub enum SessionStatusSource {
+    Server,
+    Tmux,
+    None,
+}
+
+impl SessionStatusSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionStatusSource::Server => "server",
+            SessionStatusSource::Tmux => "tmux",
+            SessionStatusSource::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct SessionStatusError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct SessionStatus {
+    pub state: SessionState,
+    pub source: SessionStatusSource,
+    pub fetched_at: std::time::SystemTime,
+    pub error: Option<SessionStatusError>,
 }
