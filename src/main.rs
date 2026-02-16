@@ -12,7 +12,6 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use opencode_kanban::{
     app::App,
     input::event_to_message,
-    logging::{init_logging, print_log_location},
     tmux::{ensure_tmux_installed, tmux_session_exists},
     ui,
 };
@@ -26,25 +25,18 @@ use opencode_kanban::{
     author
 )]
 struct Cli {
+    /// Project name to open directly
     #[arg(short, long, value_name = "PROJECT")]
     project: Option<String>,
 }
 
 fn main() -> Result<()> {
-    let log_path = init_logging().expect("Failed to initialize logging");
-    install_panic_hook_with_log(log_path.clone());
-
-    let result = run_app();
-
-    print_log_location(&log_path);
-
-    result
-}
-
-fn run_app() -> Result<()> {
+    tracing_subscriber::fmt::init();
     validate_runtime_environment()?;
 
     let cli = Cli::parse();
+
+    install_panic_hook();
 
     let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
@@ -120,15 +112,10 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     Terminal::new(backend).context("failed to create terminal")
 }
 
-fn install_panic_hook_with_log(log_path: std::path::PathBuf) {
+fn install_panic_hook() {
     let previous_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
         let _ = restore_terminal();
-        eprintln!();
-        eprintln!("═══════════════════════════════════════════════════════════════");
-        eprintln!("  📝 Log file: {}", log_path.display());
-        eprintln!("═══════════════════════════════════════════════════════════════");
-        eprintln!();
         previous_hook(panic_info);
     }));
 }
