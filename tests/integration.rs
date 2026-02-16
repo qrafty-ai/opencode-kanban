@@ -75,7 +75,6 @@ fn integration_test_full_lifecycle() -> Result<()> {
     db.update_task_tmux(
         task.id,
         Some(session_name.clone()),
-        None,
         Some(worktree_path.display().to_string()),
     )?;
 
@@ -90,7 +89,10 @@ fn integration_test_full_lifecycle() -> Result<()> {
         Some(session_name.as_str())
     );
     assert!(
-        matches!(status, Status::Idle | Status::Unknown),
+        matches!(
+            status,
+            Status::Idle | Status::Running | Status::Waiting | Status::Dead
+        ),
         "unexpected status: {status:?}"
     );
 
@@ -178,7 +180,6 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
     db.update_task_tmux(
         task.id,
         Some(session_name.clone()),
-        Some("sid-server-first".to_string()),
         Some(fixture.repo_path().display().to_string()),
     )?;
 
@@ -251,7 +252,6 @@ fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Re
     db.update_task_tmux(
         task.id,
         Some(session_name.clone()),
-        Some("sid-fallback".to_string()),
         Some(fixture.repo_path().display().to_string()),
     )?;
 
@@ -448,7 +448,7 @@ fn binding_state_from_task(task: &Task) -> OpenCodeBindingState {
     };
 
     let status = SessionStatus {
-        state: SessionState::Unknown,
+        state: SessionState::Idle,
         source,
         fetched_at: SystemTime::now(),
         error: task.status_error.as_ref().map(|raw| SessionStatusError {
@@ -462,7 +462,7 @@ fn binding_state_from_task(task: &Task) -> OpenCodeBindingState {
         }),
     };
 
-    classify_binding_state(task.opencode_session_id.as_deref(), Some(&status))
+    classify_binding_state(None, Some(&status))
 }
 
 fn http_json_response(body: &str) -> String {
