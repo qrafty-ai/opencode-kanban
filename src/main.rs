@@ -1,6 +1,7 @@
-use std::{env, io, panic, process::Command, time::Duration};
+use std::{io, panic, process::Command, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -15,16 +16,32 @@ use opencode_kanban::{
     ui,
 };
 
+#[derive(Parser, Debug)]
+#[command(
+    name = "opencode-kanban",
+    about = "Terminal kanban board for managing OpenCode tmux sessions",
+    long_about = "A TUI kanban board for managing git worktrees and OpenCode sessions, orchestrated via tmux.",
+    version,
+    author
+)]
+struct Cli {
+    /// Project name to open directly
+    #[arg(short, long, value_name = "PROJECT")]
+    project: Option<String>,
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     validate_runtime_environment()?;
-    install_panic_hook();
 
-    let project_name = parse_project_arg();
+    let cli = Cli::parse();
+
+    install_panic_hook();
 
     let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
 
+    let project_name = cli.project.as_deref();
     let mut app = App::new(project_name)?;
 
     while !app.should_quit() {
@@ -43,23 +60,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn parse_project_arg() -> Option<&'static str> {
-    let args: Vec<String> = env::args().collect();
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-p" | "--project" => {
-                if i + 1 < args.len() {
-                    return Some(Box::leak(args[i + 1].clone().into_boxed_str()));
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
 fn validate_runtime_environment() -> Result<()> {
     if !cfg!(target_os = "linux") && !cfg!(target_os = "macos") {
         bail!("opencode-kanban supports only Linux and macOS.");
@@ -69,7 +69,7 @@ fn validate_runtime_environment() -> Result<()> {
 
     if std::env::var_os("TMUX").is_none() {
         let session_name = "opencode-kanban";
-        let current_exe = env::current_exe().context("failed to get current executable")?;
+        let current_exe = std::env::current_exe().context("failed to get current executable")?;
         let exe_path = current_exe.to_string_lossy();
 
         if tmux_session_exists(session_name) {

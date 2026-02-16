@@ -9,6 +9,7 @@ repository = "https://github.com/example/opencode-kanban"
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 dirs = "6"
 nucleo = "0.5"
