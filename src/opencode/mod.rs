@@ -2,29 +2,93 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 use std::sync::LazyLock;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 
 use crate::tmux::{tmux_capture_pane, tmux_get_pane_pid};
+use crate::types::{SessionState, SessionStatus, SessionStatusError, SessionStatusSource};
+
+pub mod server;
+pub mod status_server;
+
+pub use crate::types::SessionState as Status;
+pub use server::{OpenCodeServerManager, OpenCodeServerState, ensure_server_ready};
+pub use status_server::ServerStatusProvider;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum Status {
-    Running,
-    Waiting,
-    Idle,
-    Dead,
-    Unknown,
+pub enum OpenCodeBindingState {
+    Bound,
+    Stale,
+    Unbound,
 }
 
-impl Status {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Status::Running => "running",
-            Status::Waiting => "waiting",
-            Status::Idle => "idle",
-            Status::Dead => "dead",
-            Status::Unknown => "unknown",
+pub fn classify_binding_state(
+    opencode_session_id: Option<&str>,
+    status: Option<&SessionStatus>,
+) -> OpenCodeBindingState {
+    let Some(_) = opencode_session_id else {
+        return OpenCodeBindingState::Unbound;
+    };
+
+    let Some(status) = status else {
+        return OpenCodeBindingState::Bound;
+    };
+
+    if status
+        .error
+        .as_ref()
+        .map(|error| error.code.as_str())
+        .is_some_and(|code| code == "SERVER_STATUS_MISSING")
+    {
+        return OpenCodeBindingState::Stale;
+    }
+
+    OpenCodeBindingState::Bound
+}
+
+pub trait StatusProvider {
+    fn get_status(&self, session_id: &str) -> SessionStatus;
+
+    fn list_statuses(&self, session_ids: &[String]) -> Vec<(String, SessionStatus)> {
+        session_ids
+            .iter()
+            .map(|session_id| (session_id.clone(), self.get_status(session_id)))
+            .collect()
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TmuxStatusProvider;
+
+impl StatusProvider for TmuxStatusProvider {
+    fn get_status(&self, session_id: &str) -> SessionStatus {
+        if !opencode_is_running_in_session(session_id) {
+            return SessionStatus {
+                state: SessionState::Dead,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::now(),
+                error: None,
+            };
+        }
+
+        match tmux_capture_pane(session_id, 50) {
+            Ok(pane) => SessionStatus {
+                state: opencode_detect_status(&pane),
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::now(),
+                error: None,
+            },
+            Err(err) => SessionStatus {
+                state: SessionState::Unknown,
+                source: SessionStatusSource::Tmux,
+                fetched_at: SystemTime::now(),
+                error: Some(SessionStatusError {
+                    code: "TMUX_CAPTURE_FAILED".to_string(),
+                    message: err.to_string(),
+                }),
+            },
         }
     }
 }
@@ -259,9 +323,11 @@ fn ensure_opencode_available(binary: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{LazyLock, Mutex, MutexGuard};
+    use std::time::SystemTime;
 
     use anyhow::Result;
     use uuid::Uuid;
@@ -297,6 +363,152 @@ mod tests {
     fn test_detect_status_strips_ansi_sequences() {
         let pane = "\x1b[32mthinking\x1b[0m";
         assert_eq!(opencode_detect_status(pane), Status::Running);
+    }
+
+    #[test]
+    fn test_detect_status_waiting_precedes_running() {
+        let pane = "thinking about next action\nContinue? [y/n]";
+        assert_eq!(opencode_detect_status(pane), Status::Waiting);
+    }
+
+    #[test]
+    fn test_status_provider_list_statuses_preserves_order_and_metadata() {
+        let provider = StaticStatusProvider {
+            statuses: HashMap::from([
+                (
+                    "a".to_string(),
+                    SessionStatus {
+                        state: Status::Running,
+                        source: SessionStatusSource::Server,
+                        fetched_at: SystemTime::UNIX_EPOCH,
+                        error: None,
+                    },
+                ),
+                (
+                    "b".to_string(),
+                    SessionStatus {
+                        state: Status::Dead,
+                        source: SessionStatusSource::Tmux,
+                        fetched_at: SystemTime::UNIX_EPOCH,
+                        error: Some(SessionStatusError {
+                            code: "TEST".to_string(),
+                            message: "boom".to_string(),
+                        }),
+                    },
+                ),
+            ]),
+        };
+
+        let listed = provider.list_statuses(&["b".to_string(), "a".to_string()]);
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].0, "b");
+        assert_eq!(listed[0].1.state, Status::Dead);
+        assert_eq!(listed[0].1.source, SessionStatusSource::Tmux);
+        assert_eq!(
+            listed[0].1.error.as_ref().map(|err| err.code.as_str()),
+            Some("TEST")
+        );
+        assert_eq!(listed[1].0, "a");
+        assert_eq!(listed[1].1.state, Status::Running);
+        assert_eq!(listed[1].1.source, SessionStatusSource::Server);
+    }
+
+    #[test]
+    fn test_classify_binding_state_unbound_without_session_id() {
+        assert_eq!(
+            classify_binding_state(None, None),
+            OpenCodeBindingState::Unbound
+        );
+    }
+
+    #[test]
+    fn test_classify_binding_state_stale_when_server_reports_missing() {
+        let status = SessionStatus {
+            state: Status::Unknown,
+            source: SessionStatusSource::None,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            error: Some(SessionStatusError {
+                code: "SERVER_STATUS_MISSING".to_string(),
+                message: "missing".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            classify_binding_state(Some("sid-1"), Some(&status)),
+            OpenCodeBindingState::Stale
+        );
+    }
+
+    #[test]
+    fn test_classify_binding_state_bound_on_non_definitive_errors() {
+        let status = SessionStatus {
+            state: Status::Unknown,
+            source: SessionStatusSource::None,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            error: Some(SessionStatusError {
+                code: "SERVER_TIMEOUT".to_string(),
+                message: "timeout".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            classify_binding_state(Some("sid-1"), Some(&status)),
+            OpenCodeBindingState::Bound
+        );
+    }
+
+    #[test]
+    fn test_classify_binding_state_bound_when_server_is_down() {
+        let status = SessionStatus {
+            state: Status::Unknown,
+            source: SessionStatusSource::None,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            error: Some(SessionStatusError {
+                code: "SERVER_CONNECT_FAILED".to_string(),
+                message: "connection refused".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            classify_binding_state(Some("sid-1"), Some(&status)),
+            OpenCodeBindingState::Bound
+        );
+    }
+
+    #[test]
+    fn test_classify_binding_state_bound_on_server_auth_failure() {
+        let status = SessionStatus {
+            state: Status::Unknown,
+            source: SessionStatusSource::None,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            error: Some(SessionStatusError {
+                code: "SERVER_AUTH_ERROR".to_string(),
+                message: "unauthorized".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            classify_binding_state(Some("sid-1"), Some(&status)),
+            OpenCodeBindingState::Bound
+        );
+    }
+
+    #[test]
+    fn test_classify_binding_state_bound_on_parse_contract_mismatch() {
+        let status = SessionStatus {
+            state: Status::Unknown,
+            source: SessionStatusSource::None,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            error: Some(SessionStatusError {
+                code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+                message: "invalid response contract".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            classify_binding_state(Some("sid-1"), Some(&status)),
+            OpenCodeBindingState::Bound
+        );
     }
 
     #[test]
@@ -379,6 +591,24 @@ mod tests {
             unsafe {
                 env::remove_var("OPENCODE_BIN");
             }
+        }
+    }
+
+    struct StaticStatusProvider {
+        statuses: HashMap<String, SessionStatus>,
+    }
+
+    impl StatusProvider for StaticStatusProvider {
+        fn get_status(&self, session_id: &str) -> SessionStatus {
+            self.statuses
+                .get(session_id)
+                .cloned()
+                .unwrap_or(SessionStatus {
+                    state: Status::Unknown,
+                    source: SessionStatusSource::None,
+                    fetched_at: SystemTime::UNIX_EPOCH,
+                    error: None,
+                })
         }
     }
 }
