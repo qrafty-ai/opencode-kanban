@@ -16,6 +16,7 @@ use crate::app::{
     Message, NewTaskField, WorktreeNotFoundField,
 };
 use crate::command_palette::{CommandPaletteState, all_commands};
+use crate::theme::{Theme, parse_color};
 use crate::types::Task;
 
 #[derive(Clone, Copy)]
@@ -106,14 +107,22 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = Theme::default();
     let header = Block::default()
         .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-        .title(" opencode-kanban ")
+        .border_style(Style::default().fg(theme.header))
+        .title(Span::styled(
+            " opencode-kanban ",
+            Style::default().fg(theme.header),
+        ))
         .title_alignment(Alignment::Left);
 
     let refresh_info = format!(" {} tasks - auto-refresh: 3s ", app.tasks.len());
     let header_right = Block::default()
-        .title(refresh_info)
+        .title(Span::styled(
+            refresh_info,
+            Style::default().fg(theme.header),
+        ))
         .title_alignment(Alignment::Right);
 
     frame.render_widget(header, area);
@@ -121,17 +130,23 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = Theme::default();
     let notice = app.footer_notice.as_deref().unwrap_or(
         " n: new task  Enter: attach  Ctrl+P: command palette  c/r/x: category  H/L: move task left/right  J/K: reorder task  tmux Prefix+K: previous session ",
     );
     let footer = Block::default()
         .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-        .title(format!(" {notice} "))
+        .border_style(Style::default().fg(theme.header))
+        .title(Span::styled(
+            format!(" {notice} "),
+            Style::default().fg(theme.header),
+        ))
         .title_alignment(Alignment::Center);
     frame.render_widget(footer, area);
 }
 
 fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    let theme = Theme::default();
     if app.categories.is_empty() {
         render_empty_state(frame, area);
         return;
@@ -149,7 +164,11 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Double)
-                .title(" Resize Needed "),
+                .border_style(Style::default().fg(theme.secondary))
+                .title(Span::styled(
+                    " Resize Needed ",
+                    Style::default().fg(theme.secondary),
+                )),
         );
         frame.render_widget(msg, area);
         return;
@@ -172,6 +191,17 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             BorderType::Plain
         };
 
+        let category_color = category
+            .color
+            .as_deref()
+            .and_then(parse_color)
+            .unwrap_or(theme.column);
+        let border_color = if is_focused {
+            theme.focus
+        } else {
+            category_color
+        };
+
         let tasks_in_col: Vec<&Task> = app
             .tasks
             .iter()
@@ -185,7 +215,8 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(border_type)
-            .title(title)
+            .border_style(Style::default().fg(border_color))
+            .title(Span::styled(title, Style::default().fg(border_color)))
             .title_alignment(Alignment::Center);
 
         let inner_area = block.inner(column_chunks[i]);
@@ -220,27 +251,27 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             };
 
             let status_color = match task.tmux_status.as_str() {
-                "running" => Color::Green,
-                "idle" => Color::White,
-                "waiting" => Color::Yellow,
-                "dead" => Color::Red,
-                "repo_unavailable" => Color::Red,
-                "broken" => Color::Red,
-                _ => Color::DarkGray,
+                "running" => theme.focus,
+                "idle" => theme.task,
+                "waiting" => theme.secondary,
+                "dead" => theme.secondary,
+                "repo_unavailable" => theme.secondary,
+                "broken" => theme.secondary,
+                _ => theme.secondary,
             };
 
             let prefix = if is_selected { "▸" } else { " " };
             let bg_color = if is_selected {
-                Color::DarkGray
+                theme.secondary
             } else {
                 Color::Reset
             };
 
             let line1 = Line::from(vec![
-                Span::styled(prefix, Style::default().fg(Color::Yellow)),
+                Span::styled(prefix, Style::default().fg(theme.focus)),
                 Span::styled(status_icon, Style::default().fg(status_color)),
                 Span::raw(" "),
-                Span::raw(&task.title),
+                Span::styled(&task.title, Style::default().fg(theme.task)),
             ]);
 
             let repo = app.repos.iter().find(|repo| repo.id == task.repo_id);
@@ -256,14 +287,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
             let line2 = Line::from(vec![
                 Span::raw("   "),
-                Span::styled(
-                    repo_label,
-                    Style::default().fg(if repo_available {
-                        Color::Gray
-                    } else {
-                        Color::Red
-                    }),
-                ),
+                Span::styled(repo_label, Style::default().fg(theme.secondary)),
             ]);
 
             let task_area = Rect {
@@ -285,7 +309,9 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
         if tasks_sorted.is_empty() {
             frame.render_widget(
-                Paragraph::new("No tasks in this category").alignment(Alignment::Center),
+                Paragraph::new("No tasks in this category")
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(theme.secondary)),
                 inner_area,
             );
         } else {
@@ -294,7 +320,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             let visible_tasks = inner_area.height / 3;
             if total_tasks > visible_tasks {
                 let mut scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .thumb_style(Style::default().fg(Color::Gray).bg(Color::DarkGray));
+                    .thumb_style(Style::default().fg(category_color).bg(theme.secondary));
                 scrollbar = scrollbar
                     .track_symbol(Some("│"))
                     .begin_symbol(Some("↑"))
@@ -315,10 +341,12 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 }
 
 fn render_empty_state(frame: &mut Frame<'_>, area: Rect) {
+    let theme = Theme::default();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(" Welcome ")
+        .border_style(Style::default().fg(theme.header))
+        .title(Span::styled(" Welcome ", Style::default().fg(theme.header)))
         .title_alignment(Alignment::Center);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -326,7 +354,8 @@ fn render_empty_state(frame: &mut Frame<'_>, area: Rect) {
         Paragraph::new(
             "No tasks yet. Press n to create your first task.\nPress ? to view keybindings and mouse actions.",
         )
-        .alignment(Alignment::Center),
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(theme.task)),
         inner,
     );
 }
@@ -446,19 +475,19 @@ fn render_command_palette(
 }
 
 fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
+    let theme = Theme::default();
     if matches!(app.active_dialog, ActiveDialog::Help) {
         render_help_overlay(frame);
         return;
     }
 
     let (percent_x, percent_y) = match &app.active_dialog {
-        ActiveDialog::NewTask(_) => (80, 70),
+        ActiveDialog::NewTask(_) => (80, 72),
         ActiveDialog::DeleteTask(_) => (50, 50),
         ActiveDialog::CategoryInput(_) => (50, 50),
         ActiveDialog::DeleteCategory(_) => (50, 50),
         ActiveDialog::WorktreeNotFound(_) => (60, 50),
         ActiveDialog::RepoUnavailable(_) => (60, 50),
-        ActiveDialog::ConfirmQuit(_) => (50, 30),
         ActiveDialog::Error(_) => (60, 60),
         ActiveDialog::CommandPalette(_) => command_palette_overlay_size(app.viewport),
         _ => (60, 20),
@@ -477,7 +506,6 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::MoveTask(_) => " Move Task ",
         ActiveDialog::WorktreeNotFound(_) => " Worktree Not Found ",
         ActiveDialog::RepoUnavailable(_) => " Repo Unavailable ",
-        ActiveDialog::ConfirmQuit(_) => " Confirm Quit ",
         ActiveDialog::Help => " Help ",
         ActiveDialog::None => "",
     };
@@ -486,6 +514,13 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::CommandPalette(_) => OverlayAnchor::Top,
         _ => OverlayAnchor::Center,
     };
+
+    let _block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(theme.focus))
+        .title(Span::styled(title, Style::default().fg(theme.focus)))
+        .title_alignment(Alignment::Center);
 
     let inner_area = render_overlay_frame(
         frame,
@@ -514,6 +549,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                     Constraint::Length(3),
                     Constraint::Length(3),
                     Constraint::Length(3),
+                    Constraint::Length(1),
                     Constraint::Length(3),
                 ])
                 .split(inner_area);
@@ -561,10 +597,32 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 state.focused_field == NewTaskField::Title,
             );
 
+            let checkbox_text = if state.ensure_base_up_to_date {
+                "[x] Ensure base branch up-to-date"
+            } else {
+                "[ ] Ensure base branch up-to-date"
+            };
+            let checkbox_block = Block::default()
+                .borders(Borders::NONE)
+                .style(Style::default().fg(Color::White));
+            let checkbox_paragraph = Paragraph::new(checkbox_text)
+                .block(checkbox_block)
+                .alignment(Alignment::Center);
+            let checkbox_focused = state.focused_field == NewTaskField::EnsureBaseUpToDate;
+            if checkbox_focused {
+                frame.render_widget(
+                    checkbox_paragraph
+                        .style(Style::default().fg(Color::Yellow).bg(Color::DarkGray)),
+                    layout[4],
+                );
+            } else {
+                frame.render_widget(checkbox_paragraph, layout[4]);
+            }
+
             let button_layout = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(layout[4]);
+                .split(layout[5]);
 
             render_button(
                 frame,
@@ -828,30 +886,6 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
             app.hit_test_map
                 .push((layout[1], Message::RepoUnavailableDismiss));
         }
-        ActiveDialog::ConfirmQuit(state) => {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(4), Constraint::Length(3)])
-                .split(inner_area);
-
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "{} active tmux session(s) still running.\nQuit anyway?",
-                    state.active_session_count
-                ))
-                .alignment(Alignment::Center),
-                layout[0],
-            );
-
-            let buttons = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(layout[1]);
-            render_button(frame, buttons[0], "[ Quit ]", true);
-            render_button(frame, buttons[1], "[ Cancel ]", false);
-            app.hit_test_map.push((buttons[0], Message::ConfirmQuit));
-            app.hit_test_map.push((buttons[1], Message::CancelQuit));
-        }
         ActiveDialog::Error(state) => {
             let layout = Layout::default()
                 .direction(Direction::Vertical)
@@ -886,29 +920,31 @@ fn render_input_field(
     value: &str,
     is_focused: bool,
 ) {
+    let theme = Theme::default();
     let block = Block::default()
         .borders(Borders::ALL)
         .title(label)
         .style(if is_focused {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(theme.focus)
         } else {
-            Style::default()
+            Style::default().fg(theme.task)
         });
     frame.render_widget(Paragraph::new(value).block(block), area);
 }
 
 fn render_button(frame: &mut Frame<'_>, area: Rect, label: &str, is_focused: bool) {
+    let theme = Theme::default();
     let (bg, fg) = if is_focused {
-        (Color::Blue, Color::White)
+        (theme.focus, Color::Black)
     } else {
-        (Color::Reset, Color::Reset)
+        (Color::Reset, theme.task)
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(if is_focused {
-            Style::default().fg(Color::Blue)
+            Style::default().fg(theme.focus)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(theme.secondary)
         })
         .style(Style::default().bg(bg).fg(fg));
     frame.render_widget(
@@ -926,11 +962,12 @@ fn render_checkbox(
     checked: bool,
     is_focused: bool,
 ) {
+    let theme = Theme::default();
     let check_mark = if checked { "[x]" } else { "[ ]" };
     let style = if is_focused {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(theme.focus)
     } else {
-        Style::default()
+        Style::default().fg(theme.task)
     };
     frame.render_widget(
         Paragraph::new(format!("{} {}", check_mark, label)).style(style),
@@ -948,7 +985,6 @@ fn render_help_overlay(frame: &mut Frame<'_>) {
             height_percent: 80,
         },
     );
-
     let text = [
         "Navigation",
         "  h/l or arrows: switch columns",

@@ -16,8 +16,8 @@ use uuid::Uuid;
 use crate::command_palette::{CommandPaletteState, all_commands};
 use crate::db::Database;
 use crate::git::{
-    derive_worktree_path, git_create_worktree, git_delete_branch, git_detect_default_branch,
-    git_fetch, git_is_valid_repo, git_remove_worktree,
+    derive_worktree_path, git_check_branch_up_to_date, git_create_worktree, git_delete_branch,
+    git_detect_default_branch, git_fetch, git_is_valid_repo, git_remove_worktree,
 };
 use crate::opencode::{Status, opencode_detect_status, opencode_is_running_in_session};
 use crate::tmux::{
@@ -35,6 +35,7 @@ pub enum NewTaskField {
     Branch,
     Base,
     Title,
+    EnsureBaseUpToDate,
     Create,
     Cancel,
 }
@@ -46,6 +47,7 @@ pub struct NewTaskDialogState {
     pub branch_input: String,
     pub base_input: String,
     pub title_input: String,
+    pub ensure_base_up_to_date: bool,
     pub loading_message: Option<String>,
     pub focused_field: NewTaskField,
 }
@@ -136,11 +138,6 @@ pub struct RepoUnavailableDialogState {
     pub repo_path: String,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ConfirmQuitDialogState {
-    pub active_session_count: usize,
-}
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActiveDialog {
@@ -154,7 +151,6 @@ pub enum ActiveDialog {
     MoveTask(MoveTaskDialogState),
     WorktreeNotFound(WorktreeNotFoundDialogState),
     RepoUnavailable(RepoUnavailableDialogState),
-    ConfirmQuit(ConfirmQuitDialogState),
     Help,
 }
 
@@ -194,6 +190,7 @@ pub enum Message {
     ConfirmQuit,
     CancelQuit,
     ExecuteCommand(String),
+    CycleCategoryColor(usize),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -263,6 +260,7 @@ trait CreateTaskRuntime {
     fn git_detect_default_branch(&self, repo_path: &Path) -> String;
     fn git_fetch(&self, repo_path: &Path) -> Result<()>;
     fn git_validate_branch(&self, repo_path: &Path, branch_name: &str) -> Result<()>;
+    fn git_check_branch_up_to_date(&self, repo_path: &Path, base_ref: &str) -> Result<()>;
     fn git_create_worktree(
         &self,
         repo_path: &Path,
@@ -317,6 +315,10 @@ impl CreateTaskRuntime for RealCreateTaskRuntime {
                 String::from_utf8_lossy(&output.stderr).trim()
             )
         }
+    }
+
+    fn git_check_branch_up_to_date(&self, repo_path: &Path, base_ref: &str) -> Result<()> {
+        git_check_branch_up_to_date(repo_path, base_ref)
     }
 
     fn git_create_worktree(
@@ -500,6 +502,7 @@ impl App {
                     branch_input: String::new(),
                     base_input: default_base,
                     title_input: String::new(),
+                    ensure_base_up_to_date: true,
                     loading_message: None,
                     focused_field: NewTaskField::Repo,
                 });
@@ -559,17 +562,7 @@ impl App {
 
                 match command_id.as_str() {
                     "help" => self.active_dialog = ActiveDialog::Help,
-                    "quit" => {
-                        let active_session_count = self.active_session_count();
-                        if active_session_count > 0 {
-                            self.active_dialog =
-                                ActiveDialog::ConfirmQuit(ConfirmQuitDialogState {
-                                    active_session_count,
-                                });
-                        } else {
-                            self.should_quit = true;
-                        }
-                    }
+                    "quit" => self.should_quit = true,
                     _ => {
                         if let Some(message) = all_commands()
                             .into_iter()
@@ -582,6 +575,30 @@ impl App {
                 }
 
                 let _ = self.db.increment_command_usage(&command_id);
+            }
+            Message::CycleCategoryColor(col_idx) => {
+                let color_cycle = [
+                    None,
+                    Some("cyan".to_string()),
+                    Some("magenta".to_string()),
+                    Some("blue".to_string()),
+                    Some("green".to_string()),
+                    Some("yellow".to_string()),
+                    Some("red".to_string()),
+                ];
+                if let Some(category) = self.categories.get(col_idx) {
+                    let current_color = category.color.as_ref();
+                    let next_idx = color_cycle
+                        .iter()
+                        .position(|c| c.as_ref() == current_color)
+                        .map(|i| (i + 1) % color_cycle.len())
+                        .unwrap_or(0);
+                    let next_color = color_cycle[next_idx].clone();
+                    self.db
+                        .update_category_color(category.id, next_color)
+                        .context("failed to update category color")?;
+                    self.refresh_data()?;
+                }
             }
             Message::DeleteTaskToggleKillTmux
             | Message::DeleteTaskToggleRemoveWorktree
@@ -610,16 +627,7 @@ impl App {
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.update(Message::OpenCommandPalette)?;
             }
-            KeyCode::Char('q') => {
-                let active_session_count = self.active_session_count();
-                if active_session_count > 0 {
-                    self.active_dialog = ActiveDialog::ConfirmQuit(ConfirmQuitDialogState {
-                        active_session_count,
-                    });
-                } else {
-                    self.should_quit = true;
-                }
-            }
+            KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('h') | KeyCode::Left => {
                 self.update(Message::NavigateLeft)?;
             }
@@ -637,6 +645,9 @@ impl App {
             }
             KeyCode::Char('c') => {
                 self.update(Message::OpenAddCategoryDialog)?;
+            }
+            KeyCode::Char('p') => {
+                self.update(Message::CycleCategoryColor(self.focused_column))?;
             }
             KeyCode::Char('r') => {
                 self.update(Message::OpenRenameCategoryDialog)?;
@@ -739,6 +750,7 @@ impl App {
                     NewTaskField::Branch,
                     NewTaskField::Base,
                     NewTaskField::Title,
+                    NewTaskField::EnsureBaseUpToDate,
                     NewTaskField::Create,
                     NewTaskField::Cancel,
                 ];
@@ -787,6 +799,11 @@ impl App {
                     }
                     KeyCode::Right if state.focused_field == NewTaskField::Cancel => {
                         state.focused_field = NewTaskField::Create;
+                    }
+                    KeyCode::Char(' ') | KeyCode::Enter
+                        if state.focused_field == NewTaskField::EnsureBaseUpToDate =>
+                    {
+                        state.ensure_base_up_to_date = !state.ensure_base_up_to_date;
                     }
                     KeyCode::Backspace => match state.focused_field {
                         NewTaskField::Repo => {
@@ -993,13 +1010,6 @@ impl App {
                     follow_up = Some(Message::RepoUnavailableDismiss);
                 }
             }
-            ActiveDialog::ConfirmQuit(_) => match key.code {
-                KeyCode::Esc => follow_up = Some(Message::CancelQuit),
-                KeyCode::Left | KeyCode::Char('h') => follow_up = Some(Message::CancelQuit),
-                KeyCode::Right | KeyCode::Char('l') => follow_up = Some(Message::ConfirmQuit),
-                KeyCode::Enter => follow_up = Some(Message::ConfirmQuit),
-                _ => {}
-            },
             ActiveDialog::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
                     self.active_dialog = ActiveDialog::None;
@@ -1224,7 +1234,7 @@ impl App {
                     .max()
                     .unwrap_or(-1)
                     + 1;
-                let created = self.db.add_category(name, next_position)?;
+                let created = self.db.add_category(name, next_position, None)?;
                 self.active_dialog = ActiveDialog::None;
                 self.refresh_data()?;
                 if let Some(index) = self.categories.iter().position(|c| c.id == created.id) {
@@ -1441,14 +1451,6 @@ impl App {
         Ok(())
     }
 
-    fn active_session_count(&self) -> usize {
-        self.tasks
-            .iter()
-            .filter_map(|task| task.tmux_session_name.as_deref())
-            .filter(|session_name| tmux_session_exists(session_name))
-            .count()
-    }
-
     fn maybe_show_tmux_mouse_hint(&mut self) {
         if self.mouse_hint_shown || self.mouse_seen {
             return;
@@ -1467,7 +1469,14 @@ impl Drop for App {
     fn drop(&mut self) {
         self.poller_stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.poller_thread.take() {
-            let _ = handle.join();
+            let deadline = Instant::now() + Duration::from_millis(200);
+            while !handle.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -1668,6 +1677,12 @@ fn create_task_pipeline_with_runtime(
         warning = Some(message);
     }
 
+    if state.ensure_base_up_to_date {
+        runtime
+            .git_check_branch_up_to_date(&repo_path, &base_ref)
+            .context("base branch check failed")?;
+    }
+
     let worktrees_root = worktrees_root_for_repo(&repo_path);
     fs::create_dir_all(&worktrees_root).with_context(|| {
         format!(
@@ -1690,7 +1705,7 @@ fn create_task_pipeline_with_runtime(
         });
 
         runtime
-            .tmux_create_session(&session_name, &worktree_path, Some("opencode"))
+            .tmux_create_session(&session_name, &worktree_path, None)
             .context("tmux session creation failed")?;
         created_session_name = Some(session_name.clone());
 
@@ -1843,14 +1858,14 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
                 let db = match Database::open(&db_path) {
                     Ok(db) => db,
                     Err(_) => {
-                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        interruptible_sleep(Duration::from_secs(3), &stop).await;
                         continue;
                     }
                 };
 
                 let tasks = db.list_tasks().unwrap_or_default();
                 if tasks.is_empty() {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    interruptible_sleep(Duration::from_secs(3), &stop).await;
                     continue;
                 }
 
@@ -1870,7 +1885,7 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
 
                     if !repo_available {
                         let _ = db.update_task_status(task.id, STATUS_REPO_UNAVAILABLE);
-                        tokio::time::sleep(staggered_poll_delay(index)).await;
+                        interruptible_sleep(staggered_poll_delay(index), &stop).await;
                         continue;
                     }
 
@@ -1883,7 +1898,7 @@ fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinH
                         let _ = db.update_task_status(task.id, status.as_str());
                     }
 
-                    tokio::time::sleep(staggered_poll_delay(index)).await;
+                    interruptible_sleep(staggered_poll_delay(index), &stop).await;
                 }
             }
         });
@@ -1913,6 +1928,16 @@ fn current_jitter_ms(task_index: usize) -> u64 {
         .map(|d| d.subsec_nanos() as u64)
         .unwrap_or(0);
     (nanos + task_index as u64 * 97) % 700
+}
+
+async fn interruptible_sleep(duration: Duration, stop: &AtomicBool) {
+    let chunk = Duration::from_millis(100);
+    let mut remaining = duration;
+    while remaining > Duration::ZERO && !stop.load(Ordering::Relaxed) {
+        let sleep_duration = remaining.min(chunk);
+        tokio::time::sleep(sleep_duration).await;
+        remaining = remaining.saturating_sub(sleep_duration);
+    }
 }
 
 fn default_db_path() -> Result<PathBuf> {
@@ -2123,6 +2148,7 @@ mod tests {
             branch_input: "feature/create-flow".to_string(),
             base_input: "origin/main".to_string(),
             title_input: "Create flow task".to_string(),
+            ensure_base_up_to_date: false,
             loading_message: None,
             focused_field: NewTaskField::Create,
         };
@@ -2164,6 +2190,7 @@ mod tests {
             branch_input: "feature/create-flow-rollback".to_string(),
             base_input: "origin/main".to_string(),
             title_input: String::new(),
+            ensure_base_up_to_date: false,
             loading_message: None,
             focused_field: NewTaskField::Create,
         };
@@ -2216,6 +2243,13 @@ mod tests {
         fn git_validate_branch(&self, _repo_path: &Path, branch_name: &str) -> Result<()> {
             if branch_name.contains(' ') {
                 anyhow::bail!("invalid branch")
+            }
+            Ok(())
+        }
+
+        fn git_check_branch_up_to_date(&self, _repo_path: &Path, _base_ref: &str) -> Result<()> {
+            if *self.fail_fetch.borrow() {
+                anyhow::bail!("branch check failed")
             }
             Ok(())
         }
