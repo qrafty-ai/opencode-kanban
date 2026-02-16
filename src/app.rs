@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use crate::db::Database;
 use crate::git::{
-    derive_worktree_path, git_create_worktree, git_detect_default_branch, git_fetch,
-    git_is_valid_repo, git_remove_worktree,
+    derive_worktree_path, git_create_worktree, git_delete_branch, git_detect_default_branch,
+    git_fetch, git_is_valid_repo, git_remove_worktree,
 };
 use crate::opencode::{Status, opencode_detect_status, opencode_is_running_in_session};
 use crate::tmux::{
@@ -66,6 +66,7 @@ pub enum DeleteTaskField {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct DeleteTaskDialogState {
+    pub task_id: Uuid,
     pub task_title: String,
     pub task_branch: String,
     pub kill_tmux: bool,
@@ -172,6 +173,7 @@ pub enum Message {
     OpenAddCategoryDialog,
     OpenRenameCategoryDialog,
     OpenDeleteCategoryDialog,
+    OpenDeleteTaskDialog,
     SubmitCategoryInput,
     ConfirmDeleteCategory,
     MoveTaskLeft,
@@ -530,6 +532,7 @@ impl App {
                 }
             }
             Message::OpenDeleteCategoryDialog => self.open_delete_category_dialog()?,
+            Message::OpenDeleteTaskDialog => self.open_delete_task_dialog()?,
             Message::SubmitCategoryInput => self.confirm_category_input()?,
             Message::ConfirmDeleteCategory => self.confirm_delete_category()?,
             Message::MoveTaskLeft => self.move_task_left()?,
@@ -544,8 +547,8 @@ impl App {
             Message::CancelQuit => self.active_dialog = ActiveDialog::None,
             Message::DeleteTaskToggleKillTmux
             | Message::DeleteTaskToggleRemoveWorktree
-            | Message::DeleteTaskToggleDeleteBranch
-            | Message::ConfirmDeleteTask => {}
+            | Message::DeleteTaskToggleDeleteBranch => {}
+            Message::ConfirmDeleteTask => self.confirm_delete_task()?,
         }
 
         self.maybe_show_tmux_mouse_hint();
@@ -599,6 +602,9 @@ impl App {
             }
             KeyCode::Char('x') => {
                 self.update(Message::OpenDeleteCategoryDialog)?;
+            }
+            KeyCode::Char('d') => {
+                self.update(Message::OpenDeleteTaskDialog)?;
             }
             KeyCode::Char('H') => {
                 self.update(Message::MoveTaskLeft)?;
@@ -847,6 +853,45 @@ impl App {
                 }
                 _ => {}
             },
+            ActiveDialog::DeleteTask(state) => match key.code {
+                KeyCode::Esc => self.active_dialog = ActiveDialog::None,
+                KeyCode::Left | KeyCode::Char('h') => {
+                    state.focused_field = match state.focused_field {
+                        DeleteTaskField::KillTmux => DeleteTaskField::Cancel,
+                        DeleteTaskField::RemoveWorktree => DeleteTaskField::KillTmux,
+                        DeleteTaskField::DeleteBranch => DeleteTaskField::RemoveWorktree,
+                        DeleteTaskField::Delete => DeleteTaskField::DeleteBranch,
+                        DeleteTaskField::Cancel => DeleteTaskField::Delete,
+                    };
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                    state.focused_field = match state.focused_field {
+                        DeleteTaskField::KillTmux => DeleteTaskField::RemoveWorktree,
+                        DeleteTaskField::RemoveWorktree => DeleteTaskField::DeleteBranch,
+                        DeleteTaskField::DeleteBranch => DeleteTaskField::Delete,
+                        DeleteTaskField::Delete => DeleteTaskField::Cancel,
+                        DeleteTaskField::Cancel => DeleteTaskField::KillTmux,
+                    };
+                }
+                KeyCode::Enter => {
+                    follow_up = Some(match state.focused_field {
+                        DeleteTaskField::Delete => Message::ConfirmDeleteTask,
+                        DeleteTaskField::Cancel => Message::DismissDialog,
+                        _ => Message::DismissDialog,
+                    });
+                }
+                KeyCode::Char(' ') => {
+                    match state.focused_field {
+                        DeleteTaskField::KillTmux => state.kill_tmux = !state.kill_tmux,
+                        DeleteTaskField::RemoveWorktree => {
+                            state.remove_worktree = !state.remove_worktree
+                        }
+                        DeleteTaskField::DeleteBranch => state.delete_branch = !state.delete_branch,
+                        _ => {}
+                    };
+                }
+                _ => {}
+            },
             ActiveDialog::WorktreeNotFound(state) => match key.code {
                 KeyCode::Esc => self.active_dialog = ActiveDialog::None,
                 KeyCode::Left | KeyCode::Char('h') => {
@@ -1068,6 +1113,23 @@ impl App {
         Ok(())
     }
 
+    fn open_delete_task_dialog(&mut self) -> Result<()> {
+        let Some(task) = self.selected_task() else {
+            return Ok(());
+        };
+
+        self.active_dialog = ActiveDialog::DeleteTask(DeleteTaskDialogState {
+            task_id: task.id,
+            task_title: task.title.clone(),
+            task_branch: task.branch.clone(),
+            kill_tmux: true,
+            remove_worktree: true,
+            delete_branch: false,
+            focused_field: DeleteTaskField::Cancel,
+        });
+        Ok(())
+    }
+
     fn confirm_category_input(&mut self) -> Result<()> {
         let ActiveDialog::CategoryInput(state) = self.active_dialog.clone() else {
             return Ok(());
@@ -1129,6 +1191,48 @@ impl App {
         }
 
         self.db.delete_category(state.category_id)?;
+        self.active_dialog = ActiveDialog::None;
+        self.refresh_data()?;
+        Ok(())
+    }
+
+    fn confirm_delete_task(&mut self) -> Result<()> {
+        let ActiveDialog::DeleteTask(state) = self.active_dialog.clone() else {
+            return Ok(());
+        };
+
+        let task = self.tasks.iter().find(|t| t.id == state.task_id);
+        let Some(task) = task else {
+            self.active_dialog = ActiveDialog::None;
+            return Ok(());
+        };
+
+        let repo = self.repo_for_task(task);
+
+        if state.kill_tmux
+            && let Some(ref session_name) = task.tmux_session_name
+        {
+            let _ = tmux_kill_session(session_name);
+        }
+
+        if state.remove_worktree
+            && let (Some(worktree_path), Some(r)) = (&task.worktree_path, repo.as_ref())
+        {
+            let worktree = Path::new(worktree_path);
+            let repo_path = Path::new(&r.path);
+            if worktree.exists() {
+                let _ = git_remove_worktree(repo_path, worktree);
+            }
+        }
+
+        if state.delete_branch
+            && let Some(r) = repo
+            && !task.branch.is_empty()
+        {
+            let _ = git_delete_branch(Path::new(&r.path), &task.branch);
+        }
+
+        self.db.delete_task(state.task_id)?;
         self.active_dialog = ActiveDialog::None;
         self.refresh_data()?;
         Ok(())
