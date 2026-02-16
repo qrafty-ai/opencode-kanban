@@ -6,14 +6,14 @@ use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Wrap,
+        Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
 
 use crate::app::{
     ActiveDialog, App, CategoryInputField, CategoryInputMode, DeleteCategoryField, DeleteTaskField,
-    Message, NewTaskField, WorktreeNotFoundField,
+    Message, NewProjectField, NewTaskField, View, WorktreeNotFoundField,
 };
 use crate::command_palette::{CommandPaletteState, all_commands};
 use crate::theme::{Theme, parse_color};
@@ -88,6 +88,48 @@ fn render_overlay_frame(frame: &mut Frame<'_>, config: OverlayConfig) -> Rect {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    match app.current_view {
+        View::ProjectList => render_project_list(frame, app),
+        View::Board => render_board(frame, app),
+    }
+}
+
+fn render_project_list(frame: &mut Frame<'_>, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(frame.area());
+
+    let header = Block::default()
+        .borders(Borders::ALL)
+        .title(" Select Project ")
+        .title_alignment(Alignment::Center);
+    frame.render_widget(header, chunks[0]);
+
+    let items: Vec<ListItem> = app
+        .project_list
+        .iter()
+        .map(|project| ListItem::new(format!("  {}", project.name)))
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Projects "))
+        .highlight_style(Style::default().fg(Color::Yellow).bg(Color::DarkGray))
+        .highlight_symbol("> ");
+    frame.render_stateful_widget(list, chunks[1], &mut app.project_list_state);
+
+    let footer = Block::default()
+        .borders(Borders::ALL)
+        .title(" n: New Project, Enter: Select, q: Quit ")
+        .title_alignment(Alignment::Center);
+    frame.render_widget(footer, chunks[2]);
+}
+
+pub fn render_board(frame: &mut Frame<'_>, app: &mut App) {
     app.hit_test_map.clear();
 
     let chunks = Layout::default()
@@ -500,6 +542,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::RepoUnavailable(_) => (60, 50),
         ActiveDialog::Error(_) => (60, 60),
         ActiveDialog::CommandPalette(_) => command_palette_overlay_size(app.viewport),
+        ActiveDialog::NewProject(_) => (50, 30),
         _ => (60, 20),
     };
 
@@ -517,6 +560,8 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::WorktreeNotFound(_) => " Worktree Not Found ",
         ActiveDialog::RepoUnavailable(_) => " Repo Unavailable ",
         ActiveDialog::Help => " Help ",
+        ActiveDialog::NewProject(_) => " New Project ",
+        ActiveDialog::ConfirmQuit(_) => " Confirm Quit ",
         ActiveDialog::None => "",
     };
 
@@ -903,7 +948,73 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
             render_button(frame, layout[1], "[ Dismiss ]", true);
             app.hit_test_map.push((layout[1], Message::DismissDialog));
         }
-        _ => {}
+        ActiveDialog::NewProject(state) => {
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                ])
+                .split(inner_area);
+
+            render_input_field(
+                frame,
+                layout[0],
+                "Project Name",
+                &state.name_input,
+                state.focused_field == NewProjectField::Name,
+            );
+
+            let buttons = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(layout[2]);
+
+            render_button(
+                frame,
+                buttons[0],
+                "[ Create ]",
+                state.focused_field == NewProjectField::Create,
+            );
+            render_button(
+                frame,
+                buttons[1],
+                "[ Cancel ]",
+                state.focused_field == NewProjectField::Cancel,
+            );
+
+            app.hit_test_map.push((buttons[0], Message::CreateProject));
+            app.hit_test_map.push((buttons[1], Message::DismissDialog));
+        }
+        ActiveDialog::ConfirmQuit(state) => {
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(4), Constraint::Length(3)])
+                .split(inner_area);
+
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} active tmux session(s) still running.\nQuit anyway?",
+                    state.active_session_count
+                ))
+                .alignment(Alignment::Center),
+                layout[0],
+            );
+
+            let buttons = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(layout[1]);
+            render_button(frame, buttons[0], "[ Quit ]", true);
+            render_button(frame, buttons[1], "[ Cancel ]", false);
+            app.hit_test_map.push((buttons[0], Message::ConfirmQuit));
+            app.hit_test_map.push((buttons[1], Message::CancelQuit));
+        }
+        ActiveDialog::MoveTask(_) => {
+            // MoveTask dialog handled in columns - this is a placeholder
+        }
+        ActiveDialog::None => {}
     }
 }
 
