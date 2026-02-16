@@ -307,7 +307,6 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::DeleteCategory(_) => (50, 50),
         ActiveDialog::WorktreeNotFound(_) => (60, 50),
         ActiveDialog::RepoUnavailable(_) => (60, 50),
-        ActiveDialog::ConfirmQuit(_) => (50, 30),
         ActiveDialog::Error(_) => (60, 60),
         _ => (60, 20),
     };
@@ -327,7 +326,6 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::MoveTask(_) => " Move Task ",
         ActiveDialog::WorktreeNotFound(_) => " Worktree Not Found ",
         ActiveDialog::RepoUnavailable(_) => " Repo Unavailable ",
-        ActiveDialog::ConfirmQuit(_) => " Confirm Quit ",
         ActiveDialog::Help => " Help ",
         ActiveDialog::None => "",
     };
@@ -664,30 +662,6 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
             render_button(frame, layout[1], "[ Dismiss ]", true);
             app.hit_test_map
                 .push((layout[1], Message::RepoUnavailableDismiss));
-        }
-        ActiveDialog::ConfirmQuit(state) => {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(4), Constraint::Length(3)])
-                .split(inner_area);
-
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "{} active tmux session(s) still running.\nQuit anyway?",
-                    state.active_session_count
-                ))
-                .alignment(Alignment::Center),
-                layout[0],
-            );
-
-            let buttons = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(layout[1]);
-            render_button(frame, buttons[0], "[ Quit ]", true);
-            render_button(frame, buttons[1], "[ Cancel ]", false);
-            app.hit_test_map.push((buttons[0], Message::ConfirmQuit));
-            app.hit_test_map.push((buttons[1], Message::CancelQuit));
         }
         ActiveDialog::Error(state) => {
             let layout = Layout::default()
