@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn test_list_branches_and_tags() {
         let repo = TestRepo::new_with_origin_main("branches-tags").expect("repo should be created");
-        repo.git(["branch", "feature/local"])
+        repo.git(["branch", "feature/local", "main"])
             .expect("local branch should be created");
         repo.git(["tag", "v1.0.0"]).expect("tag should be created");
 
