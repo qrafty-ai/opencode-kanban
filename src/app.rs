@@ -804,20 +804,7 @@ impl App {
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.update(Message::OpenCommandPalette)?;
             }
-            KeyCode::Char('q') => {
-                if self.current_view == View::ProjectList {
-                    self.should_quit = true;
-                    return Ok(());
-                }
-                let active_session_count = self.active_session_count();
-                if active_session_count > 0 {
-                    self.active_dialog = ActiveDialog::ConfirmQuit(ConfirmQuitDialogState {
-                        active_session_count,
-                    });
-                } else {
-                    self.should_quit = true;
-                }
-            }
+            KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
 
