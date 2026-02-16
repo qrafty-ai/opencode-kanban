@@ -50,6 +50,46 @@ pub fn git_fetch(repo_path: &Path) -> Result<()> {
     run_git(repo_path, ["fetch", "origin"]).context("failed to fetch from origin")
 }
 
+pub fn git_check_branch_up_to_date(repo_path: &Path, base_ref: &str) -> Result<()> {
+    let remote_ref = if base_ref.starts_with("origin/") {
+        format!("refs/remotes/{}", base_ref)
+    } else {
+        format!("refs/remotes/origin/{}", base_ref)
+    };
+
+    let local_output = run_git_output(repo_path, ["rev-parse", base_ref]);
+    let local_hash = match local_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => return Ok(()),
+    };
+
+    let remote_output = run_git_output(repo_path, ["rev-parse", &remote_ref]);
+    let remote_hash = match remote_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => return Ok(()),
+    };
+
+    if local_hash != remote_hash {
+        let merge_base_output =
+            run_git_output(repo_path, ["merge-base", &local_hash, &remote_hash]);
+        if let Ok(output) = merge_base_output {
+            let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if merge_base == local_hash {
+                anyhow::bail!(
+                    "base branch `{base_ref}` is not up-to-date with remote. \
+                     Please pull or fetch and merge before creating worktree."
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn git_list_branches(repo_path: &Path) -> Vec<Branch> {
     let output = match run_git_output(
         repo_path,

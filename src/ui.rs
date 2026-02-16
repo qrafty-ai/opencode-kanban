@@ -301,7 +301,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
 
     // Use larger dialog for forms that need more space
     let (percent_x, percent_y) = match &app.active_dialog {
-        ActiveDialog::NewTask(_) => (80, 70),
+        ActiveDialog::NewTask(_) => (80, 72),
         ActiveDialog::DeleteTask(_) => (50, 50),
         ActiveDialog::CategoryInput(_) => (50, 50),
         ActiveDialog::DeleteCategory(_) => (50, 50),
@@ -349,6 +349,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                     Constraint::Length(3),
                     Constraint::Length(3),
                     Constraint::Length(3),
+                    Constraint::Length(1),
                     Constraint::Length(3),
                 ])
                 .split(inner_area);
@@ -396,10 +397,32 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
                 state.focused_field == NewTaskField::Title,
             );
 
+            let checkbox_text = if state.ensure_base_up_to_date {
+                "[x] Ensure base branch up-to-date"
+            } else {
+                "[ ] Ensure base branch up-to-date"
+            };
+            let checkbox_block = Block::default()
+                .borders(Borders::NONE)
+                .style(Style::default().fg(Color::White));
+            let checkbox_paragraph = Paragraph::new(checkbox_text)
+                .block(checkbox_block)
+                .alignment(Alignment::Center);
+            let checkbox_focused = state.focused_field == NewTaskField::EnsureBaseUpToDate;
+            if checkbox_focused {
+                frame.render_widget(
+                    checkbox_paragraph
+                        .style(Style::default().fg(Color::Yellow).bg(Color::DarkGray)),
+                    layout[4],
+                );
+            } else {
+                frame.render_widget(checkbox_paragraph, layout[4]);
+            }
+
             let button_layout = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(layout[4]);
+                .split(layout[5]);
 
             render_button(
                 frame,
