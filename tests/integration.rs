@@ -110,6 +110,9 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
     if !tmux_available() {
         return Ok(());
     }
+    if !port_available(4096) {
+        return Ok(());
+    }
     let _test_guard = INTEGRATION_TEST_LOCK
         .lock()
         .expect("integration test lock should not be poisoned");
@@ -204,6 +207,9 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
 #[test]
 fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Result<()> {
     if !tmux_available() {
+        return Ok(());
+    }
+    if !port_available(4096) {
         return Ok(());
     }
     let _test_guard = INTEGRATION_TEST_LOCK
@@ -383,6 +389,10 @@ fn tmux_available() -> bool {
         .unwrap_or(false)
 }
 
+fn port_available(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
 fn cleanup_test_tmux_server() {
     let socket = std::env::var("OPENCODE_KANBAN_TMUX_SOCKET")
         .ok()
@@ -451,7 +461,7 @@ fn binding_state_from_task(task: &Task) -> OpenCodeBindingState {
         }),
     };
 
-    classify_binding_state(None, Some(&status))
+    classify_binding_state(task.opencode_session_id.as_deref(), Some(&status))
 }
 
 fn http_json_response(body: &str) -> String {

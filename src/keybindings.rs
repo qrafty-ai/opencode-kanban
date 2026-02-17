@@ -41,7 +41,9 @@ pub enum KeyAction {
     MoveTaskDown,
     MoveTaskUp,
     AttachTask,
+    CycleTodoVisualization,
     Dismiss,
+    ToggleCategoryEditMode,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -211,6 +213,12 @@ const PROJECT_LIST_DEFS: &[ActionDef] = &[
 
 const BOARD_DEFS: &[ActionDef] = &[
     ActionDef {
+        id: "toggle_category_edit_mode",
+        action: KeyAction::ToggleCategoryEditMode,
+        description: "toggle category edit mode",
+        defaults: &["g"],
+    },
+    ActionDef {
         id: "navigate_left",
         action: KeyAction::NavigateLeft,
         description: "move focus left",
@@ -301,6 +309,12 @@ const BOARD_DEFS: &[ActionDef] = &[
         defaults: &["Enter"],
     },
     ActionDef {
+        id: "cycle_todo_visualization",
+        action: KeyAction::CycleTodoVisualization,
+        description: "cycle todo visualization",
+        defaults: &["t"],
+    },
+    ActionDef {
         id: "dismiss",
         action: KeyAction::Dismiss,
         description: "dismiss",
@@ -354,6 +368,9 @@ impl Keybindings {
             "navigate_right" => self.display_for(KeyContext::Board, KeyAction::NavigateRight),
             "select_up" => self.display_for(KeyContext::Board, KeyAction::SelectUp),
             "select_down" => self.display_for(KeyContext::Board, KeyAction::SelectDown),
+            "cycle_todo_visualization" => {
+                self.display_for(KeyContext::Board, KeyAction::CycleTodoVisualization)
+            }
             "help" => self.display_for(KeyContext::Global, KeyAction::ToggleHelp),
             "quit" => self.display_for(KeyContext::Global, KeyAction::Quit),
             _ => None,
@@ -425,8 +442,18 @@ impl Keybindings {
                     .unwrap_or_else(|| "-".to_string())
             ),
             format!(
+                "  {}: cycle todo visualization",
+                self.display_for(KeyContext::Board, KeyAction::CycleTodoVisualization)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
                 "  {}: new task",
                 self.display_for(KeyContext::Board, KeyAction::NewTask)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {}: toggle category edit mode",
+                self.display_for(KeyContext::Board, KeyAction::ToggleCategoryEditMode)
                     .unwrap_or_else(|| "-".to_string())
             ),
             format!(
@@ -447,7 +474,7 @@ impl Keybindings {
                     .unwrap_or_else(|| "-".to_string())
             ),
             format!(
-                "  {} / {}: move task left/right",
+                "  {} / {}: move task (or category in edit mode)",
                 self.display_for(KeyContext::Board, KeyAction::MoveTaskLeft)
                     .unwrap_or_else(|| "-".to_string()),
                 self.display_for(KeyContext::Board, KeyAction::MoveTaskRight)
@@ -767,5 +794,15 @@ mod tests {
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
         );
         assert_eq!(action, Some(KeyAction::Quit));
+    }
+
+    #[test]
+    fn defaults_include_cycle_todo_visualization() {
+        let keys = Keybindings::load();
+        let action = keys.action_for_key(
+            KeyContext::Board,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::empty()),
+        );
+        assert_eq!(action, Some(KeyAction::CycleTodoVisualization));
     }
 }

@@ -31,6 +31,7 @@ pub enum Message {
     FocusColumn(usize),
     SelectTask(usize, usize),
     SelectTaskInSidePanel(usize),
+    ToggleSidePanelCategoryCollapse,
     OpenAddCategoryDialog,
     OpenRenameCategoryDialog,
     OpenDeleteCategoryDialog,
@@ -53,6 +54,9 @@ pub enum Message {
     CancelQuit,
     ExecuteCommand(String),
     CycleCategoryColor(usize),
+    OpenCategoryColorDialog,
+    ConfirmCategoryColor,
+    CycleTodoVisualization,
     SwitchToProjectList,
     SwitchToBoard(PathBuf),
     ProjectListSelectUp,
@@ -69,4 +73,5 @@ pub enum Message {
     FocusDialogButton(String),
     SelectProject(usize),
     SelectCommandPaletteItem(usize),
+    ToggleCategoryEditMode,
 }

@@ -1,5 +1,7 @@
 //! Application state types for dialogs and UI components
 
+use std::str::FromStr;
+
 use uuid::Uuid;
 
 use crate::command_palette::CommandPaletteState;
@@ -93,6 +95,44 @@ pub enum CategoryInputMode {
     Rename,
 }
 
+pub const CATEGORY_COLOR_PALETTE: [Option<&str>; 7] = [
+    None,
+    Some("cyan"),
+    Some("magenta"),
+    Some("blue"),
+    Some("green"),
+    Some("yellow"),
+    Some("red"),
+];
+
+pub fn category_color_label(color: Option<&str>) -> &'static str {
+    match color {
+        None => "Default",
+        Some("cyan") => "Cyan",
+        Some("magenta") => "Magenta",
+        Some("blue") => "Blue",
+        Some("green") => "Green",
+        Some("yellow") => "Yellow",
+        Some("red") => "Red",
+        Some(_) => "Custom",
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CategoryColorField {
+    Palette,
+    Confirm,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CategoryColorDialogState {
+    pub category_id: Uuid,
+    pub category_name: String,
+    pub selected_index: usize,
+    pub focused_field: CategoryColorField,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum View {
     ProjectList,
@@ -178,6 +218,40 @@ pub enum ViewMode {
     SidePanel,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TodoVisualizationMode {
+    Summary,
+    Checklist,
+}
+
+impl TodoVisualizationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TodoVisualizationMode::Summary => "summary",
+            TodoVisualizationMode::Checklist => "checklist",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            TodoVisualizationMode::Summary => TodoVisualizationMode::Checklist,
+            TodoVisualizationMode::Checklist => TodoVisualizationMode::Summary,
+        }
+    }
+}
+
+impl FromStr for TodoVisualizationMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "summary" => Ok(Self::Summary),
+            "checklist" | "plan" => Ok(Self::Checklist),
+            _ => Err(()),
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActiveDialog {
@@ -186,6 +260,7 @@ pub enum ActiveDialog {
     CommandPalette(CommandPaletteState),
     NewProject(NewProjectDialogState),
     CategoryInput(CategoryInputDialogState),
+    CategoryColor(CategoryColorDialogState),
     DeleteCategory(DeleteCategoryDialogState),
     Error(ErrorDialogState),
     DeleteTask(DeleteTaskDialogState),
@@ -219,4 +294,38 @@ pub enum AttachTaskResult {
 #[derive(Debug, Clone)]
 pub struct CreateTaskOutcome {
     pub warning: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TodoVisualizationMode;
+    use std::str::FromStr;
+
+    #[test]
+    fn todo_visualization_mode_cycles_between_values() {
+        assert_eq!(
+            TodoVisualizationMode::Summary.cycle(),
+            TodoVisualizationMode::Checklist
+        );
+        assert_eq!(
+            TodoVisualizationMode::Checklist.cycle(),
+            TodoVisualizationMode::Summary
+        );
+    }
+
+    #[test]
+    fn todo_visualization_mode_parses_supported_values() {
+        assert_eq!(
+            TodoVisualizationMode::from_str("summary"),
+            Ok(TodoVisualizationMode::Summary)
+        );
+        assert_eq!(
+            TodoVisualizationMode::from_str("checklist"),
+            Ok(TodoVisualizationMode::Checklist)
+        );
+        assert_eq!(
+            TodoVisualizationMode::from_str("plan"),
+            Ok(TodoVisualizationMode::Checklist)
+        );
+    }
 }

@@ -8,13 +8,16 @@ use tuirealm::{
     ratatui::{
         Frame,
         layout::{Constraint, Direction, Layout, Rect},
-        widgets::Clear,
+        style::Style as RatatuiStyle,
+        widgets::{Clear, Scrollbar, ScrollbarOrientation, ScrollbarState},
     },
 };
 
 use crate::app::{
-    ActiveDialog, App, CategoryInputMode, DeleteTaskField, NewTaskField, STATUS_BROKEN,
-    STATUS_REPO_UNAVAILABLE, SettingsSection, View, ViewMode,
+    ActiveDialog, App, CATEGORY_COLOR_PALETTE, CategoryColorField, CategoryInputField,
+    CategoryInputMode, DeleteCategoryField, DeleteTaskField, NewTaskField, STATUS_BROKEN,
+    STATUS_REPO_UNAVAILABLE, SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode,
+    category_color_label,
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
@@ -129,11 +132,20 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
         .split(area);
 
+    let title = if app.category_edit_mode {
+        "opencode-kanban [CATEGORY EDIT]"
+    } else {
+        "opencode-kanban"
+    };
+
     let mut left = Label::default()
-        .text("opencode-kanban")
+        .text(title)
         .alignment(Alignment::Left)
         .foreground(theme.base.header)
         .background(theme.base.surface);
+    if app.category_edit_mode {
+        left = left.modifiers(tuirealm::props::TextModifiers::BOLD);
+    }
     left.view(frame, sections[0]);
 
     let right_text = format!("tasks: {}  refresh: 0.5s", app.tasks.len());
@@ -147,14 +159,29 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = app.theme;
-    let notice = app.footer_notice.as_deref().unwrap_or(
-        "n:new  Enter:attach  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view",
-    );
+    let notice = if let Some(notice) = &app.footer_notice {
+        notice.as_str()
+    } else if app.category_edit_mode {
+        "EDIT MODE  h/l:nav  H/L:reorder  p:color  r:rename  x:delete  g:exit"
+    } else {
+        match app.view_mode {
+            ViewMode::Kanban => {
+                "n:new  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view"
+            }
+            ViewMode::SidePanel => {
+                "j/k:select  Space:collapse  Enter:attach task  t:todo view  c/r/x:category  H/L/J/K:move  v:view"
+            }
+        }
+    };
 
     let mut footer = Label::default()
         .text(notice)
         .alignment(Alignment::Center)
-        .foreground(theme.base.text_muted)
+        .foreground(if app.category_edit_mode && app.footer_notice.is_none() {
+            theme.base.header
+        } else {
+            theme.base.text_muted
+        })
         .background(theme.base.surface);
     footer.view(frame, area);
 }
@@ -183,6 +210,8 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
         } else {
             tasks.iter().map(task_tile_lines).sum()
         };
+        let viewport_lines = list_inner_height(columns[slot]);
+        let show_scrollbar = viewport_lines > 0 && row_count > viewport_lines;
 
         let selected_task = app
             .selected_task_per_column
@@ -192,7 +221,8 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .min(tasks.len().saturating_sub(1));
         let is_focused_column = column_idx == app.focused_column;
 
-        let tile_width = list_inner_width(columns[slot]);
+        let tile_width =
+            list_inner_width(columns[slot]).saturating_sub(usize::from(show_scrollbar));
         for (task_index, task) in tasks.iter().enumerate() {
             append_task_tile_rows(
                 &mut rows,
@@ -208,12 +238,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             rows.add_col(TextSpan::from("No tasks")).add_row();
         }
 
-        let selected_line = tasks
-            .iter()
-            .take(selected_task)
-            .map(task_tile_lines)
-            .sum::<usize>()
-            .min(row_count.saturating_sub(1));
+        let selected_line = column_selected_line(tasks.as_slice(), selected_task);
 
         let mut list = List::default()
             .title(
@@ -232,12 +257,43 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             AttrValue::Flag(column_idx == app.focused_column),
         );
         list.view(frame, columns[slot]);
+
+        if show_scrollbar {
+            let scroll_offset = column_scroll_offset(selected_line, row_count, viewport_lines);
+            let mut state = ScrollbarState::new(row_count)
+                .position(scrollbar_position_for_offset(
+                    scroll_offset,
+                    row_count,
+                    viewport_lines,
+                ))
+                .viewport_content_length(viewport_lines);
+            let thumb_color = if is_focused_column {
+                accent
+            } else {
+                theme.base.text_muted
+            };
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .track_style(RatatuiStyle::default().fg(theme.base.text_muted))
+                .thumb_style(RatatuiStyle::default().fg(thumb_color))
+                .thumb_symbol("█");
+            let scrollbar_area = inset_rect(columns[slot], 1, 1);
+            if scrollbar_area.width > 0 && scrollbar_area.height > 0 {
+                frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
+            }
+        }
     }
 }
 
 fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let entries = linear_entries(app);
-    if entries.is_empty() {
+    if app.categories.is_empty() {
+        render_empty_state(frame, area, "No categories yet. Press c to add one.", app);
+        return;
+    }
+    let rows = app.side_panel_rows();
+    if rows.is_empty() {
         render_empty_state(frame, area, "No tasks available.", app);
         return;
     }
@@ -251,44 +307,67 @@ fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ])
         .split(area);
 
-    render_side_panel_list(frame, sections[0], app, &entries);
-    render_side_panel_details(frame, sections[1], app, &entries);
+    render_side_panel_list(frame, sections[0], app, &rows);
+    render_side_panel_details(frame, sections[1], app, &rows);
 }
 
 fn render_side_panel_list(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
-    entries: &[(String, Task)],
+    rows_data: &[SidePanelRow],
 ) {
     let theme = app.theme;
-    let mut rows = TableBuilder::default();
-    let row_count = if entries.is_empty() {
-        1
-    } else {
-        entries.iter().map(|(_, task)| task_tile_lines(task)).sum()
-    };
-    let selected_task = app.selected_task_index.min(entries.len().saturating_sub(1));
-    let tile_width = list_inner_width(area);
-    for (task_index, (_, task)) in entries.iter().enumerate() {
-        append_task_tile_rows(
-            &mut rows,
-            app,
-            task,
-            task_index == selected_task,
-            tile_width,
-            theme.interactive.selected_border,
-        );
+    if rows_data.is_empty() {
+        return;
     }
 
-    let selected_line = entries
-        .iter()
-        .take(selected_task)
-        .map(|(_, task)| task_tile_lines(task))
-        .sum::<usize>()
-        .min(row_count.saturating_sub(1));
+    let selected_row = app
+        .side_panel_selected_row
+        .min(rows_data.len().saturating_sub(1));
+    let row_count = rows_data.iter().map(side_panel_row_lines).sum::<usize>();
+    let viewport_lines = list_inner_height(area);
+    let show_scrollbar = viewport_lines > 0 && row_count > viewport_lines;
+    let tile_width = list_inner_width(area).saturating_sub(usize::from(show_scrollbar));
+    let mut rows = TableBuilder::default();
+    for (row_index, row) in rows_data.iter().enumerate() {
+        match row {
+            SidePanelRow::CategoryHeader {
+                category_name,
+                category_color,
+                visible_tasks,
+                total_tasks,
+                collapsed,
+                ..
+            } => {
+                let accent = theme.category_accent(category_color.as_deref());
+                let marker = if *collapsed { ">" } else { "v" };
+                let text = format!("{marker} {category_name} ({visible_tasks}/{total_tasks})");
+                let line = pad_to_width(&format!(" {text}"), tile_width);
+                let style = if row_index == selected_row {
+                    theme.tile_colors(true)
+                } else {
+                    theme.tile_colors(false)
+                };
+                rows.add_col(TextSpan::new(line).fg(accent).bg(style.background).bold())
+                    .add_row();
+            }
+            SidePanelRow::Task { task, .. } => {
+                append_task_tile_rows(
+                    &mut rows,
+                    app,
+                    task,
+                    row_index == selected_row,
+                    tile_width,
+                    theme.interactive.selected_border,
+                );
+            }
+        }
+    }
+
+    let selected_line = side_panel_selected_line(rows_data, selected_row);
     let mut list = List::default()
-        .title("Tasks", Alignment::Left)
+        .title("Tasks by Category", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
         .background(theme.base.surface)
@@ -298,17 +377,52 @@ fn render_side_panel_list(
         .inactive(Style::default().fg(theme.base.text_muted));
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, area);
+
+    if show_scrollbar {
+        let scroll_offset = column_scroll_offset(selected_line, row_count, viewport_lines);
+        let mut state = ScrollbarState::new(row_count)
+            .position(scrollbar_position_for_offset(
+                scroll_offset,
+                row_count,
+                viewport_lines,
+            ))
+            .viewport_content_length(viewport_lines);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .track_style(RatatuiStyle::default().fg(theme.base.text_muted))
+            .thumb_style(RatatuiStyle::default().fg(theme.interactive.focus))
+            .thumb_symbol("█");
+        let scrollbar_area = inset_rect(area, 1, 1);
+        if scrollbar_area.width > 0 && scrollbar_area.height > 0 {
+            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
+        }
+    }
 }
 
 fn render_side_panel_details(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
-    entries: &[(String, Task)],
+    rows_data: &[SidePanelRow],
 ) {
+    if rows_data.is_empty() {
+        return;
+    }
+    let selected_row = app
+        .side_panel_selected_row
+        .min(rows_data.len().saturating_sub(1));
+    match &rows_data[selected_row] {
+        SidePanelRow::Task { task, .. } => render_side_panel_task_details(frame, area, app, task),
+        SidePanelRow::CategoryHeader { .. } => {
+            render_side_panel_category_details(frame, area, app, &rows_data[selected_row])
+        }
+    }
+}
+
+fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, task: &Task) {
     let theme = app.theme;
-    let selected = app.selected_task_index.min(entries.len().saturating_sub(1));
-    let (_, task) = &entries[selected];
 
     let repo_name = app
         .repos
@@ -318,10 +432,11 @@ fn render_side_panel_details(
         .unwrap_or_else(|| "unknown".to_string());
 
     let spinner = status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase);
-    let todos = task
+    let todo_summary = task
         .session_todo_summary()
         .map(|(done, total)| format!("{done}/{total}"))
         .unwrap_or_else(|| "--".to_string());
+    let todo_view = app.todo_visualization_mode.as_str();
     let session = task.tmux_session_name.as_deref().unwrap_or("n/a");
 
     let worktree_full = task.worktree_path.as_deref().unwrap_or("n/a");
@@ -336,12 +451,24 @@ fn render_side_panel_details(
         TextSpan::new("RUNTIME").fg(theme.base.header).bold(),
         TextSpan::new(detail_kv("Status", spinner))
             .fg(theme.status_color(task.tmux_status.as_str())),
-        TextSpan::new(detail_kv("Todos", &todos)).fg(theme.tile.todo),
+        TextSpan::new(detail_kv("Todos", &todo_summary)).fg(theme.tile.todo),
+        TextSpan::new(detail_kv("TodoView", todo_view)).fg(theme.base.text_muted),
         TextSpan::new(detail_kv("Session", session)).fg(theme.base.text),
         TextSpan::new(""),
         TextSpan::new("WORKSPACE").fg(theme.base.header).bold(),
         TextSpan::new(detail_kv("Path", &worktree_short)).fg(theme.base.text),
     ];
+
+    if app.todo_visualization_mode == TodoVisualizationMode::Checklist {
+        let checklist_lines = todo_checklist_lines(task);
+        if !checklist_lines.is_empty() {
+            lines.push(TextSpan::new(""));
+            lines.push(TextSpan::new("WORK PLAN").fg(theme.base.header).bold());
+            for (line, state) in checklist_lines {
+                lines.push(TextSpan::new(line).fg(todo_state_color(theme, state)));
+            }
+        }
+    }
 
     if worktree_full != worktree_short {
         lines.push(TextSpan::new(detail_kv("Full", worktree_full)).fg(theme.base.text_muted));
@@ -369,6 +496,70 @@ fn render_side_panel_details(
     paragraph.view(frame, area);
 }
 
+fn render_side_panel_category_details(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    row: &SidePanelRow,
+) {
+    let SidePanelRow::CategoryHeader {
+        category_name,
+        category_id,
+        category_color,
+        total_tasks,
+        visible_tasks,
+        collapsed,
+        ..
+    } = row
+    else {
+        return;
+    };
+
+    let theme = app.theme;
+    let accent = theme.category_accent(category_color.as_deref());
+    let (running, idle, broken, unavailable, waiting, dead, other) =
+        category_status_counts(app, *category_id);
+
+    let mut lines = vec![
+        TextSpan::new("CATEGORY").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Name", category_name.as_str())).fg(theme.base.text),
+        TextSpan::new(detail_kv(
+            "State",
+            if *collapsed { "collapsed" } else { "expanded" },
+        ))
+        .fg(theme.base.text),
+        TextSpan::new(detail_kv("Visible", &visible_tasks.to_string())).fg(theme.base.text),
+        TextSpan::new(detail_kv("Tasks", &total_tasks.to_string())).fg(theme.base.text),
+        TextSpan::new(""),
+        TextSpan::new("STATUS").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Running", &running.to_string())).fg(theme.status_color("running")),
+        TextSpan::new(detail_kv("Idle", &idle.to_string())).fg(theme.status_color("idle")),
+        TextSpan::new(detail_kv("Broken", &broken.to_string()))
+            .fg(theme.status_color(STATUS_BROKEN)),
+        TextSpan::new(detail_kv("Unavailable", &unavailable.to_string()))
+            .fg(theme.status_color(STATUS_REPO_UNAVAILABLE)),
+        TextSpan::new(detail_kv("Waiting", &waiting.to_string())).fg(theme.status_color("waiting")),
+        TextSpan::new(detail_kv("Dead", &dead.to_string())).fg(theme.status_color("dead")),
+    ];
+
+    if other > 0 {
+        lines.push(TextSpan::new(detail_kv("Other", &other.to_string())).fg(theme.base.text));
+    }
+
+    lines.push(TextSpan::new(""));
+    lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
+    lines.push(TextSpan::new("Space toggle  j/k navigate  Enter attach on task").fg(accent));
+
+    let mut paragraph = Paragraph::default()
+        .title("Category Summary", Alignment::Left)
+        .borders(rounded_borders(accent))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
+        .wrap(true)
+        .text(lines);
+    paragraph.view(frame, area);
+}
+
 fn render_dialog(frame: &mut Frame<'_>, app: &App) {
     if matches!(app.active_dialog, ActiveDialog::Help) {
         render_help_overlay(frame, app);
@@ -380,6 +571,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
         ActiveDialog::NewTask(_) => (80, 72),
         ActiveDialog::DeleteTask(_) => (60, 60),
         ActiveDialog::CategoryInput(_) => (60, 40),
+        ActiveDialog::CategoryColor(_) => (60, 58),
         ActiveDialog::DeleteCategory(_) => (60, 40),
         ActiveDialog::NewProject(_) => (60, 35),
         _ => (60, 45),
@@ -399,14 +591,13 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
             render_delete_task_dialog(frame, dialog_area, app, state)
         }
         ActiveDialog::CategoryInput(state) => {
-            render_category_dialog(frame, dialog_area, app, state.mode, &state.name_input)
+            render_category_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::CategoryColor(state) => {
+            render_category_color_dialog(frame, dialog_area, app, state)
         }
         ActiveDialog::DeleteCategory(state) => {
-            let text = format!(
-                "Delete category '{}' and {} tasks?\n\nPress Enter to confirm or Esc to cancel.",
-                state.category_name, state.task_count
-            );
-            render_message_dialog(frame, dialog_area, app, "Delete Category", &text);
+            render_delete_category_dialog(frame, dialog_area, app, state)
         }
         ActiveDialog::Error(state) => {
             let text = format!("{}\n\n{}", state.title, state.detail);
@@ -450,14 +641,10 @@ fn render_new_task_dialog(
     state: &crate::app::NewTaskDialogState,
 ) {
     let theme = app.theme;
-    let surface = theme.dialog_surface();
+    let surface = dialog_surface(theme);
 
-    let mut panel = Paragraph::default()
-        .title("New Task", Alignment::Center)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(surface)
-        .text([TextSpan::from("")]);
+    let mut panel =
+        dialog_panel("New Task", Alignment::Center, theme, surface).text([TextSpan::from("")]);
     panel.view(frame, area);
 
     let panel_inner = inset_rect(area, 1, 1);
@@ -524,15 +711,10 @@ fn render_new_task_dialog(
     } else {
         Vec::new()
     };
-    let mut checkbox = Checkbox::default()
-        .title("Options", Alignment::Left)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(surface)
+    let mut checkbox = dialog_checkbox("Options", theme, surface)
         .choices(["Ensure base is up to date"])
         .values(&selected)
-        .rewind(false)
-        .inactive(Style::default().fg(theme.base.text_muted));
+        .rewind(false);
     checkbox.attr(
         Attribute::Focus,
         AttrValue::Flag(state.focused_field == NewTaskField::EnsureBaseUpToDate),
@@ -587,11 +769,7 @@ fn render_delete_task_dialog(
         ])
         .split(panel_inner);
 
-    let mut panel = Paragraph::default()
-        .title("Delete Task", Alignment::Center)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(theme.base.canvas)
+    let mut panel = dialog_panel("Delete Task", Alignment::Center, theme, theme.base.canvas)
         .text([TextSpan::from("")]);
     panel.view(frame, area);
 
@@ -617,15 +795,10 @@ fn render_delete_task_dialog(
     .filter_map(|(enabled, idx)| enabled.then_some(idx))
     .collect::<Vec<_>>();
 
-    let mut checkbox = Checkbox::default()
-        .title("Delete Options", Alignment::Left)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(theme.dialog_surface())
+    let mut checkbox = dialog_checkbox("Delete Options", theme, dialog_surface(theme))
         .choices(["Kill tmux", "Remove worktree", "Delete branch"])
         .values(&selected)
-        .rewind(false)
-        .inactive(Style::default().fg(theme.base.text_muted));
+        .rewind(false);
     checkbox.attr(
         Attribute::Focus,
         AttrValue::Flag(matches!(
@@ -664,23 +837,145 @@ fn render_category_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
-    mode: CategoryInputMode,
-    name: &str,
+    state: &crate::app::CategoryInputDialogState,
 ) {
-    let title = match mode {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let title = match state.mode {
         CategoryInputMode::Add => "Add Category",
         CategoryInputMode::Rename => "Rename Category",
     };
-    let header = centered_rect(100, 35, area);
+
+    let mut panel =
+        dialog_panel(title, Alignment::Center, theme, surface).text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
     render_input_component(
         frame,
-        header,
-        title,
-        name,
-        true,
-        app.theme.dialog_surface(),
-        app.theme,
+        layout[0],
+        "Name",
+        &state.name_input,
+        matches!(state.focused_field, CategoryInputField::Name),
+        surface,
+        theme,
     );
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        if state.mode == CategoryInputMode::Add {
+            "Add"
+        } else {
+            "Rename"
+        },
+        matches!(state.focused_field, CategoryInputField::Confirm),
+        false,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, CategoryInputField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Tab: next field  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
+fn render_delete_category_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &crate::app::DeleteCategoryDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel = dialog_panel("Delete Category", Alignment::Center, theme, surface)
+        .text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
+    let text = if state.task_count > 0 {
+        format!(
+            "Category '{}' contains {} tasks.\nEmpty the category before deleting.",
+            state.category_name, state.task_count
+        )
+    } else {
+        format!("Delete category '{}'?", state.category_name)
+    };
+
+    let mut summary = Paragraph::default()
+        .foreground(theme.base.text)
+        .background(surface)
+        .wrap(true)
+        .alignment(Alignment::Center)
+        .text([TextSpan::from(text)]);
+    summary.view(frame, layout[0]);
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[1]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Delete",
+        matches!(state.focused_field, DeleteCategoryField::Delete),
+        true,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, DeleteCategoryField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Tab: switch  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[2]);
 }
 
 fn render_new_project_dialog(
@@ -695,18 +990,104 @@ fn render_new_project_dialog(
         "Project Name",
         &state.name_input,
         true,
-        app.theme.dialog_surface(),
+        dialog_surface(app.theme),
         app.theme,
     );
 }
 
+fn render_category_color_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &crate::app::CategoryColorDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel = dialog_panel("Category Color", Alignment::Center, theme, surface)
+        .text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(10),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
+    let mut summary = Paragraph::default()
+        .foreground(theme.base.text)
+        .background(surface)
+        .text([TextSpan::from(format!(
+            "Choose color for '{}'",
+            state.category_name
+        ))]);
+    summary.view(frame, layout[0]);
+
+    let mut rows = TableBuilder::default();
+    for color in CATEGORY_COLOR_PALETTE {
+        rows.add_col(TextSpan::from(category_color_label(color)))
+            .add_row();
+    }
+
+    let mut palette = List::default()
+        .title("Palette", Alignment::Left)
+        .borders(rounded_borders(dialog_input_border(
+            theme,
+            matches!(state.focused_field, CategoryColorField::Palette),
+        )))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
+        .rows(rows.build())
+        .selected_line(
+            state
+                .selected_index
+                .min(CATEGORY_COLOR_PALETTE.len().saturating_sub(1)),
+        );
+    palette.attr(
+        Attribute::Focus,
+        AttrValue::Flag(matches!(state.focused_field, CategoryColorField::Palette)),
+    );
+    palette.view(frame, layout[1]);
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Save",
+        matches!(state.focused_field, CategoryColorField::Confirm),
+        false,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, CategoryColorField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Arrows/jk: navigate  Tab: next field  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
 fn render_message_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, title: &str, text: &str) {
     let theme = app.theme;
-    let mut paragraph = Paragraph::default()
-        .title(title, Alignment::Center)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(theme.dialog_surface())
+    let mut paragraph = dialog_panel(title, Alignment::Center, theme, dialog_surface(theme))
         .wrap(true)
         .text(text.lines().map(|line| TextSpan::from(line.to_string())));
     paragraph.view(frame, area);
@@ -721,26 +1102,12 @@ fn render_action_button(
     app: &App,
 ) {
     let theme = app.theme;
-    let accent = if destructive {
-        theme.base.danger
-    } else {
-        theme.interactive.focus
-    };
-    let fg = if focused {
-        theme.dialog.button_fg
-    } else {
-        accent
-    };
-    let bg = if focused {
-        accent
-    } else {
-        theme.dialog.button_bg
-    };
+    let (accent, fg, bg) = dialog_button_palette(theme, focused, destructive);
 
     let mut button = Paragraph::default()
         .borders(rounded_borders(accent))
         .foreground(fg)
-        .background(if focused { bg } else { theme.dialog_surface() })
+        .background(if focused { bg } else { dialog_surface(theme) })
         .alignment(Alignment::Center)
         .text([TextSpan::from(label.to_string())]);
     button.view(frame, area);
@@ -768,7 +1135,7 @@ fn render_command_palette_dialog(
         "Command Palette",
         &state.query,
         true,
-        theme.dialog_surface(),
+        dialog_surface(theme),
         theme,
     );
 
@@ -776,7 +1143,7 @@ fn render_command_palette_dialog(
         .text("Type to filter. Enter to execute. Esc to close.")
         .alignment(Alignment::Left)
         .foreground(theme.base.text_muted)
-        .background(theme.dialog_surface());
+        .background(dialog_surface(theme));
     hint.view(frame, chunks[1]);
 
     if !should_render_command_palette_results(app.viewport) {
@@ -808,7 +1175,7 @@ fn render_command_palette_dialog(
         .min(state.filtered.len().saturating_sub(1));
     let mut list = Table::default()
         .title("Results", Alignment::Left)
-        .borders(rounded_borders(theme.interactive.focus))
+        .borders(dialog_border(theme))
         .foreground(theme.base.text)
         .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
@@ -841,11 +1208,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, app: &App) {
         })
         .collect::<Vec<_>>();
 
-    let mut paragraph = Paragraph::default()
-        .title("Help", Alignment::Center)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(theme.dialog_surface())
+    let mut paragraph = dialog_panel("Help", Alignment::Center, theme, dialog_surface(theme))
         .wrap(true)
         .text(lines);
     paragraph.view(frame, area);
@@ -873,11 +1236,7 @@ fn render_input_component(
 ) {
     let mut input = Input::default()
         .title(title, Alignment::Left)
-        .borders(rounded_borders(if focused {
-            theme.interactive.focus
-        } else {
-            theme.base.text_muted
-        }))
+        .borders(rounded_borders(dialog_input_border(theme, focused)))
         .foreground(theme.base.text)
         .background(background)
         .inactive(Style::default().fg(theme.base.text_muted))
@@ -885,18 +1244,6 @@ fn render_input_component(
         .value(value.to_string());
     input.attr(Attribute::Focus, AttrValue::Flag(focused));
     input.view(frame, area);
-}
-
-fn linear_entries(app: &App) -> Vec<(String, Task)> {
-    let mut out = Vec::new();
-    for (_, category) in sorted_categories(app) {
-        let mut tasks = tasks_for_category(app, category.id);
-        tasks.sort_by_key(|task| task.position);
-        for task in tasks {
-            out.push((category.name.clone(), task));
-        }
-    }
-    out
 }
 
 fn tasks_for_category(app: &App, category_id: uuid::Uuid) -> Vec<Task> {
@@ -914,6 +1261,102 @@ fn sorted_categories(app: &App) -> Vec<(usize, &Category)> {
     let mut categories: Vec<(usize, &Category)> = app.categories.iter().enumerate().collect();
     categories.sort_by_key(|(_, category)| category.position);
     categories
+}
+
+fn side_panel_row_lines(row: &SidePanelRow) -> usize {
+    match row {
+        SidePanelRow::CategoryHeader { .. } => 1,
+        SidePanelRow::Task { task, .. } => task_tile_lines(task),
+    }
+}
+
+fn side_panel_selected_line(rows: &[SidePanelRow], selected_row: usize) -> usize {
+    selected_line_for_row_heights(
+        &rows.iter().map(side_panel_row_lines).collect::<Vec<_>>(),
+        selected_row,
+    )
+}
+
+fn column_selected_line(tasks: &[Task], selected_task: usize) -> usize {
+    selected_line_for_row_heights(
+        &tasks.iter().map(task_tile_lines).collect::<Vec<_>>(),
+        selected_task,
+    )
+}
+
+fn column_scroll_offset(selected_line: usize, row_count: usize, viewport_lines: usize) -> usize {
+    if viewport_lines == 0 {
+        return 0;
+    }
+    let max_offset = row_count.saturating_sub(viewport_lines);
+    selected_line
+        .saturating_sub(viewport_lines.saturating_sub(1))
+        .min(max_offset)
+}
+
+fn selected_line_for_row_heights(row_heights: &[usize], selected_index: usize) -> usize {
+    if row_heights.is_empty() {
+        return 0;
+    }
+
+    let selected_index = selected_index.min(row_heights.len() - 1);
+    let selected_start = row_heights.iter().take(selected_index).sum::<usize>();
+    let selected_height = row_heights.get(selected_index).copied().unwrap_or(1);
+    let row_count = row_heights.iter().sum::<usize>();
+
+    selected_start
+        .saturating_add(selected_height.saturating_sub(1))
+        .min(row_count.saturating_sub(1))
+}
+
+fn scrollbar_position_for_offset(
+    scroll_offset: usize,
+    row_count: usize,
+    viewport_lines: usize,
+) -> usize {
+    if row_count == 0 || viewport_lines == 0 {
+        return 0;
+    }
+
+    let max_offset = row_count.saturating_sub(viewport_lines);
+    if max_offset == 0 {
+        return 0;
+    }
+
+    let max_position = row_count.saturating_sub(1);
+    let clamped_offset = scroll_offset.min(max_offset);
+    ((clamped_offset as u128) * (max_position as u128) / (max_offset as u128)) as usize
+}
+
+fn category_status_counts(
+    app: &App,
+    category_id: uuid::Uuid,
+) -> (usize, usize, usize, usize, usize, usize, usize) {
+    let mut running = 0;
+    let mut idle = 0;
+    let mut broken = 0;
+    let mut unavailable = 0;
+    let mut waiting = 0;
+    let mut dead = 0;
+    let mut other = 0;
+
+    for task in app
+        .tasks
+        .iter()
+        .filter(|task| task.category_id == category_id)
+    {
+        match task.tmux_status.as_str() {
+            "running" => running += 1,
+            "idle" => idle += 1,
+            STATUS_BROKEN => broken += 1,
+            STATUS_REPO_UNAVAILABLE => unavailable += 1,
+            "waiting" => waiting += 1,
+            "dead" => dead += 1,
+            _ => other += 1,
+        }
+    }
+
+    (running, idle, broken, unavailable, waiting, dead, other)
 }
 
 const TASK_TITLE_MAX: usize = 34;
@@ -992,6 +1435,51 @@ fn task_tile_status_line(app: &App, task: &Task) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TodoLineState {
+    Completed,
+    Active,
+    Pending,
+}
+
+fn todo_checklist_lines(task: &Task) -> Vec<(String, TodoLineState)> {
+    let todos = task.session_todos();
+    let active_index = todos.iter().position(|todo| !todo.completed);
+
+    todos
+        .iter()
+        .enumerate()
+        .map(|(index, todo)| {
+            let state = if todo.completed {
+                TodoLineState::Completed
+            } else if Some(index) == active_index {
+                TodoLineState::Active
+            } else {
+                TodoLineState::Pending
+            };
+            let marker = todo_line_marker(state);
+            let content = clamp_text(todo.content.as_str(), 72);
+            (format!("┃  [{marker}] {content}"), state)
+        })
+        .collect()
+}
+
+fn todo_line_marker(state: TodoLineState) -> &'static str {
+    match state {
+        TodoLineState::Completed => "✓",
+        TodoLineState::Active => "•",
+        TodoLineState::Pending => " ",
+    }
+}
+
+fn todo_state_color(theme: Theme, state: TodoLineState) -> Color {
+    match state {
+        TodoLineState::Completed => theme.status.running,
+        TodoLineState::Active => theme.status.waiting,
+        TodoLineState::Pending => theme.base.text_muted,
+    }
+}
+
 fn task_tile_title(task: &Task) -> String {
     clamp_text(task.title.as_str(), TASK_TITLE_MAX)
 }
@@ -1012,6 +1500,10 @@ fn task_tile_branch(task: &Task) -> String {
 
 fn list_inner_width(area: Rect) -> usize {
     area.width.saturating_sub(2) as usize
+}
+
+fn list_inner_height(area: Rect) -> usize {
+    area.height.saturating_sub(2) as usize
 }
 
 fn count_chars(value: &str) -> usize {
@@ -1063,6 +1555,58 @@ fn rounded_borders(color: Color) -> Borders {
     Borders::default()
         .modifiers(BorderType::Rounded)
         .color(color)
+}
+
+fn dialog_surface(theme: Theme) -> Color {
+    theme.dialog_surface()
+}
+
+fn dialog_border(theme: Theme) -> Borders {
+    rounded_borders(theme.interactive.focus)
+}
+
+fn dialog_panel(title: &str, alignment: Alignment, theme: Theme, background: Color) -> Paragraph {
+    Paragraph::default()
+        .title(title, alignment)
+        .borders(dialog_border(theme))
+        .foreground(theme.base.text)
+        .background(background)
+}
+
+fn dialog_checkbox(title: &str, theme: Theme, background: Color) -> Checkbox {
+    Checkbox::default()
+        .title(title, Alignment::Left)
+        .borders(dialog_border(theme))
+        .foreground(theme.base.text)
+        .background(background)
+        .inactive(Style::default().fg(theme.base.text_muted))
+}
+
+fn dialog_button_palette(theme: Theme, focused: bool, destructive: bool) -> (Color, Color, Color) {
+    let accent = if destructive {
+        theme.base.danger
+    } else {
+        theme.interactive.focus
+    };
+    let fg = if focused {
+        theme.dialog.button_fg
+    } else {
+        accent
+    };
+    let bg = if focused {
+        accent
+    } else {
+        theme.dialog.button_bg
+    };
+    (accent, fg, bg)
+}
+
+fn dialog_input_border(theme: Theme, focused: bool) -> Color {
+    if focused {
+        theme.interactive.focus
+    } else {
+        theme.base.text_muted
+    }
 }
 
 fn calculate_overlay_area(
@@ -1343,6 +1887,8 @@ fn render_settings_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::SessionTodoItem;
+    use uuid::Uuid;
 
     #[test]
     fn test_calculate_overlay_area_center() {
@@ -1368,5 +1914,149 @@ mod tests {
     fn test_command_palette_hides_results_on_short_terminal() {
         assert!(!should_render_command_palette_results((120, 9)));
         assert!(should_render_command_palette_results((120, 10)));
+    }
+
+    #[test]
+    fn test_side_panel_selected_line_accounts_for_header_and_tile_rows() {
+        let category_id = Uuid::new_v4();
+        let rows = vec![
+            SidePanelRow::CategoryHeader {
+                column_index: 0,
+                category_id,
+                category_name: "TODO".to_string(),
+                category_color: None,
+                total_tasks: 2,
+                visible_tasks: 2,
+                collapsed: false,
+            },
+            SidePanelRow::Task {
+                column_index: 0,
+                index_in_column: 0,
+                category_id,
+                task: Box::new(test_task(category_id, 0)),
+            },
+            SidePanelRow::Task {
+                column_index: 0,
+                index_in_column: 1,
+                category_id,
+                task: Box::new(test_task(category_id, 1)),
+            },
+        ];
+
+        assert_eq!(side_panel_selected_line(&rows, 0), 0);
+        assert_eq!(side_panel_selected_line(&rows, 1), 5);
+        assert_eq!(side_panel_selected_line(&rows, 2), 10);
+    }
+
+    #[test]
+    fn test_column_selected_line_tracks_bottom_of_selected_tile() {
+        let category_id = Uuid::new_v4();
+        let tasks = vec![
+            test_task(category_id, 0),
+            test_task(category_id, 1),
+            test_task(category_id, 2),
+        ];
+
+        assert_eq!(column_selected_line(&tasks, 0), 4);
+        assert_eq!(column_selected_line(&tasks, 1), 9);
+        assert_eq!(column_selected_line(&tasks, 2), 14);
+        assert_eq!(column_selected_line(&tasks, 99), 14);
+    }
+
+    #[test]
+    fn test_column_selected_line_returns_zero_when_no_tasks() {
+        assert_eq!(column_selected_line(&[], 0), 0);
+    }
+
+    #[test]
+    fn test_column_scroll_offset_when_selection_fits_viewport() {
+        assert_eq!(column_scroll_offset(2, 15, 10), 0);
+    }
+
+    #[test]
+    fn test_column_scroll_offset_clamps_to_max_offset() {
+        assert_eq!(column_scroll_offset(14, 15, 5), 10);
+    }
+
+    #[test]
+    fn test_scrollbar_position_for_offset_maps_to_full_range() {
+        assert_eq!(scrollbar_position_for_offset(0, 60, 48), 0);
+        assert_eq!(scrollbar_position_for_offset(12, 60, 48), 59);
+    }
+
+    #[test]
+    fn test_todo_checklist_lines_use_expected_markers() {
+        let category_id = Uuid::new_v4();
+        let mut task = test_task(category_id, 0);
+        task.session_todo_json = Some(
+            serde_json::to_string(&vec![
+                SessionTodoItem {
+                    content: "done".to_string(),
+                    completed: true,
+                },
+                SessionTodoItem {
+                    content: "active".to_string(),
+                    completed: false,
+                },
+                SessionTodoItem {
+                    content: "pending".to_string(),
+                    completed: false,
+                },
+            ])
+            .expect("todo json"),
+        );
+
+        let lines = todo_checklist_lines(&task);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].0.contains("[✓] done"));
+        assert_eq!(lines[0].1, TodoLineState::Completed);
+        assert!(lines[1].0.contains("[•] active"));
+        assert_eq!(lines[1].1, TodoLineState::Active);
+        assert!(lines[2].0.contains("[ ] pending"));
+        assert_eq!(lines[2].1, TodoLineState::Pending);
+    }
+
+    #[test]
+    fn test_todo_checklist_lines_show_pending_when_all_incomplete() {
+        let category_id = Uuid::new_v4();
+        let mut task = test_task(category_id, 0);
+        task.session_todo_json = Some(
+            serde_json::to_string(&vec![
+                SessionTodoItem {
+                    content: "first".to_string(),
+                    completed: false,
+                },
+                SessionTodoItem {
+                    content: "second".to_string(),
+                    completed: false,
+                },
+            ])
+            .expect("todo json"),
+        );
+
+        let lines = todo_checklist_lines(&task);
+        assert!(lines[0].0.contains("[•] first"));
+        assert!(lines[1].0.contains("[ ] second"));
+    }
+
+    fn test_task(category_id: Uuid, position: i64) -> Task {
+        Task {
+            id: Uuid::new_v4(),
+            title: "Task".to_string(),
+            repo_id: Uuid::new_v4(),
+            branch: "feature/test".to_string(),
+            category_id,
+            position,
+            tmux_session_name: None,
+            worktree_path: None,
+            tmux_status: "idle".to_string(),
+            status_source: "none".to_string(),
+            status_fetched_at: None,
+            status_error: None,
+            opencode_session_id: None,
+            session_todo_json: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
     }
 }

@@ -67,6 +67,8 @@ pub fn spawn_status_poller(
 
                 if let Some(worktree_path) = task.worktree_path.as_deref() {
                     debug!("Fetching status for task {} at {}", task.id, worktree_path);
+                    let mut bound_session_id = task.opencode_session_id.clone();
+
                     match server_provider.fetch_status_matches(fetched_at, Some(worktree_path)) {
                         Ok(statuses) => {
                             debug!("Got {} statuses for task {}", statuses.len(), task.id);
@@ -86,7 +88,16 @@ pub fn spawn_status_poller(
                                     Some(to_iso8601(fetched_at)),
                                     None,
                                 );
-                                update_task_todos(&db, &server_provider, task.id, &status_match);
+
+                                if bound_session_id.as_deref()
+                                    != Some(status_match.session_id.as_str())
+                                {
+                                    let _ = db.update_task_session_binding(
+                                        task.id,
+                                        Some(status_match.session_id.clone()),
+                                    );
+                                }
+                                bound_session_id = Some(status_match.session_id);
                             } else {
                                 debug!(
                                     "No active session for task {} - setting status to dead",
@@ -103,8 +114,14 @@ pub fn spawn_status_poller(
                                     Some(to_iso8601(fetched_at)),
                                     Some(format!("SESSION_NOT_FOUND:{missing_id}")),
                                 );
-                                let _ = db.update_task_todo(task.id, None);
                             }
+
+                            update_task_todos(
+                                &db,
+                                &server_provider,
+                                task.id,
+                                bound_session_id.as_deref(),
+                            );
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -134,9 +151,17 @@ fn update_task_todos(
     db: &Database,
     server_provider: &ServerStatusProvider,
     task_id: Uuid,
-    status_match: &SessionStatusMatch,
+    session_id: Option<&str>,
 ) {
-    match server_provider.fetch_session_todo(&status_match.session_id) {
+    let Some(session_id) = session_id else {
+        debug!(
+            "Skipping todo sync for task {} because no OpenCode session is bound",
+            task_id
+        );
+        return;
+    };
+
+    match server_provider.fetch_session_todo(session_id) {
         Ok(todos) => match serde_json::to_string(&todos) {
             Ok(raw) => {
                 let _ = db.update_task_todo(task_id, Some(raw));
@@ -145,7 +170,7 @@ fn update_task_todos(
                 tracing::warn!(
                     "Failed to serialize todo payload for task {} session {}: {}",
                     task_id,
-                    status_match.session_id,
+                    session_id,
                     err
                 );
                 let _ = db.update_task_todo(task_id, None);
@@ -155,7 +180,7 @@ fn update_task_todos(
             tracing::warn!(
                 "Failed to fetch todo list for task {} session {}: {:?}",
                 task_id,
-                status_match.session_id,
+                session_id,
                 err
             );
             let _ = db.update_task_todo(task_id, None);
@@ -196,15 +221,32 @@ fn interruptible_sleep(duration: Duration, stop: &AtomicBool) {
 }
 
 fn select_status_match(status_matches: Vec<SessionStatusMatch>) -> Option<SessionStatusMatch> {
-    let mut matches = status_matches.into_iter();
-    let first = matches.next()?;
-    if first.is_root_session() {
-        return Some(first);
+    if let Some(root) = status_matches.iter().find(|m| m.is_root_session()) {
+        return Some(root.clone());
     }
+    let session_map: HashMap<String, &SessionStatusMatch> = status_matches
+        .iter()
+        .map(|m| (m.session_id.clone(), m))
+        .collect();
+    let first = status_matches.first()?;
+    Some(find_eldest_ancestor(first, &session_map))
+}
 
-    matches
-        .find(|status_match| status_match.is_root_session())
-        .or(Some(first))
+fn find_eldest_ancestor<'a>(
+    session: &'a SessionStatusMatch,
+    session_map: &'a HashMap<String, &'a SessionStatusMatch>,
+) -> SessionStatusMatch {
+    if let Some(parent_id) = &session.parent_session_id {
+        if let Some(parent) = session_map.get(parent_id) {
+            return find_eldest_ancestor(parent, session_map);
+        }
+        return SessionStatusMatch {
+            session_id: parent_id.clone(),
+            parent_session_id: None,
+            status: session.status.clone(),
+        };
+    }
+    session.clone()
 }
 
 #[cfg(test)]
@@ -238,14 +280,27 @@ mod tests {
     }
 
     #[test]
-    fn select_status_match_falls_back_to_first_when_all_are_subagents() {
+    fn select_status_match_promotes_to_parent_if_no_root_found() {
         let selected = select_status_match(vec![
             status_match("subagent-1", Some("root-1")),
             status_match("subagent-2", Some("root-1")),
         ])
         .expect("expected a selected match");
 
-        assert_eq!(selected.session_id, "subagent-1");
+        assert_eq!(selected.session_id, "root-1");
+        assert!(selected.parent_session_id.is_none());
+    }
+
+    #[test]
+    fn select_status_match_walks_chain_to_eldest_ancestor() {
+        let selected = select_status_match(vec![
+            status_match("subagent-1", Some("middle-1")),
+            status_match("middle-1", Some("root-1")),
+        ])
+        .expect("expected a selected match");
+
+        assert_eq!(selected.session_id, "root-1");
+        assert!(selected.parent_session_id.is_none());
     }
 
     #[test]

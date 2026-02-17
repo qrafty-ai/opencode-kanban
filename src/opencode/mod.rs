@@ -190,14 +190,16 @@ fn ensure_opencode_available(binary: &str) -> Result<()> {
 }
 
 pub fn opencode_attach_command(session_id: Option<&str>, worktree_dir: Option<&str>) -> String {
-    let url = DEFAULT_SERVER_URL;
-    let dir_arg = worktree_dir
-        .map(|d| format!(" --dir {}", d))
-        .unwrap_or_default();
-    match session_id {
-        Some(id) => format!("opencode attach {url} --session {id}{dir_arg}"),
-        None => format!("opencode attach {url}{dir_arg}"),
+    let mut parts = vec![format!("opencode attach {DEFAULT_SERVER_URL}")];
+
+    if let Some(dir) = worktree_dir {
+        parts.push(format!("--dir {dir}"));
     }
+    if let Some(id) = session_id {
+        parts.push(format!("--session {id}"));
+    }
+
+    parts.join(" ")
 }
 
 pub fn opencode_query_session_by_dir(working_dir: &Path) -> Result<Option<String>> {
@@ -493,6 +495,39 @@ mod tests {
         assert!(logged.contains(&sid));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_attach_command_without_session_includes_dir() {
+        let command = opencode_attach_command(None, Some("/tmp/worktree"));
+        assert_eq!(
+            command,
+            "opencode attach http://127.0.0.1:4096 --dir /tmp/worktree"
+        );
+    }
+
+    #[test]
+    fn test_attach_command_with_session_includes_dir() {
+        let command = opencode_attach_command(Some("sid-123"), Some("/tmp/worktree"));
+        assert_eq!(
+            command,
+            "opencode attach http://127.0.0.1:4096 --dir /tmp/worktree --session sid-123"
+        );
+    }
+
+    #[test]
+    fn test_attach_command_with_session_no_dir() {
+        let command = opencode_attach_command(Some("sid-123"), None);
+        assert_eq!(
+            command,
+            "opencode attach http://127.0.0.1:4096 --session sid-123"
+        );
+    }
+
+    #[test]
+    fn test_attach_command_without_session_or_dir_uses_attach_base() {
+        let command = opencode_attach_command(None, None);
+        assert_eq!(command, "opencode attach http://127.0.0.1:4096");
     }
 
     struct FakeOpenCode {
