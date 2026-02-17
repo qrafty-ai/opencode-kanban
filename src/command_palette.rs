@@ -194,13 +194,13 @@ pub fn all_commands() -> Vec<CommandDef> {
         },
         CommandDef {
             id: "move_task_left",
-            display_name: "Move Task Left",
+            display_name: "Move Task/Category Left",
             keybinding: "H",
             message: Some(Message::MoveTaskLeft),
         },
         CommandDef {
             id: "move_task_right",
-            display_name: "Move Task Right",
+            display_name: "Move Task/Category Right",
             keybinding: "L",
             message: Some(Message::MoveTaskRight),
         },
@@ -215,6 +215,12 @@ pub fn all_commands() -> Vec<CommandDef> {
             display_name: "Move Task Down",
             keybinding: "J",
             message: Some(Message::MoveTaskDown),
+        },
+        CommandDef {
+            id: "toggle_category_edit_mode",
+            display_name: "Toggle Category Edit Mode",
+            keybinding: "g",
+            message: Some(Message::ToggleCategoryEditMode),
         },
         CommandDef {
             id: "navigate_left",
@@ -302,8 +308,8 @@ mod tests {
         let commands = all_commands();
         assert_eq!(
             commands.len(),
-            17,
-            "Expected 17 commands, found {}",
+            18,
+            "Expected 18 commands, found {}",
             commands.len()
         );
     }

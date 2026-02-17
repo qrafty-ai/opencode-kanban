@@ -23,12 +23,13 @@ use uuid::Uuid;
 
 pub use self::messages::Message;
 pub use self::state::{
-    ActiveDialog, CategoryInputDialogState, CategoryInputField, CategoryInputMode,
-    ConfirmQuitDialogState, ContextMenuItem, ContextMenuState, DeleteCategoryDialogState,
-    DeleteCategoryField, DeleteTaskDialogState, DeleteTaskField, ErrorDialogState,
-    MoveTaskDialogState, NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
+    ActiveDialog, CATEGORY_COLOR_PALETTE, CategoryColorDialogState, CategoryColorField,
+    CategoryInputDialogState, CategoryInputField, CategoryInputMode, ConfirmQuitDialogState,
+    ContextMenuItem, ContextMenuState, DeleteCategoryDialogState, DeleteCategoryField,
+    DeleteTaskDialogState, DeleteTaskField, ErrorDialogState, MoveTaskDialogState,
+    NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
     RepoUnavailableDialogState, STATUS_BROKEN, STATUS_REPO_UNAVAILABLE, View, ViewMode,
-    WorktreeNotFoundDialogState, WorktreeNotFoundField,
+    WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
 };
 
 use crate::command_palette::{CommandPaletteState, all_commands};
@@ -85,6 +86,7 @@ pub struct App {
     pub selected_task_index: usize,
     pub current_log_buffer: Option<String>,
     pub keybindings: Keybindings,
+    pub category_edit_mode: bool,
 }
 
 impl App {
@@ -145,6 +147,7 @@ impl App {
             selected_task_index: 0,
             current_log_buffer: None,
             keybindings: Keybindings::load(),
+            category_edit_mode: false,
         };
 
         app.refresh_data()?;
@@ -417,29 +420,16 @@ impl App {
                 let _ = self.db.increment_command_usage(&command_id);
             }
             Message::CycleCategoryColor(col_idx) => {
-                let color_cycle = [
-                    None,
-                    Some("cyan".to_string()),
-                    Some("magenta".to_string()),
-                    Some("blue".to_string()),
-                    Some("green".to_string()),
-                    Some("yellow".to_string()),
-                    Some("red".to_string()),
-                ];
                 if let Some(category) = self.categories.get(col_idx) {
-                    let current_color = category.color.as_ref();
-                    let next_idx = color_cycle
-                        .iter()
-                        .position(|c| c.as_ref() == current_color)
-                        .map(|i| (i + 1) % color_cycle.len())
-                        .unwrap_or(0);
-                    let next_color = color_cycle[next_idx].clone();
+                    let next_color = next_palette_color(category.color.as_deref());
                     self.db
                         .update_category_color(category.id, next_color)
                         .context("failed to update category color")?;
                     self.refresh_data()?;
                 }
             }
+            Message::OpenCategoryColorDialog => self.open_category_color_dialog(),
+            Message::ConfirmCategoryColor => self.confirm_category_color()?,
             Message::DeleteTaskToggleKillTmux
             | Message::DeleteTaskToggleRemoveWorktree
             | Message::DeleteTaskToggleDeleteBranch => {}
@@ -567,6 +557,7 @@ impl App {
                     }
                 }
             }
+            Message::ToggleCategoryEditMode => {}
         }
 
         self.maybe_show_tmux_mouse_hint();
@@ -696,7 +687,11 @@ impl App {
                     self.update(Message::OpenAddCategoryDialog)?;
                 }
                 KeyAction::CycleCategoryColor => {
-                    self.update(Message::CycleCategoryColor(self.focused_column))?;
+                    if self.category_edit_mode {
+                        self.update(Message::OpenCategoryColorDialog)?;
+                    } else {
+                        self.update(Message::CycleCategoryColor(self.focused_column))?;
+                    }
                 }
                 KeyAction::RenameCategory => {
                     self.update(Message::OpenRenameCategoryDialog)?;
@@ -708,10 +703,18 @@ impl App {
                     self.update(Message::OpenDeleteTaskDialog)?;
                 }
                 KeyAction::MoveTaskLeft => {
-                    self.update(Message::MoveTaskLeft)?;
+                    if self.category_edit_mode {
+                        self.move_category_left()?;
+                    } else {
+                        self.update(Message::MoveTaskLeft)?;
+                    }
                 }
                 KeyAction::MoveTaskRight => {
-                    self.update(Message::MoveTaskRight)?;
+                    if self.category_edit_mode {
+                        self.move_category_right()?;
+                    } else {
+                        self.update(Message::MoveTaskRight)?;
+                    }
                 }
                 KeyAction::MoveTaskDown => {
                     self.update(Message::MoveTaskDown)?;
@@ -724,6 +727,11 @@ impl App {
                 }
                 KeyAction::Dismiss => {
                     self.update(Message::DismissDialog)?;
+                }
+                KeyAction::ToggleCategoryEditMode => {
+                    if self.active_dialog == ActiveDialog::None {
+                        self.category_edit_mode = !self.category_edit_mode;
+                    }
                 }
                 _ => {}
             }
@@ -856,6 +864,68 @@ impl App {
             .cloned()
     }
 
+    fn move_category_left(&mut self) -> Result<()> {
+        if self.categories.len() < 2 || self.focused_column == 0 {
+            return Ok(());
+        }
+
+        let current_index = self.focused_column.min(self.categories.len() - 1);
+        if current_index == 0 {
+            return Ok(());
+        }
+
+        let current = self.categories[current_index].clone();
+        let left = self.categories[current_index - 1].clone();
+
+        self.db
+            .update_category_position(current.id, left.position)?;
+        self.db
+            .update_category_position(left.id, current.position)?;
+
+        self.refresh_data()?;
+        if let Some(index) = self
+            .categories
+            .iter()
+            .position(|category| category.id == current.id)
+        {
+            self.focused_column = index;
+            self.selected_task_per_column.entry(index).or_insert(0);
+        }
+
+        Ok(())
+    }
+
+    fn move_category_right(&mut self) -> Result<()> {
+        if self.categories.len() < 2 {
+            return Ok(());
+        }
+
+        let current_index = self.focused_column.min(self.categories.len() - 1);
+        if current_index + 1 >= self.categories.len() {
+            return Ok(());
+        }
+
+        let current = self.categories[current_index].clone();
+        let right = self.categories[current_index + 1].clone();
+
+        self.db
+            .update_category_position(current.id, right.position)?;
+        self.db
+            .update_category_position(right.id, current.position)?;
+
+        self.refresh_data()?;
+        if let Some(index) = self
+            .categories
+            .iter()
+            .position(|category| category.id == current.id)
+        {
+            self.focused_column = index;
+            self.selected_task_per_column.entry(index).or_insert(0);
+        }
+
+        Ok(())
+    }
+
     fn move_task_left(&mut self) -> Result<()> {
         if self.focused_column == 0 {
             return Ok(());
@@ -966,6 +1036,37 @@ impl App {
             task_count,
             focused_field: DeleteCategoryField::Cancel,
         });
+        Ok(())
+    }
+
+    fn open_category_color_dialog(&mut self) {
+        let Some(category) = self.categories.get(self.focused_column) else {
+            return;
+        };
+
+        self.active_dialog = ActiveDialog::CategoryColor(CategoryColorDialogState {
+            category_id: category.id,
+            category_name: category.name.clone(),
+            selected_index: palette_index_for(category.color.as_deref()),
+            focused_field: CategoryColorField::Palette,
+        });
+    }
+
+    fn confirm_category_color(&mut self) -> Result<()> {
+        let ActiveDialog::CategoryColor(state) = self.active_dialog.clone() else {
+            return Ok(());
+        };
+
+        let selected = CATEGORY_COLOR_PALETTE
+            .get(state.selected_index)
+            .copied()
+            .unwrap_or(None)
+            .map(str::to_string);
+        self.db
+            .update_category_color(state.category_id, selected)
+            .context("failed to update category color")?;
+        self.active_dialog = ActiveDialog::None;
+        self.refresh_data()?;
         Ok(())
     }
 
@@ -1241,6 +1342,22 @@ impl App {
             self.mouse_hint_shown = true;
         }
     }
+}
+
+fn palette_index_for(current: Option<&str>) -> usize {
+    CATEGORY_COLOR_PALETTE
+        .iter()
+        .position(|candidate| match (candidate, current) {
+            (None, None) => true,
+            (Some(expected), Some(actual)) => expected.eq_ignore_ascii_case(actual),
+            _ => false,
+        })
+        .unwrap_or(0)
+}
+
+fn next_palette_color(current: Option<&str>) -> Option<String> {
+    let next_idx = (palette_index_for(current) + 1) % CATEGORY_COLOR_PALETTE.len();
+    CATEGORY_COLOR_PALETTE[next_idx].map(str::to_string)
 }
 
 impl Drop for App {

@@ -13,8 +13,9 @@ use tuirealm::{
 };
 
 use crate::app::{
-    ActiveDialog, App, CategoryInputMode, DeleteTaskField, NewTaskField, STATUS_BROKEN,
-    STATUS_REPO_UNAVAILABLE, View, ViewMode,
+    ActiveDialog, App, CATEGORY_COLOR_PALETTE, CategoryColorField, CategoryInputField,
+    CategoryInputMode, DeleteCategoryField, DeleteTaskField, NewTaskField, STATUS_BROKEN,
+    STATUS_REPO_UNAVAILABLE, View, ViewMode, category_color_label,
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
@@ -128,11 +129,20 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
         .split(area);
 
+    let title = if app.category_edit_mode {
+        "opencode-kanban [CATEGORY EDIT]"
+    } else {
+        "opencode-kanban"
+    };
+
     let mut left = Label::default()
-        .text("opencode-kanban")
+        .text(title)
         .alignment(Alignment::Left)
         .foreground(theme.base.header)
         .background(theme.base.surface);
+    if app.category_edit_mode {
+        left = left.modifiers(tuirealm::props::TextModifiers::BOLD);
+    }
     left.view(frame, sections[0]);
 
     let right_text = format!("tasks: {}  refresh: 0.5s", app.tasks.len());
@@ -146,14 +156,22 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = app.theme;
-    let notice = app.footer_notice.as_deref().unwrap_or(
-        "n:new  Enter:attach  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view",
-    );
+    let notice = if let Some(notice) = &app.footer_notice {
+        notice.as_str()
+    } else if app.category_edit_mode {
+        "EDIT MODE  h/l:nav  H/L:reorder  p:color  r:rename  x:delete  g:exit"
+    } else {
+        "n:new  Enter:attach  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view"
+    };
 
     let mut footer = Label::default()
         .text(notice)
         .alignment(Alignment::Center)
-        .foreground(theme.base.text_muted)
+        .foreground(if app.category_edit_mode && app.footer_notice.is_none() {
+            theme.base.header
+        } else {
+            theme.base.text_muted
+        })
         .background(theme.base.surface);
     footer.view(frame, area);
 }
@@ -379,6 +397,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
         ActiveDialog::NewTask(_) => (80, 72),
         ActiveDialog::DeleteTask(_) => (60, 60),
         ActiveDialog::CategoryInput(_) => (60, 40),
+        ActiveDialog::CategoryColor(_) => (60, 58),
         ActiveDialog::DeleteCategory(_) => (60, 40),
         ActiveDialog::NewProject(_) => (60, 35),
         _ => (60, 45),
@@ -398,14 +417,13 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
             render_delete_task_dialog(frame, dialog_area, app, state)
         }
         ActiveDialog::CategoryInput(state) => {
-            render_category_dialog(frame, dialog_area, app, state.mode, &state.name_input)
+            render_category_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::CategoryColor(state) => {
+            render_category_color_dialog(frame, dialog_area, app, state)
         }
         ActiveDialog::DeleteCategory(state) => {
-            let text = format!(
-                "Delete category '{}' and {} tasks?\n\nPress Enter to confirm or Esc to cancel.",
-                state.category_name, state.task_count
-            );
-            render_message_dialog(frame, dialog_area, app, "Delete Category", &text);
+            render_delete_category_dialog(frame, dialog_area, app, state)
         }
         ActiveDialog::Error(state) => {
             let text = format!("{}\n\n{}", state.title, state.detail);
@@ -449,14 +467,10 @@ fn render_new_task_dialog(
     state: &crate::app::NewTaskDialogState,
 ) {
     let theme = app.theme;
-    let surface = theme.dialog_surface();
+    let surface = dialog_surface(theme);
 
-    let mut panel = Paragraph::default()
-        .title("New Task", Alignment::Center)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(surface)
-        .text([TextSpan::from("")]);
+    let mut panel =
+        dialog_panel("New Task", Alignment::Center, theme, surface).text([TextSpan::from("")]);
     panel.view(frame, area);
 
     let panel_inner = inset_rect(area, 1, 1);
@@ -523,15 +537,10 @@ fn render_new_task_dialog(
     } else {
         Vec::new()
     };
-    let mut checkbox = Checkbox::default()
-        .title("Options", Alignment::Left)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(surface)
+    let mut checkbox = dialog_checkbox("Options", theme, surface)
         .choices(["Ensure base is up to date"])
         .values(&selected)
-        .rewind(false)
-        .inactive(Style::default().fg(theme.base.text_muted));
+        .rewind(false);
     checkbox.attr(
         Attribute::Focus,
         AttrValue::Flag(state.focused_field == NewTaskField::EnsureBaseUpToDate),
@@ -586,11 +595,7 @@ fn render_delete_task_dialog(
         ])
         .split(panel_inner);
 
-    let mut panel = Paragraph::default()
-        .title("Delete Task", Alignment::Center)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(theme.base.canvas)
+    let mut panel = dialog_panel("Delete Task", Alignment::Center, theme, theme.base.canvas)
         .text([TextSpan::from("")]);
     panel.view(frame, area);
 
@@ -616,15 +621,10 @@ fn render_delete_task_dialog(
     .filter_map(|(enabled, idx)| enabled.then_some(idx))
     .collect::<Vec<_>>();
 
-    let mut checkbox = Checkbox::default()
-        .title("Delete Options", Alignment::Left)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(theme.dialog_surface())
+    let mut checkbox = dialog_checkbox("Delete Options", theme, dialog_surface(theme))
         .choices(["Kill tmux", "Remove worktree", "Delete branch"])
         .values(&selected)
-        .rewind(false)
-        .inactive(Style::default().fg(theme.base.text_muted));
+        .rewind(false);
     checkbox.attr(
         Attribute::Focus,
         AttrValue::Flag(matches!(
@@ -663,23 +663,145 @@ fn render_category_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
-    mode: CategoryInputMode,
-    name: &str,
+    state: &crate::app::CategoryInputDialogState,
 ) {
-    let title = match mode {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let title = match state.mode {
         CategoryInputMode::Add => "Add Category",
         CategoryInputMode::Rename => "Rename Category",
     };
-    let header = centered_rect(100, 35, area);
+
+    let mut panel =
+        dialog_panel(title, Alignment::Center, theme, surface).text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
     render_input_component(
         frame,
-        header,
-        title,
-        name,
-        true,
-        app.theme.dialog_surface(),
-        app.theme,
+        layout[0],
+        "Name",
+        &state.name_input,
+        matches!(state.focused_field, CategoryInputField::Name),
+        surface,
+        theme,
     );
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        if state.mode == CategoryInputMode::Add {
+            "Add"
+        } else {
+            "Rename"
+        },
+        matches!(state.focused_field, CategoryInputField::Confirm),
+        false,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, CategoryInputField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Tab: next field  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
+fn render_delete_category_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &crate::app::DeleteCategoryDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel = dialog_panel("Delete Category", Alignment::Center, theme, surface)
+        .text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
+    let text = if state.task_count > 0 {
+        format!(
+            "Category '{}' contains {} tasks.\nEmpty the category before deleting.",
+            state.category_name, state.task_count
+        )
+    } else {
+        format!("Delete category '{}'?", state.category_name)
+    };
+
+    let mut summary = Paragraph::default()
+        .foreground(theme.base.text)
+        .background(surface)
+        .wrap(true)
+        .alignment(Alignment::Center)
+        .text([TextSpan::from(text)]);
+    summary.view(frame, layout[0]);
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[1]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Delete",
+        matches!(state.focused_field, DeleteCategoryField::Delete),
+        true,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, DeleteCategoryField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Tab: switch  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[2]);
 }
 
 fn render_new_project_dialog(
@@ -694,18 +816,104 @@ fn render_new_project_dialog(
         "Project Name",
         &state.name_input,
         true,
-        app.theme.dialog_surface(),
+        dialog_surface(app.theme),
         app.theme,
     );
 }
 
+fn render_category_color_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &crate::app::CategoryColorDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel = dialog_panel("Category Color", Alignment::Center, theme, surface)
+        .text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(10),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
+    let mut summary = Paragraph::default()
+        .foreground(theme.base.text)
+        .background(surface)
+        .text([TextSpan::from(format!(
+            "Choose color for '{}'",
+            state.category_name
+        ))]);
+    summary.view(frame, layout[0]);
+
+    let mut rows = TableBuilder::default();
+    for color in CATEGORY_COLOR_PALETTE {
+        rows.add_col(TextSpan::from(category_color_label(color)))
+            .add_row();
+    }
+
+    let mut palette = List::default()
+        .title("Palette", Alignment::Left)
+        .borders(rounded_borders(dialog_input_border(
+            theme,
+            matches!(state.focused_field, CategoryColorField::Palette),
+        )))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
+        .rows(rows.build())
+        .selected_line(
+            state
+                .selected_index
+                .min(CATEGORY_COLOR_PALETTE.len().saturating_sub(1)),
+        );
+    palette.attr(
+        Attribute::Focus,
+        AttrValue::Flag(matches!(state.focused_field, CategoryColorField::Palette)),
+    );
+    palette.view(frame, layout[1]);
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Save",
+        matches!(state.focused_field, CategoryColorField::Confirm),
+        false,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, CategoryColorField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Arrows/jk: navigate  Tab: next field  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
 fn render_message_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, title: &str, text: &str) {
     let theme = app.theme;
-    let mut paragraph = Paragraph::default()
-        .title(title, Alignment::Center)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(theme.dialog_surface())
+    let mut paragraph = dialog_panel(title, Alignment::Center, theme, dialog_surface(theme))
         .wrap(true)
         .text(text.lines().map(|line| TextSpan::from(line.to_string())));
     paragraph.view(frame, area);
@@ -720,26 +928,12 @@ fn render_action_button(
     app: &App,
 ) {
     let theme = app.theme;
-    let accent = if destructive {
-        theme.base.danger
-    } else {
-        theme.interactive.focus
-    };
-    let fg = if focused {
-        theme.dialog.button_fg
-    } else {
-        accent
-    };
-    let bg = if focused {
-        accent
-    } else {
-        theme.dialog.button_bg
-    };
+    let (accent, fg, bg) = dialog_button_palette(theme, focused, destructive);
 
     let mut button = Paragraph::default()
         .borders(rounded_borders(accent))
         .foreground(fg)
-        .background(if focused { bg } else { theme.dialog_surface() })
+        .background(if focused { bg } else { dialog_surface(theme) })
         .alignment(Alignment::Center)
         .text([TextSpan::from(label.to_string())]);
     button.view(frame, area);
@@ -767,7 +961,7 @@ fn render_command_palette_dialog(
         "Command Palette",
         &state.query,
         true,
-        theme.dialog_surface(),
+        dialog_surface(theme),
         theme,
     );
 
@@ -775,7 +969,7 @@ fn render_command_palette_dialog(
         .text("Type to filter. Enter to execute. Esc to close.")
         .alignment(Alignment::Left)
         .foreground(theme.base.text_muted)
-        .background(theme.dialog_surface());
+        .background(dialog_surface(theme));
     hint.view(frame, chunks[1]);
 
     if !should_render_command_palette_results(app.viewport) {
@@ -807,7 +1001,7 @@ fn render_command_palette_dialog(
         .min(state.filtered.len().saturating_sub(1));
     let mut list = Table::default()
         .title("Results", Alignment::Left)
-        .borders(rounded_borders(theme.interactive.focus))
+        .borders(dialog_border(theme))
         .foreground(theme.base.text)
         .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
@@ -840,11 +1034,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, app: &App) {
         })
         .collect::<Vec<_>>();
 
-    let mut paragraph = Paragraph::default()
-        .title("Help", Alignment::Center)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .background(theme.dialog_surface())
+    let mut paragraph = dialog_panel("Help", Alignment::Center, theme, dialog_surface(theme))
         .wrap(true)
         .text(lines);
     paragraph.view(frame, area);
@@ -872,11 +1062,7 @@ fn render_input_component(
 ) {
     let mut input = Input::default()
         .title(title, Alignment::Left)
-        .borders(rounded_borders(if focused {
-            theme.interactive.focus
-        } else {
-            theme.base.text_muted
-        }))
+        .borders(rounded_borders(dialog_input_border(theme, focused)))
         .foreground(theme.base.text)
         .background(background)
         .inactive(Style::default().fg(theme.base.text_muted))
@@ -1062,6 +1248,58 @@ fn rounded_borders(color: Color) -> Borders {
     Borders::default()
         .modifiers(BorderType::Rounded)
         .color(color)
+}
+
+fn dialog_surface(theme: Theme) -> Color {
+    theme.dialog_surface()
+}
+
+fn dialog_border(theme: Theme) -> Borders {
+    rounded_borders(theme.interactive.focus)
+}
+
+fn dialog_panel(title: &str, alignment: Alignment, theme: Theme, background: Color) -> Paragraph {
+    Paragraph::default()
+        .title(title, alignment)
+        .borders(dialog_border(theme))
+        .foreground(theme.base.text)
+        .background(background)
+}
+
+fn dialog_checkbox(title: &str, theme: Theme, background: Color) -> Checkbox {
+    Checkbox::default()
+        .title(title, Alignment::Left)
+        .borders(dialog_border(theme))
+        .foreground(theme.base.text)
+        .background(background)
+        .inactive(Style::default().fg(theme.base.text_muted))
+}
+
+fn dialog_button_palette(theme: Theme, focused: bool, destructive: bool) -> (Color, Color, Color) {
+    let accent = if destructive {
+        theme.base.danger
+    } else {
+        theme.interactive.focus
+    };
+    let fg = if focused {
+        theme.dialog.button_fg
+    } else {
+        accent
+    };
+    let bg = if focused {
+        accent
+    } else {
+        theme.dialog.button_bg
+    };
+    (accent, fg, bg)
+}
+
+fn dialog_input_border(theme: Theme, focused: bool) -> Color {
+    if focused {
+        theme.interactive.focus
+    } else {
+        theme.base.text_muted
+    }
 }
 
 fn calculate_overlay_area(

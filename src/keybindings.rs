@@ -42,6 +42,7 @@ pub enum KeyAction {
     MoveTaskUp,
     AttachTask,
     Dismiss,
+    ToggleCategoryEditMode,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -204,6 +205,12 @@ const PROJECT_LIST_DEFS: &[ActionDef] = &[
 ];
 
 const BOARD_DEFS: &[ActionDef] = &[
+    ActionDef {
+        id: "toggle_category_edit_mode",
+        action: KeyAction::ToggleCategoryEditMode,
+        description: "toggle category edit mode",
+        defaults: &["g"],
+    },
     ActionDef {
         id: "navigate_left",
         action: KeyAction::NavigateLeft,
@@ -424,6 +431,11 @@ impl Keybindings {
                     .unwrap_or_else(|| "-".to_string())
             ),
             format!(
+                "  {}: toggle category edit mode",
+                self.display_for(KeyContext::Board, KeyAction::ToggleCategoryEditMode)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
                 "  {}: add/rename/delete category",
                 [
                     self.display_for(KeyContext::Board, KeyAction::AddCategory)
@@ -441,7 +453,7 @@ impl Keybindings {
                     .unwrap_or_else(|| "-".to_string())
             ),
             format!(
-                "  {} / {}: move task left/right",
+                "  {} / {}: move task (or category in edit mode)",
                 self.display_for(KeyContext::Board, KeyAction::MoveTaskLeft)
                     .unwrap_or_else(|| "-".to_string()),
                 self.display_for(KeyContext::Board, KeyAction::MoveTaskRight)

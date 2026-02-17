@@ -7,10 +7,10 @@ use crate::types::{Category, Repo};
 
 use super::messages::Message;
 use super::state::{
-    ActiveDialog, CategoryInputDialogState, CategoryInputField, DeleteCategoryDialogState,
-    DeleteCategoryField, DeleteTaskDialogState, DeleteTaskField, NewProjectDialogState,
-    NewProjectField, NewTaskDialogState, NewTaskField, WorktreeNotFoundDialogState,
-    WorktreeNotFoundField,
+    ActiveDialog, CategoryColorDialogState, CategoryColorField, CategoryInputDialogState,
+    CategoryInputField, DeleteCategoryDialogState, DeleteCategoryField, DeleteTaskDialogState,
+    DeleteTaskField, NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
+    WorktreeNotFoundDialogState, WorktreeNotFoundField,
 };
 
 /// Handle key events when a dialog is active
@@ -33,6 +33,9 @@ pub fn handle_dialog_key(
         }
         ActiveDialog::CategoryInput(state) => {
             handle_category_input_dialog_key(state, key, &mut follow_up);
+        }
+        ActiveDialog::CategoryColor(state) => {
+            handle_category_color_dialog_key(state, key, &mut follow_up);
         }
         ActiveDialog::DeleteCategory(state) => {
             handle_delete_category_dialog_key(state, key, &mut follow_up);
@@ -343,6 +346,84 @@ fn handle_delete_category_dialog_key(
             *follow_up = Some(match state.focused_field {
                 DeleteCategoryField::Delete => Message::ConfirmDeleteCategory,
                 DeleteCategoryField::Cancel => Message::DismissDialog,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn handle_category_color_dialog_key(
+    state: &mut CategoryColorDialogState,
+    key: KeyEvent,
+    follow_up: &mut Option<Message>,
+) {
+    let focus_next = |focused_field: CategoryColorField| match focused_field {
+        CategoryColorField::Palette => CategoryColorField::Confirm,
+        CategoryColorField::Confirm => CategoryColorField::Cancel,
+        CategoryColorField::Cancel => CategoryColorField::Palette,
+    };
+    let focus_prev = |focused_field: CategoryColorField| match focused_field {
+        CategoryColorField::Palette => CategoryColorField::Cancel,
+        CategoryColorField::Confirm => CategoryColorField::Palette,
+        CategoryColorField::Cancel => CategoryColorField::Confirm,
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            *follow_up = Some(Message::DismissDialog);
+        }
+        KeyCode::Tab => {
+            state.focused_field = focus_next(state.focused_field);
+        }
+        KeyCode::BackTab => {
+            state.focused_field = focus_prev(state.focused_field);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if matches!(state.focused_field, CategoryColorField::Palette) {
+                state.selected_index = state
+                    .selected_index
+                    .saturating_add(1)
+                    .min(super::state::CATEGORY_COLOR_PALETTE.len().saturating_sub(1));
+            } else {
+                state.focused_field = focus_next(state.focused_field);
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if matches!(state.focused_field, CategoryColorField::Palette) {
+                state.selected_index = state.selected_index.saturating_sub(1);
+            } else {
+                state.focused_field = focus_prev(state.focused_field);
+            }
+        }
+        KeyCode::Left | KeyCode::Char('h') => match state.focused_field {
+            CategoryColorField::Palette => {
+                state.selected_index = state.selected_index.saturating_sub(1);
+            }
+            CategoryColorField::Confirm => {
+                state.focused_field = CategoryColorField::Cancel;
+            }
+            CategoryColorField::Cancel => {
+                state.focused_field = CategoryColorField::Confirm;
+            }
+        },
+        KeyCode::Right | KeyCode::Char('l') => match state.focused_field {
+            CategoryColorField::Palette => {
+                state.selected_index = state
+                    .selected_index
+                    .saturating_add(1)
+                    .min(super::state::CATEGORY_COLOR_PALETTE.len().saturating_sub(1));
+            }
+            CategoryColorField::Confirm => {
+                state.focused_field = CategoryColorField::Cancel;
+            }
+            CategoryColorField::Cancel => {
+                state.focused_field = CategoryColorField::Confirm;
+            }
+        },
+        KeyCode::Enter => {
+            *follow_up = Some(match state.focused_field {
+                CategoryColorField::Cancel => Message::DismissDialog,
+                _ => Message::ConfirmCategoryColor,
             });
         }
         _ => {}

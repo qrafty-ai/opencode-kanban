@@ -93,6 +93,44 @@ pub enum CategoryInputMode {
     Rename,
 }
 
+pub const CATEGORY_COLOR_PALETTE: [Option<&str>; 7] = [
+    None,
+    Some("cyan"),
+    Some("magenta"),
+    Some("blue"),
+    Some("green"),
+    Some("yellow"),
+    Some("red"),
+];
+
+pub fn category_color_label(color: Option<&str>) -> &'static str {
+    match color {
+        None => "Default",
+        Some("cyan") => "Cyan",
+        Some("magenta") => "Magenta",
+        Some("blue") => "Blue",
+        Some("green") => "Green",
+        Some("yellow") => "Yellow",
+        Some("red") => "Red",
+        Some(_) => "Custom",
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CategoryColorField {
+    Palette,
+    Confirm,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CategoryColorDialogState {
+    pub category_id: Uuid,
+    pub category_name: String,
+    pub selected_index: usize,
+    pub focused_field: CategoryColorField,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum View {
     ProjectList,
@@ -171,6 +209,7 @@ pub enum ActiveDialog {
     CommandPalette(CommandPaletteState),
     NewProject(NewProjectDialogState),
     CategoryInput(CategoryInputDialogState),
+    CategoryColor(CategoryColorDialogState),
     DeleteCategory(DeleteCategoryDialogState),
     Error(ErrorDialogState),
     DeleteTask(DeleteTaskDialogState),

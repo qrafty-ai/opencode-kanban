@@ -46,6 +46,8 @@ pub enum Message {
     CancelQuit,
     ExecuteCommand(String),
     CycleCategoryColor(usize),
+    OpenCategoryColorDialog,
+    ConfirmCategoryColor,
     SwitchToProjectList,
     SwitchToBoard(PathBuf),
     ProjectListSelectUp,
@@ -62,4 +64,5 @@ pub enum Message {
     FocusDialogButton(String),
     SelectProject(usize),
     SelectCommandPaletteItem(usize),
+    ToggleCategoryEditMode,
 }
