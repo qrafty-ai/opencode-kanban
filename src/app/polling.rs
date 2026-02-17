@@ -205,15 +205,18 @@ fn interruptible_sleep(duration: Duration, stop: &AtomicBool) {
 }
 
 fn select_status_match(status_matches: Vec<SessionStatusMatch>) -> Option<SessionStatusMatch> {
-    let mut matches = status_matches.into_iter();
-    let first = matches.next()?;
-    if first.is_root_session() {
-        return Some(first);
+    if let Some(root) = status_matches.iter().find(|m| m.is_root_session()) {
+        return Some(root.clone());
     }
-
-    matches
-        .find(|status_match| status_match.is_root_session())
-        .or(Some(first))
+    let first = status_matches.into_iter().next()?;
+    if let Some(parent_id) = &first.parent_session_id {
+        return Some(SessionStatusMatch {
+            session_id: parent_id.clone(),
+            parent_session_id: None,
+            status: first.status.clone(),
+        });
+    }
+    Some(first)
 }
 
 #[cfg(test)]
@@ -247,14 +250,15 @@ mod tests {
     }
 
     #[test]
-    fn select_status_match_falls_back_to_first_when_all_are_subagents() {
+    fn select_status_match_promotes_to_parent_if_no_root_found() {
         let selected = select_status_match(vec![
             status_match("subagent-1", Some("root-1")),
             status_match("subagent-2", Some("root-1")),
         ])
         .expect("expected a selected match");
 
-        assert_eq!(selected.session_id, "subagent-1");
+        assert_eq!(selected.session_id, "root-1");
+        assert!(selected.parent_session_id.is_none());
     }
 
     #[test]
