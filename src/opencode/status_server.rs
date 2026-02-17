@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, SystemTime};
 
+use reqwest::StatusCode;
+use reqwest::blocking::Client;
 use serde_json::Value;
 use urlencoding::encode;
 
@@ -13,6 +13,7 @@ use super::StatusProvider;
 #[derive(Debug, Clone)]
 pub struct ServerStatusProvider {
     config: ServerStatusConfig,
+    client: Client,
 }
 
 #[derive(Debug, Clone)]
@@ -40,40 +41,52 @@ impl Default for ServerStatusProvider {
 
 impl ServerStatusProvider {
     pub fn new(config: ServerStatusConfig) -> Self {
-        Self { config }
+        let client = Client::builder()
+            .timeout(config.request_timeout)
+            .build()
+            .expect("failed to build status client");
+
+        Self { config, client }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}:{}", self.config.hostname, self.config.port)
+    }
+
+    fn session_url(&self) -> String {
+        format!("{}/session", self.base_url())
+    }
+
+    fn session_status_url(&self) -> String {
+        format!("{}/session/status", self.base_url())
     }
 
     pub fn list_all_sessions(&self) -> Result<Vec<(String, String)>, SessionStatusError> {
-        let mut stream = self.connect()?;
+        let response = self
+            .client
+            .get(self.session_url())
+            .send()
+            .map_err(|err| map_reqwest_error(err, "SERVER_CONNECT_FAILED"))?;
 
-        let request = format!(
-            "GET /session HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
-            self.config.hostname, self.config.port
-        );
-        stream
-            .write_all(request.as_bytes())
-            .map_err(|err| map_io_error("SERVER_WRITE_FAILED", err))?;
-
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .map_err(|err| map_io_error("SERVER_READ_FAILED", err))?;
-
-        let (status_code, body) = parse_http_response(&response)?;
-        if status_code == 401 {
+        let status_code = response.status();
+        if status_code == StatusCode::UNAUTHORIZED {
             return Err(SessionStatusError {
                 code: "SERVER_AUTH_ERROR".to_string(),
                 message: "OpenCode server rejected session list with HTTP 401".to_string(),
             });
         }
-        if status_code != 200 {
+        if status_code != StatusCode::OK {
             return Err(SessionStatusError {
                 code: "SERVER_HTTP_ERROR".to_string(),
                 message: format!("OpenCode server returned HTTP {status_code} for /session"),
             });
         }
 
-        parse_sessions_body(body)
+        let body = response
+            .text()
+            .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
+
+        parse_sessions_body(&body)
     }
 
     pub fn fetch_all_statuses(
@@ -81,73 +94,41 @@ impl ServerStatusProvider {
         fetched_at: SystemTime,
         directory: Option<&str>,
     ) -> Result<HashMap<String, SessionStatus>, SessionStatusError> {
-        let mut stream = self.connect()?;
+        let status_url = if let Some(directory) = directory {
+            format!(
+                "{}?directory={}",
+                self.session_status_url(),
+                encode(directory)
+            )
+        } else {
+            self.session_status_url()
+        };
 
-        let directory_param = directory
-            .map(|d| format!("?directory={}", encode(d)))
-            .unwrap_or_default();
-        let request = format!(
-            "GET /session/status{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
-            directory_param, self.config.hostname, self.config.port
-        );
-        stream
-            .write_all(request.as_bytes())
-            .map_err(|err| map_io_error("SERVER_WRITE_FAILED", err))?;
+        let response = self
+            .client
+            .get(status_url)
+            .send()
+            .map_err(|err| map_reqwest_error(err, "SERVER_CONNECT_FAILED"))?;
 
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .map_err(|err| map_io_error("SERVER_READ_FAILED", err))?;
-
-        let (status_code, body) = parse_http_response(&response)?;
-        if status_code == 401 {
+        let status_code = response.status();
+        if status_code == StatusCode::UNAUTHORIZED {
             return Err(SessionStatusError {
                 code: "SERVER_AUTH_ERROR".to_string(),
                 message: "OpenCode server rejected status poll with HTTP 401".to_string(),
             });
         }
-        if status_code != 200 {
+        if status_code != StatusCode::OK {
             return Err(SessionStatusError {
                 code: "SERVER_HTTP_ERROR".to_string(),
                 message: format!("OpenCode server returned HTTP {status_code} for /session/status"),
             });
         }
 
-        parse_status_body(body, fetched_at)
-    }
+        let body = response
+            .text()
+            .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
 
-    fn connect(&self) -> Result<TcpStream, SessionStatusError> {
-        let mut addrs = (self.config.hostname.as_str(), self.config.port)
-            .to_socket_addrs()
-            .map_err(|err| SessionStatusError {
-                code: "SERVER_ADDRESS_RESOLUTION_FAILED".to_string(),
-                message: format!(
-                    "failed to resolve OpenCode server {}:{}: {err}",
-                    self.config.hostname, self.config.port
-                ),
-            })?;
-
-        let Some(addr) = addrs.next() else {
-            return Err(SessionStatusError {
-                code: "SERVER_ADDRESS_RESOLUTION_FAILED".to_string(),
-                message: format!(
-                    "failed to resolve OpenCode server {}:{}",
-                    self.config.hostname, self.config.port
-                ),
-            });
-        };
-
-        let stream = TcpStream::connect_timeout(&addr, self.config.request_timeout)
-            .map_err(|err| map_io_error("SERVER_CONNECT_FAILED", err))?;
-
-        stream
-            .set_read_timeout(Some(self.config.request_timeout))
-            .map_err(|err| map_io_error("SERVER_TIMEOUT_CONFIG_FAILED", err))?;
-        stream
-            .set_write_timeout(Some(self.config.request_timeout))
-            .map_err(|err| map_io_error("SERVER_TIMEOUT_CONFIG_FAILED", err))?;
-
-        Ok(stream)
+        parse_status_body(&body, fetched_at)
     }
 }
 
@@ -187,35 +168,6 @@ impl StatusProvider for ServerStatusProvider {
                 .collect(),
         }
     }
-}
-
-fn parse_http_response(response: &str) -> Result<(u16, &str), SessionStatusError> {
-    let (head, body) = response
-        .split_once("\r\n\r\n")
-        .or_else(|| response.split_once("\n\n"))
-        .unwrap_or((response, ""));
-
-    let status_line = head.lines().next().ok_or_else(|| SessionStatusError {
-        code: "SERVER_PROTOCOL_ERROR".to_string(),
-        message: "OpenCode server response missing HTTP status line".to_string(),
-    })?;
-
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| SessionStatusError {
-            code: "SERVER_PROTOCOL_ERROR".to_string(),
-            message: format!(
-                "OpenCode server response has invalid HTTP status line: {status_line}"
-            ),
-        })?
-        .parse::<u16>()
-        .map_err(|err| SessionStatusError {
-            code: "SERVER_PROTOCOL_ERROR".to_string(),
-            message: format!("OpenCode server response has non-numeric HTTP status: {err}"),
-        })?;
-
-    Ok((status_code, body))
 }
 
 fn parse_status_body(
@@ -339,11 +291,8 @@ fn missing_error(session_id: &str) -> SessionStatusError {
     }
 }
 
-fn map_io_error(default_code: &str, err: std::io::Error) -> SessionStatusError {
-    let code = if matches!(
-        err.kind(),
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-    ) {
+fn map_reqwest_error(err: reqwest::Error, default_code: &str) -> SessionStatusError {
+    let code = if err.is_timeout() {
         "SERVER_TIMEOUT"
     } else {
         default_code
@@ -357,7 +306,7 @@ fn map_io_error(default_code: &str, err: std::io::Error) -> SessionStatusError {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::io::{self, Read, Write};
     use std::net::TcpListener;
     use std::thread;
 

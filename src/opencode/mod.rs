@@ -261,7 +261,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::types::{SessionState, SessionStatusError, SessionStatusSource};
+    use crate::types::{SessionStatusError, SessionStatusSource};
 
     static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 

@@ -1,5 +1,5 @@
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use reqwest::StatusCode;
+use reqwest::blocking::Client;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -146,53 +146,29 @@ fn bootstrap_server(runtime: &impl ServerRuntime, config: &ServerConfig) -> Open
 }
 
 fn check_server_health(config: &ServerConfig) -> bool {
-    let mut addrs = match (config.hostname.as_str(), config.port).to_socket_addrs() {
-        Ok(addrs) => addrs,
+    let client = match Client::builder().timeout(config.request_timeout).build() {
+        Ok(client) => client,
         Err(_) => return false,
     };
 
-    let Some(addr) = addrs.next() else {
-        return false;
-    };
-
-    let mut stream = match TcpStream::connect_timeout(&addr, config.request_timeout) {
-        Ok(stream) => stream,
+    let url = format!("http://{}:{}/global/health", config.hostname, config.port);
+    let response = match client.get(url).send() {
+        Ok(response) => response,
         Err(_) => return false,
     };
 
-    if stream
-        .set_read_timeout(Some(config.request_timeout))
-        .is_err()
-    {
-        return false;
-    }
-    if stream
-        .set_write_timeout(Some(config.request_timeout))
-        .is_err()
-    {
+    if response.status() != StatusCode::OK {
         return false;
     }
 
-    let request = format!(
-        "GET /global/health HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
-        config.hostname, config.port
-    );
-
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
+    match response.text() {
+        Ok(body) => is_healthy_response(&body),
+        Err(_) => false,
     }
-
-    let mut response = String::new();
-    if stream.read_to_string(&mut response).is_err() {
-        return false;
-    }
-
-    is_healthy_response(&response)
 }
 
 fn is_healthy_response(response: &str) -> bool {
-    let status_ok = response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200");
-    status_ok && (response.contains("\"healthy\":true") || response.contains("\"healthy\": true"))
+    response.contains("\"healthy\":true") || response.contains("\"healthy\": true")
 }
 
 fn spawn_opencode_server(binary: &str, config: &ServerConfig) -> Result<(), String> {
