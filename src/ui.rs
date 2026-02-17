@@ -316,29 +316,45 @@ fn render_side_panel_details(
         .map(|repo| repo.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
+    let spinner = status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase);
+    let todos = task
+        .session_todo_summary()
+        .map(|(done, total)| format!("{done}/{total}"))
+        .unwrap_or_else(|| "--".to_string());
+    let session = task.tmux_session_name.as_deref().unwrap_or("n/a");
+
+    let worktree_full = task.worktree_path.as_deref().unwrap_or("n/a");
+    let worktree_short = clamp_text(worktree_full, 70);
+
     let mut lines = vec![
-        TextSpan::from(format!("Title: {}", task.title)),
-        TextSpan::from(format!("Branch: {}", task.branch)),
-        TextSpan::from(format!("Repo: {}", repo_name)),
-        TextSpan::from(format!(
-            "Status: {}",
-            status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase)
-        )),
-        TextSpan::from(format!(
-            "Worktree: {}",
-            task.worktree_path.as_deref().unwrap_or("n/a")
-        )),
+        TextSpan::new("OVERVIEW").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Title", &task.title)).fg(theme.base.text),
+        TextSpan::new(detail_kv("Repo", &repo_name)).fg(theme.base.text),
+        TextSpan::new(detail_kv("Branch", &task.branch)).fg(theme.base.text),
+        TextSpan::new(""),
+        TextSpan::new("RUNTIME").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Status", spinner))
+            .fg(theme.status_color(task.tmux_status.as_str())),
+        TextSpan::new(detail_kv("Todos", &todos)).fg(theme.tile.todo),
+        TextSpan::new(detail_kv("Session", session)).fg(theme.base.text),
+        TextSpan::new(""),
+        TextSpan::new("WORKSPACE").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Path", &worktree_short)).fg(theme.base.text),
     ];
 
-    if let Some((done, total)) = task.session_todo_summary() {
-        lines.push(TextSpan::from(format!("Todos: {}/{}", done, total)));
+    if worktree_full != worktree_short {
+        lines.push(TextSpan::new(detail_kv("Full", worktree_full)).fg(theme.base.text_muted));
     }
 
+    lines.push(TextSpan::new(""));
+    lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
+    lines.push(TextSpan::new("Enter attach  d delete  m move  l logs").fg(theme.base.text_muted));
+
     if let Some(log) = app.current_log_buffer.as_deref() {
-        lines.push(TextSpan::from(""));
-        lines.push(TextSpan::from("Recent tmux output:"));
-        for line in log.lines().take(20) {
-            lines.push(TextSpan::from(line.to_string()));
+        lines.push(TextSpan::new(""));
+        lines.push(TextSpan::new("LOG PREVIEW").fg(theme.base.header).bold());
+        for line in log.lines().take(8) {
+            lines.push(TextSpan::new(line.to_string()).fg(theme.base.text_muted));
         }
     }
 
@@ -346,6 +362,7 @@ fn render_side_panel_details(
         .title("Details", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
+        .background(theme.base.surface)
         .wrap(true)
         .text(lines);
     paragraph.view(frame, area);
@@ -1001,6 +1018,10 @@ fn pad_to_width(value: &str, width: usize) -> String {
         return clamp_text(value, width);
     }
     format!("{}{}", value, " ".repeat(width - len))
+}
+
+fn detail_kv(label: &str, value: &str) -> String {
+    format!("{label:>8}: {value}")
 }
 
 fn clamp_text(value: &str, max_chars: usize) -> String {

@@ -87,7 +87,7 @@ impl Theme {
         match preset {
             ThemePreset::Default => Self {
                 base: BasePalette {
-                    canvas: Color::Black,
+                    canvas: Color::Rgb(36, 40, 56),
                     surface: Color::Rgb(36, 40, 56),
                     text: Color::White,
                     text_muted: Color::DarkGray,
@@ -123,7 +123,7 @@ impl Theme {
             },
             ThemePreset::HighContrast => Self {
                 base: BasePalette {
-                    canvas: Color::Black,
+                    canvas: Color::Rgb(20, 20, 20),
                     surface: Color::Rgb(20, 20, 20),
                     text: Color::White,
                     text_muted: Color::Gray,
@@ -159,7 +159,7 @@ impl Theme {
             },
             ThemePreset::Mono => Self {
                 base: BasePalette {
-                    canvas: Color::Black,
+                    canvas: Color::Rgb(26, 26, 26),
                     surface: Color::Rgb(26, 26, 26),
                     text: Color::White,
                     text_muted: Color::Gray,
