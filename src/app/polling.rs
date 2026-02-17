@@ -208,15 +208,29 @@ fn select_status_match(status_matches: Vec<SessionStatusMatch>) -> Option<Sessio
     if let Some(root) = status_matches.iter().find(|m| m.is_root_session()) {
         return Some(root.clone());
     }
-    let first = status_matches.into_iter().next()?;
-    if let Some(parent_id) = &first.parent_session_id {
-        return Some(SessionStatusMatch {
+    let session_map: HashMap<String, &SessionStatusMatch> = status_matches
+        .iter()
+        .map(|m| (m.session_id.clone(), m))
+        .collect();
+    let first = status_matches.first()?;
+    Some(find_eldest_ancestor(first, &session_map))
+}
+
+fn find_eldest_ancestor<'a>(
+    session: &'a SessionStatusMatch,
+    session_map: &'a HashMap<String, &'a SessionStatusMatch>,
+) -> SessionStatusMatch {
+    if let Some(parent_id) = &session.parent_session_id {
+        if let Some(parent) = session_map.get(parent_id) {
+            return find_eldest_ancestor(parent, session_map);
+        }
+        return SessionStatusMatch {
             session_id: parent_id.clone(),
             parent_session_id: None,
-            status: first.status.clone(),
-        });
+            status: session.status.clone(),
+        };
     }
-    Some(first)
+    session.clone()
 }
 
 #[cfg(test)]
@@ -254,6 +268,18 @@ mod tests {
         let selected = select_status_match(vec![
             status_match("subagent-1", Some("root-1")),
             status_match("subagent-2", Some("root-1")),
+        ])
+        .expect("expected a selected match");
+
+        assert_eq!(selected.session_id, "root-1");
+        assert!(selected.parent_session_id.is_none());
+    }
+
+    #[test]
+    fn select_status_match_walks_chain_to_eldest_ancestor() {
+        let selected = select_status_match(vec![
+            status_match("subagent-1", Some("middle-1")),
+            status_match("middle-1", Some("root-1")),
         ])
         .expect("expected a selected match");
 
