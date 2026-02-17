@@ -3,5 +3,6 @@
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+.sqlx/
 .sisyphus/*
 !.sisyphus/rules/
