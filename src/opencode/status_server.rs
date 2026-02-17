@@ -42,10 +42,17 @@ impl Default for ServerStatusConfig {
     fn default() -> Self {
         Self {
             hostname: "127.0.0.1".to_string(),
-            port: 4096,
+            port: server_port_from_env(4096),
             request_timeout: Duration::from_millis(300),
         }
     }
+}
+
+fn server_port_from_env(default_port: u16) -> u16 {
+    std::env::var("OPENCODE_KANBAN_SERVER_PORT")
+        .ok()
+        .and_then(|raw| raw.parse::<u16>().ok())
+        .unwrap_or(default_port)
 }
 
 impl Default for ServerStatusProvider {

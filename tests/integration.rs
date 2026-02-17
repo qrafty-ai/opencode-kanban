@@ -465,6 +465,7 @@ fn http_error_response(status_code: u16) -> String {
 struct MockStatusServer {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    _server_port_guard: EnvVarGuard,
     session_responses: Arc<Mutex<VecDeque<String>>>,
     session_status_responses: Arc<Mutex<VecDeque<String>>>,
 }
@@ -474,11 +475,16 @@ impl MockStatusServer {
         session_responses: Vec<String>,
         session_status_responses: Vec<String>,
     ) -> Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 4096))
-            .context("failed to bind mock status server on 127.0.0.1:4096")?;
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).context("failed to bind mock status server")?;
         listener
             .set_nonblocking(true)
             .context("failed to make mock status server non-blocking")?;
+        let port = listener
+            .local_addr()
+            .context("failed to read mock status server address")?
+            .port();
+        let server_port_guard = EnvVarGuard::set("OPENCODE_KANBAN_SERVER_PORT", port.to_string());
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
@@ -541,6 +547,7 @@ impl MockStatusServer {
         Ok(Self {
             stop,
             handle: Some(handle),
+            _server_port_guard: server_port_guard,
             session_responses,
             session_status_responses,
         })
