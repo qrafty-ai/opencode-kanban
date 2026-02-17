@@ -14,7 +14,7 @@ use tuirealm::{
 
 use crate::app::{
     ActiveDialog, App, CategoryInputMode, DeleteTaskField, NewTaskField, STATUS_BROKEN,
-    STATUS_REPO_UNAVAILABLE, SidePanelRow, View, ViewMode,
+    STATUS_REPO_UNAVAILABLE, SidePanelRow, TodoVisualizationMode, View, ViewMode,
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
@@ -148,10 +148,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = app.theme;
     let default_notice = match app.view_mode {
         ViewMode::Kanban => {
-            "n:new  Enter:attach  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view"
+            "n:new  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view"
         }
         ViewMode::SidePanel => {
-            "j/k:select  Space:collapse  Enter:attach task  c/r/x:category  H/L/J/K:move  v:view"
+            "j/k:select  Space:collapse  Enter:attach task  t:todo view  c/r/x:category  H/L/J/K:move  v:view"
         }
     };
     let notice = app.footer_notice.as_deref().unwrap_or(default_notice);
@@ -360,10 +360,11 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, 
         .unwrap_or_else(|| "unknown".to_string());
 
     let spinner = status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase);
-    let todos = task
+    let todo_summary = task
         .session_todo_summary()
         .map(|(done, total)| format!("{done}/{total}"))
         .unwrap_or_else(|| "--".to_string());
+    let todo_view = app.todo_visualization_mode.as_str();
     let session = task.tmux_session_name.as_deref().unwrap_or("n/a");
 
     let worktree_full = task.worktree_path.as_deref().unwrap_or("n/a");
@@ -378,12 +379,24 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, 
         TextSpan::new("RUNTIME").fg(theme.base.header).bold(),
         TextSpan::new(detail_kv("Status", spinner))
             .fg(theme.status_color(task.tmux_status.as_str())),
-        TextSpan::new(detail_kv("Todos", &todos)).fg(theme.tile.todo),
+        TextSpan::new(detail_kv("Todos", &todo_summary)).fg(theme.tile.todo),
+        TextSpan::new(detail_kv("TodoView", todo_view)).fg(theme.base.text_muted),
         TextSpan::new(detail_kv("Session", session)).fg(theme.base.text),
         TextSpan::new(""),
         TextSpan::new("WORKSPACE").fg(theme.base.header).bold(),
         TextSpan::new(detail_kv("Path", &worktree_short)).fg(theme.base.text),
     ];
+
+    if app.todo_visualization_mode == TodoVisualizationMode::Checklist {
+        let checklist_lines = todo_checklist_lines(task);
+        if !checklist_lines.is_empty() {
+            lines.push(TextSpan::new(""));
+            lines.push(TextSpan::new("WORK PLAN").fg(theme.base.header).bold());
+            for (line, state) in checklist_lines {
+                lines.push(TextSpan::new(line).fg(todo_state_color(theme, state)));
+            }
+        }
+    }
 
     if worktree_full != worktree_short {
         lines.push(TextSpan::new(detail_kv("Full", worktree_full)).fg(theme.base.text_muted));
@@ -1135,6 +1148,51 @@ fn task_tile_status_line(app: &App, task: &Task) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TodoLineState {
+    Completed,
+    Active,
+    Pending,
+}
+
+fn todo_checklist_lines(task: &Task) -> Vec<(String, TodoLineState)> {
+    let todos = task.session_todos();
+    let active_index = todos.iter().position(|todo| !todo.completed);
+
+    todos
+        .iter()
+        .enumerate()
+        .map(|(index, todo)| {
+            let state = if todo.completed {
+                TodoLineState::Completed
+            } else if Some(index) == active_index {
+                TodoLineState::Active
+            } else {
+                TodoLineState::Pending
+            };
+            let marker = todo_line_marker(state);
+            let content = clamp_text(todo.content.as_str(), 72);
+            (format!("┃  [{marker}] {content}"), state)
+        })
+        .collect()
+}
+
+fn todo_line_marker(state: TodoLineState) -> &'static str {
+    match state {
+        TodoLineState::Completed => "✓",
+        TodoLineState::Active => "•",
+        TodoLineState::Pending => " ",
+    }
+}
+
+fn todo_state_color(theme: Theme, state: TodoLineState) -> Color {
+    match state {
+        TodoLineState::Completed => theme.status.running,
+        TodoLineState::Active => theme.status.waiting,
+        TodoLineState::Pending => theme.base.text_muted,
+    }
+}
+
 fn task_tile_title(task: &Task) -> String {
     clamp_text(task.title.as_str(), TASK_TITLE_MAX)
 }
@@ -1277,6 +1335,7 @@ fn inset_rect(area: Rect, horizontal: u16, vertical: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::SessionTodoItem;
     use uuid::Uuid;
 
     #[test]
@@ -1335,6 +1394,61 @@ mod tests {
         assert_eq!(side_panel_selected_line(&rows, 0), 0);
         assert_eq!(side_panel_selected_line(&rows, 1), 1);
         assert_eq!(side_panel_selected_line(&rows, 2), 6);
+    }
+
+    #[test]
+    fn test_todo_checklist_lines_use_expected_markers() {
+        let category_id = Uuid::new_v4();
+        let mut task = test_task(category_id, 0);
+        task.session_todo_json = Some(
+            serde_json::to_string(&vec![
+                SessionTodoItem {
+                    content: "done".to_string(),
+                    completed: true,
+                },
+                SessionTodoItem {
+                    content: "active".to_string(),
+                    completed: false,
+                },
+                SessionTodoItem {
+                    content: "pending".to_string(),
+                    completed: false,
+                },
+            ])
+            .expect("todo json"),
+        );
+
+        let lines = todo_checklist_lines(&task);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].0.contains("[✓] done"));
+        assert_eq!(lines[0].1, TodoLineState::Completed);
+        assert!(lines[1].0.contains("[•] active"));
+        assert_eq!(lines[1].1, TodoLineState::Active);
+        assert!(lines[2].0.contains("[ ] pending"));
+        assert_eq!(lines[2].1, TodoLineState::Pending);
+    }
+
+    #[test]
+    fn test_todo_checklist_lines_show_pending_when_all_incomplete() {
+        let category_id = Uuid::new_v4();
+        let mut task = test_task(category_id, 0);
+        task.session_todo_json = Some(
+            serde_json::to_string(&vec![
+                SessionTodoItem {
+                    content: "first".to_string(),
+                    completed: false,
+                },
+                SessionTodoItem {
+                    content: "second".to_string(),
+                    completed: false,
+                },
+            ])
+            .expect("todo json"),
+        );
+
+        let lines = todo_checklist_lines(&task);
+        assert!(lines[0].0.contains("[•] first"));
+        assert!(lines[1].0.contains("[ ] second"));
     }
 
     fn test_task(category_id: Uuid, position: i64) -> Task {

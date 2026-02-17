@@ -47,6 +47,7 @@ pub enum Message {
     CancelQuit,
     ExecuteCommand(String),
     CycleCategoryColor(usize),
+    CycleTodoVisualization,
     SwitchToProjectList,
     SwitchToBoard(PathBuf),
     ProjectListSelectUp,

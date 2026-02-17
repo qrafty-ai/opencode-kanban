@@ -27,8 +27,8 @@ pub use self::state::{
     ConfirmQuitDialogState, ContextMenuItem, ContextMenuState, DeleteCategoryDialogState,
     DeleteCategoryField, DeleteTaskDialogState, DeleteTaskField, ErrorDialogState,
     MoveTaskDialogState, NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
-    RepoUnavailableDialogState, STATUS_BROKEN, STATUS_REPO_UNAVAILABLE, View, ViewMode,
-    WorktreeNotFoundDialogState, WorktreeNotFoundField,
+    RepoUnavailableDialogState, STATUS_BROKEN, STATUS_REPO_UNAVAILABLE, TodoVisualizationMode,
+    View, ViewMode, WorktreeNotFoundDialogState, WorktreeNotFoundField,
 };
 
 use crate::command_palette::{CommandPaletteState, all_commands};
@@ -104,6 +104,7 @@ pub struct App {
     pub side_panel_selected_row: usize,
     pub collapsed_categories: HashSet<Uuid>,
     pub current_log_buffer: Option<String>,
+    pub todo_visualization_mode: TodoVisualizationMode,
     pub keybindings: Keybindings,
 }
 
@@ -128,6 +129,10 @@ impl App {
         let db = Database::open(&db_path)?;
         let server_manager = ensure_server_ready();
         let poller_stop = Arc::new(AtomicBool::new(false));
+        let todo_visualization_mode = std::env::var("OPENCODE_KANBAN_TODO_VISUALIZATION")
+            .ok()
+            .and_then(|value| TodoVisualizationMode::from_str(&value).ok())
+            .unwrap_or(TodoVisualizationMode::Checklist);
 
         let mut app = Self {
             should_quit: false,
@@ -165,6 +170,7 @@ impl App {
             side_panel_selected_row: 0,
             collapsed_categories: HashSet::new(),
             current_log_buffer: None,
+            todo_visualization_mode,
             keybindings: Keybindings::load(),
         };
 
@@ -478,6 +484,9 @@ impl App {
                     self.refresh_data()?;
                 }
             }
+            Message::CycleTodoVisualization => {
+                self.todo_visualization_mode = self.todo_visualization_mode.cycle();
+            }
             Message::DeleteTaskToggleKillTmux
             | Message::DeleteTaskToggleRemoveWorktree
             | Message::DeleteTaskToggleDeleteBranch => {}
@@ -771,6 +780,9 @@ impl App {
                 }
                 KeyAction::AttachTask => {
                     self.update(Message::AttachSelectedTask)?;
+                }
+                KeyAction::CycleTodoVisualization => {
+                    self.update(Message::CycleTodoVisualization)?;
                 }
                 KeyAction::Dismiss => {
                     self.update(Message::DismissDialog)?;
