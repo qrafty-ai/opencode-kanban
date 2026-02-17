@@ -126,7 +126,9 @@ fn handle_new_task_dialog_key(
     };
 
     match key.code {
-        KeyCode::Esc => (),
+        KeyCode::Esc => {
+            *follow_up = Some(Message::DismissDialog);
+        }
         KeyCode::Tab | KeyCode::Down => {
             focus_index = move_focus(focus_index, 1);
             state.focused_field = fields[focus_index].clone();
@@ -219,7 +221,9 @@ fn handle_new_project_dialog_key(
     };
 
     match key.code {
-        KeyCode::Esc => (),
+        KeyCode::Esc => {
+            *follow_up = Some(Message::DismissDialog);
+        }
         KeyCode::Tab | KeyCode::Down => {
             focus_index = move_focus(focus_index, 1);
             state.focused_field = fields[focus_index].clone();
@@ -277,7 +281,9 @@ fn handle_category_input_dialog_key(
     };
 
     match key.code {
-        KeyCode::Esc => (),
+        KeyCode::Esc => {
+            *follow_up = Some(Message::DismissDialog);
+        }
         KeyCode::Tab | KeyCode::Down => {
             focus_index = move_focus(focus_index, 1);
             state.focused_field = fields[focus_index];
@@ -318,7 +324,9 @@ fn handle_delete_category_dialog_key(
     follow_up: &mut Option<Message>,
 ) {
     match key.code {
-        KeyCode::Esc => (),
+        KeyCode::Esc => {
+            *follow_up = Some(Message::DismissDialog);
+        }
         KeyCode::Left | KeyCode::Char('h') => {
             state.focused_field = match state.focused_field {
                 DeleteCategoryField::Delete => DeleteCategoryField::Cancel,
@@ -347,7 +355,9 @@ fn handle_delete_task_dialog_key(
     follow_up: &mut Option<Message>,
 ) {
     match key.code {
-        KeyCode::Esc => (),
+        KeyCode::Esc => {
+            *follow_up = Some(Message::DismissDialog);
+        }
         KeyCode::Left | KeyCode::Char('h') => {
             state.focused_field = match state.focused_field {
                 DeleteTaskField::KillTmux => DeleteTaskField::Cancel,

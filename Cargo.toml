@@ -13,7 +13,8 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 dirs = "6"
 nucleo = "0.5"
-ratatui = "0.30"
+tui-realm-stdlib = "3"
+tuirealm = "3"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

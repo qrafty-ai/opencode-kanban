@@ -1,4 +1,4 @@
-use ratatui::style::Color;
+use tuirealm::ratatui::style::Color;
 
 /// Theme configuration for the kanban board UI.
 /// Provides color settings for different UI elements.

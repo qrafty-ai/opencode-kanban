@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
-use ratatui::layout::Rect;
-use ratatui::widgets::{ListState, ScrollbarState};
 use tracing::warn;
+use tuirealm::ratatui::layout::Rect;
+use tuirealm::ratatui::widgets::{ListState, ScrollbarState};
 use uuid::Uuid;
 
 pub use self::messages::Message;
