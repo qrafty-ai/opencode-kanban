@@ -13,6 +13,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::db::Database;
+use crate::opencode::status_server::SessionStatusMatch;
 use crate::opencode::{ServerStatusProvider, Status};
 use crate::types::SessionStatusSource;
 
@@ -55,29 +56,33 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
 
                 if !repo_available {
                     let _ = db.update_task_status(task.id, STATUS_REPO_UNAVAILABLE);
+                    let _ = db.update_task_todo(task.id, None);
                     interruptible_sleep(staggered_poll_delay(index), &stop);
                     continue;
                 }
 
                 if let Some(worktree_path) = task.worktree_path.as_deref() {
                     debug!("Fetching status for task {} at {}", task.id, worktree_path);
-                    match server_provider.fetch_all_statuses(fetched_at, Some(worktree_path)) {
+                    match server_provider.fetch_status_matches(fetched_at, Some(worktree_path)) {
                         Ok(statuses) => {
                             debug!("Got {} statuses for task {}", statuses.len(), task.id);
-                            if let Some((session_id, session_status)) = statuses.iter().next() {
+                            if let Some(status_match) = select_status_match(statuses) {
                                 debug!(
                                     "Task {} matched to session {} with status {:?}",
-                                    task.id, session_id, session_status.state
+                                    task.id, status_match.session_id, status_match.status.state
                                 );
 
-                                let _ =
-                                    db.update_task_status(task.id, session_status.state.as_str());
+                                let _ = db.update_task_status(
+                                    task.id,
+                                    status_match.status.state.as_str(),
+                                );
                                 let _ = db.update_task_status_metadata(
                                     task.id,
                                     SessionStatusSource::Server.as_str(),
                                     Some(to_iso8601(fetched_at)),
                                     None,
                                 );
+                                update_task_todos(&db, &server_provider, task.id, &status_match);
                             } else {
                                 debug!(
                                     "No active session for task {} - setting status to idle",
@@ -90,6 +95,7 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
                                     Some(to_iso8601(fetched_at)),
                                     None,
                                 );
+                                let _ = db.update_task_todo(task.id, None);
                             }
                         }
                         Err(err) => {
@@ -106,6 +112,39 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
             }
         }
     })
+}
+
+fn update_task_todos(
+    db: &Database,
+    server_provider: &ServerStatusProvider,
+    task_id: Uuid,
+    status_match: &SessionStatusMatch,
+) {
+    match server_provider.fetch_session_todo(&status_match.session_id) {
+        Ok(todos) => match serde_json::to_string(&todos) {
+            Ok(raw) => {
+                let _ = db.update_task_todo(task_id, Some(raw));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to serialize todo payload for task {} session {}: {}",
+                    task_id,
+                    status_match.session_id,
+                    err
+                );
+                let _ = db.update_task_todo(task_id, None);
+            }
+        },
+        Err(err) => {
+            tracing::warn!(
+                "Failed to fetch todo list for task {} session {}: {:?}",
+                task_id,
+                status_match.session_id,
+                err
+            );
+            let _ = db.update_task_todo(task_id, None);
+        }
+    }
 }
 
 /// Convert SystemTime to ISO 8601 string
@@ -137,5 +176,64 @@ fn interruptible_sleep(duration: Duration, stop: &AtomicBool) {
         let sleep_duration = remaining.min(chunk);
         thread::sleep(sleep_duration);
         remaining = remaining.saturating_sub(sleep_duration);
+    }
+}
+
+fn select_status_match(status_matches: Vec<SessionStatusMatch>) -> Option<SessionStatusMatch> {
+    let mut matches = status_matches.into_iter();
+    let first = matches.next()?;
+    if first.is_root_session() {
+        return Some(first);
+    }
+
+    matches
+        .find(|status_match| status_match.is_root_session())
+        .or(Some(first))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{SessionState, SessionStatus};
+
+    fn status_match(session_id: &str, parent_session_id: Option<&str>) -> SessionStatusMatch {
+        SessionStatusMatch {
+            session_id: session_id.to_string(),
+            parent_session_id: parent_session_id.map(str::to_string),
+            status: SessionStatus {
+                state: SessionState::Running,
+                source: SessionStatusSource::Server,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                error: None,
+            },
+        }
+    }
+
+    #[test]
+    fn select_status_match_prefers_root_session() {
+        let selected = select_status_match(vec![
+            status_match("subagent-1", Some("root-1")),
+            status_match("root-1", None),
+            status_match("subagent-2", Some("root-1")),
+        ])
+        .expect("expected a selected match");
+
+        assert_eq!(selected.session_id, "root-1");
+    }
+
+    #[test]
+    fn select_status_match_falls_back_to_first_when_all_are_subagents() {
+        let selected = select_status_match(vec![
+            status_match("subagent-1", Some("root-1")),
+            status_match("subagent-2", Some("root-1")),
+        ])
+        .expect("expected a selected match");
+
+        assert_eq!(selected.session_id, "subagent-1");
+    }
+
+    #[test]
+    fn select_status_match_returns_none_for_empty_results() {
+        assert!(select_status_match(Vec::new()).is_none());
     }
 }
