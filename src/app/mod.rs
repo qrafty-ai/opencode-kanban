@@ -1376,6 +1376,216 @@ impl Drop for App {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Instant;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tempfile::TempDir;
+    use tuirealm::ratatui::widgets::ListState;
+
+    use crate::keybindings::Keybindings;
+    use crate::opencode::OpenCodeServerManager;
+
+    fn key_char(ch: char) -> KeyEvent {
+        let modifiers = if ch.is_ascii_uppercase() {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::empty()
+        };
+        KeyEvent::new(KeyCode::Char(ch), modifiers)
+    }
+
+    fn key_enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())
+    }
+
+    fn category_positions(app: &App) -> Vec<(Uuid, i64)> {
+        app.categories
+            .iter()
+            .map(|category| (category.id, category.position))
+            .collect()
+    }
+
+    fn test_app_with_middle_task() -> Result<(App, TempDir, Uuid, [Uuid; 3])> {
+        let db = Database::open(":memory:")?;
+        let repo_dir = TempDir::new()?;
+        let repo = db.add_repo(repo_dir.path())?;
+        let categories = db.list_categories()?;
+        let ids = [categories[0].id, categories[1].id, categories[2].id];
+        let task = db.add_task(repo.id, "feature/category-edit-tests", "Task", ids[1])?;
+
+        let mut app = App {
+            should_quit: false,
+            pulse_phase: 0,
+            theme: Theme::default(),
+            layout_epoch: 0,
+            viewport: (120, 40),
+            last_mouse_event: None,
+            db,
+            tasks: Vec::new(),
+            categories: Vec::new(),
+            repos: Vec::new(),
+            focused_column: 0,
+            selected_task_per_column: HashMap::new(),
+            scroll_offset_per_column: HashMap::new(),
+            column_scroll_states: Vec::new(),
+            active_dialog: ActiveDialog::None,
+            footer_notice: None,
+            hit_test_map: Vec::new(),
+            hovered_message: None,
+            context_menu: None,
+            current_view: View::Board,
+            current_project_path: None,
+            project_list: Vec::new(),
+            selected_project_index: 0,
+            project_list_state: ListState::default(),
+            started_at: Instant::now(),
+            mouse_seen: false,
+            mouse_hint_shown: false,
+            _server_manager: OpenCodeServerManager::new(),
+            poller_stop: Arc::new(AtomicBool::new(false)),
+            poller_thread: None,
+            view_mode: ViewMode::Kanban,
+            side_panel_width: 40,
+            selected_task_index: 0,
+            current_log_buffer: None,
+            keybindings: Keybindings::load(),
+            category_edit_mode: false,
+        };
+
+        app.refresh_data()?;
+        app.focused_column = 1;
+        app.selected_task_per_column.insert(1, 0);
+
+        Ok((app, repo_dir, task.id, ids))
+    }
+
+    #[test]
+    fn toggle_category_edit_mode_with_g_key() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        assert!(!app.category_edit_mode);
+
+        app.handle_key(key_char('g'))?;
+        assert!(app.category_edit_mode);
+
+        app.handle_key(key_char('g'))?;
+        assert!(!app.category_edit_mode);
+
+        Ok(())
+    }
+
+    #[test]
+    fn shift_h_and_l_are_mode_scoped_between_task_move_and_category_reorder() -> Result<()> {
+        let (mut app, _repo_dir, task_id, [todo_id, in_progress_id, done_id]) =
+            test_app_with_middle_task()?;
+
+        app.category_edit_mode = false;
+        app.focused_column = 1;
+        app.selected_task_per_column.insert(1, 0);
+        app.handle_key(key_char('H'))?;
+
+        let moved_task = app.db.get_task(task_id)?;
+        assert_eq!(moved_task.category_id, todo_id);
+
+        app.db.update_task_category(task_id, in_progress_id, 0)?;
+        app.refresh_data()?;
+        app.focused_column = 1;
+        app.selected_task_per_column.insert(1, 0);
+        app.category_edit_mode = true;
+
+        app.handle_key(key_char('H'))?;
+
+        let unmoved_task = app.db.get_task(task_id)?;
+        assert_eq!(unmoved_task.category_id, in_progress_id);
+
+        let after_left = category_positions(&app);
+        assert_eq!(
+            after_left,
+            vec![(in_progress_id, 0), (todo_id, 1), (done_id, 2)]
+        );
+
+        app.handle_key(key_char('L'))?;
+
+        let after_right = category_positions(&app);
+        assert_eq!(
+            after_right,
+            vec![(todo_id, 0), (in_progress_id, 1), (done_id, 2)]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn category_reorder_keys_noop_at_left_and_right_boundaries() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        app.category_edit_mode = true;
+
+        app.focused_column = 0;
+        let left_before = category_positions(&app);
+        app.handle_key(key_char('H'))?;
+        assert_eq!(category_positions(&app), left_before);
+
+        app.focused_column = app.categories.len() - 1;
+        let right_before = category_positions(&app);
+        app.handle_key(key_char('L'))?;
+        assert_eq!(category_positions(&app), right_before);
+
+        Ok(())
+    }
+
+    #[test]
+    fn category_color_dialog_enter_confirms_or_cancels_based_on_focus() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, [_todo_id, in_progress_id, _done_id]) =
+            test_app_with_middle_task()?;
+        app.focused_column = 1;
+        app.category_edit_mode = true;
+
+        app.handle_key(key_char('p'))?;
+        match &mut app.active_dialog {
+            ActiveDialog::CategoryColor(state) => {
+                state.selected_index = 1;
+                state.focused_field = CategoryColorField::Confirm;
+            }
+            _ => panic!("expected category color dialog to open"),
+        }
+        app.handle_key(key_enter())?;
+
+        assert_eq!(app.active_dialog, ActiveDialog::None);
+        let categories_after_confirm = app.db.list_categories()?;
+        let confirmed_color = categories_after_confirm
+            .iter()
+            .find(|category| category.id == in_progress_id)
+            .and_then(|category| category.color.as_deref());
+        assert_eq!(confirmed_color, Some("cyan"));
+
+        app.handle_key(key_char('p'))?;
+        match &mut app.active_dialog {
+            ActiveDialog::CategoryColor(state) => {
+                state.selected_index = 6;
+                state.focused_field = CategoryColorField::Cancel;
+            }
+            _ => panic!("expected category color dialog to open"),
+        }
+        app.handle_key(key_enter())?;
+
+        assert_eq!(app.active_dialog, ActiveDialog::None);
+        let categories_after_cancel = app.db.list_categories()?;
+        let canceled_color = categories_after_cancel
+            .iter()
+            .find(|category| category.id == in_progress_id)
+            .and_then(|category| category.color.as_deref());
+        assert_eq!(canceled_color, Some("cyan"));
+
+        Ok(())
+    }
+}
+
 fn desired_state_for_task(task: &Task, repo_available: bool) -> DesiredTaskState {
     DesiredTaskState {
         expected_session_name: task.tmux_session_name.clone(),

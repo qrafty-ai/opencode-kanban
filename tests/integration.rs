@@ -110,6 +110,9 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
     if !tmux_available() {
         return Ok(());
     }
+    if !port_available(4096) {
+        return Ok(());
+    }
     let _test_guard = INTEGRATION_TEST_LOCK
         .lock()
         .expect("integration test lock should not be poisoned");
@@ -203,6 +206,9 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
 #[test]
 fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Result<()> {
     if !tmux_available() {
+        return Ok(());
+    }
+    if !port_available(4096) {
         return Ok(());
     }
     let _test_guard = INTEGRATION_TEST_LOCK
@@ -379,6 +385,10 @@ fn tmux_available() -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn port_available(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
 fn cleanup_test_tmux_server() {
