@@ -190,13 +190,14 @@ fn ensure_opencode_available(binary: &str) -> Result<()> {
 }
 
 pub fn opencode_attach_command(session_id: Option<&str>, worktree_dir: Option<&str>) -> String {
-    let dir_arg = worktree_dir
-        .map(|d| format!(" --dir {}", d))
-        .unwrap_or_default();
+    let base = format!("opencode attach {DEFAULT_SERVER_URL}");
 
     match session_id {
-        Some(id) => format!("opencode --session {id}{dir_arg}"),
-        None => format!("opencode{dir_arg}"),
+        Some(id) => format!("{base} --session {id}"),
+        None => match worktree_dir {
+            Some(dir) => format!("{base} --dir {dir}"),
+            None => base,
+        },
     }
 }
 
@@ -439,6 +440,30 @@ mod tests {
         assert!(logged.contains(&sid));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_attach_command_without_session_includes_dir() {
+        let command = opencode_attach_command(None, Some("/tmp/worktree"));
+        assert_eq!(
+            command,
+            "opencode attach http://127.0.0.1:4096 --dir /tmp/worktree"
+        );
+    }
+
+    #[test]
+    fn test_attach_command_with_session_omits_dir() {
+        let command = opencode_attach_command(Some("sid-123"), Some("/tmp/worktree"));
+        assert_eq!(
+            command,
+            "opencode attach http://127.0.0.1:4096 --session sid-123"
+        );
+    }
+
+    #[test]
+    fn test_attach_command_without_session_or_dir_uses_attach_base() {
+        let command = opencode_attach_command(None, None);
+        assert_eq!(command, "opencode attach http://127.0.0.1:4096");
     }
 
     struct FakeOpenCode {
