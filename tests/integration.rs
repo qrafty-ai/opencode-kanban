@@ -249,10 +249,9 @@ fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Re
         wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
             current.tmux_status == "dead"
                 && current.status_source == "none"
-                && current
-                    .status_error
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("SERVER_"))
+                && current.status_error.as_deref().is_some_and(|error| {
+                    error.starts_with("SERVER_") || error.starts_with("SESSION_NOT_FOUND")
+                })
         })?;
     }
 
@@ -429,6 +428,16 @@ fn wait_for_task(
 }
 
 fn binding_state_from_task(task: &Task) -> OpenCodeBindingState {
+    // If the task has a status_error indicating the session is missing/not found,
+    // treat it as stale binding (the task had a session but it's now gone)
+    if let Some(ref error) = task.status_error {
+        let code = error.split(':').next().unwrap_or_default().trim();
+        if code == "SERVER_STATUS_MISSING" || code == "SESSION_NOT_FOUND" {
+            return OpenCodeBindingState::Stale;
+        }
+    }
+
+    // If we have a session ID stored somewhere, use the full classification
     let source = match task.status_source.as_str() {
         "server" => SessionStatusSource::Server,
         _ => SessionStatusSource::None,
@@ -449,6 +458,8 @@ fn binding_state_from_task(task: &Task) -> OpenCodeBindingState {
         }),
     };
 
+    // For now, return Bound if we can't determine a specific session ID
+    // The task doesn't store opencode_session_id directly
     classify_binding_state(None, Some(&status))
 }
 

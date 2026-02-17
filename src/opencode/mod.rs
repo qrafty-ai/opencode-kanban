@@ -10,10 +10,12 @@ use crate::tmux::tmux_get_pane_pid;
 use crate::types::SessionStatus;
 
 pub mod server;
+pub mod session_graph;
 pub mod status_server;
 
 pub use crate::types::SessionState as Status;
 pub use server::{OpenCodeServerManager, OpenCodeServerState, ensure_server_ready};
+pub use session_graph::SessionGraph;
 pub use status_server::ServerStatusProvider;
 
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:4096";

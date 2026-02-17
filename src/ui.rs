@@ -14,8 +14,10 @@ use ratatui::{
 use crate::app::{
     ActiveDialog, App, CategoryInputField, CategoryInputMode, DeleteCategoryField, DeleteTaskField,
     Message, NewProjectField, NewTaskField, View, ViewMode, WorktreeNotFoundField,
+    polling::{latest_session_snapshot, latest_task_root_bindings},
 };
 use crate::command_palette::all_commands;
+use crate::opencode::SessionGraph;
 use crate::theme::{Theme, parse_color};
 use crate::types::{Category, Task};
 
@@ -650,6 +652,87 @@ fn render_side_panel_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ]),
             Line::from(vec![Span::raw("")]),
         ];
+
+        lines.push(Line::from(vec![Span::styled(
+            "Session Tree:",
+            Style::default().fg(theme.focus).bold(),
+        )]));
+        lines.push(Line::from(vec![Span::raw("")]));
+
+        let root_bindings = latest_task_root_bindings();
+        let snapshot = latest_session_snapshot();
+        let graph = SessionGraph::new(snapshot);
+
+        if let Some(root_id) = root_bindings.get(&task.id) {
+            if let Some(root_session) = graph.get_session(root_id) {
+                let status_icon = match root_session.state.as_str() {
+                    "running" => "●",
+                    "idle" => "○",
+                    "waiting" => "◐",
+                    "dead" => "✕",
+                    _ => "?",
+                };
+                let status_color = match root_session.state.as_str() {
+                    "running" => theme.focus,
+                    "idle" => theme.task,
+                    "waiting" => theme.secondary,
+                    "dead" => theme.secondary,
+                    _ => theme.secondary,
+                };
+
+                lines.push(Line::from(vec![
+                    Span::styled(status_icon, Style::default().fg(status_color)),
+                    Span::raw(" "),
+                    Span::raw(root_id.clone()),
+                    Span::styled(
+                        format!(" ({})", root_session.state.as_str()),
+                        Style::default().fg(theme.secondary),
+                    ),
+                ]));
+
+                for (descendant_id, depth) in graph.descendants(root_id) {
+                    if let Some(descendant) = graph.get_session(&descendant_id) {
+                        let indent = "  ".repeat(depth + 1);
+                        let prefix = "└─";
+
+                        let d_icon = match descendant.state.as_str() {
+                            "running" => "●",
+                            "idle" => "○",
+                            "waiting" => "◐",
+                            "dead" => "✕",
+                            _ => "?",
+                        };
+                        let d_color = match descendant.state.as_str() {
+                            "running" => theme.focus,
+                            "idle" => theme.task,
+                            "waiting" => theme.secondary,
+                            "dead" => theme.secondary,
+                            _ => theme.secondary,
+                        };
+
+                        lines.push(Line::from(vec![
+                            Span::raw(indent),
+                            Span::raw(prefix),
+                            Span::styled(d_icon, Style::default().fg(d_color)),
+                            Span::raw(" "),
+                            Span::raw(descendant_id),
+                        ]));
+                    }
+                }
+            } else {
+                lines.push(Line::from(vec![Span::styled(
+                    "Root session not found in snapshot",
+                    Style::default().fg(theme.secondary),
+                )]));
+            }
+        } else {
+            lines.push(Line::from(vec![Span::styled(
+                "No root session bound",
+                Style::default().fg(theme.secondary),
+            )]));
+        }
+
+        lines.push(Line::from(vec![Span::raw("")]));
 
         if let Some(ref logs) = app.current_log_buffer {
             lines.push(Line::from(vec![Span::styled(
