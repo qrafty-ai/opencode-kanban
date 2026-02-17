@@ -1,22 +1,23 @@
-use std::path::Path;
-
-use ratatui::{
-    Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    text::{Line, Span},
-    widgets::{
-        Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Wrap,
+use tui_realm_stdlib::{Checkbox, Input, Label, List, Paragraph, Table};
+use tuirealm::{
+    MockComponent,
+    props::{
+        Alignment, AttrValue, Attribute, BorderType, Borders, Color, InputType, Style,
+        TableBuilder, TextSpan,
+    },
+    ratatui::{
+        Frame,
+        layout::{Constraint, Direction, Layout, Rect},
+        widgets::Clear,
     },
 };
 
 use crate::app::{
-    ActiveDialog, App, CategoryInputField, CategoryInputMode, DeleteCategoryField, DeleteTaskField,
-    Message, NewProjectField, NewTaskField, View, ViewMode, WorktreeNotFoundField,
+    ActiveDialog, App, CategoryInputMode, DeleteTaskField, NewTaskField, STATUS_BROKEN,
+    STATUS_REPO_UNAVAILABLE, View, ViewMode,
 };
 use crate::command_palette::all_commands;
-use crate::theme::{Theme, parse_color};
+use crate::theme::Theme;
 use crate::types::{Category, Task};
 
 #[derive(Clone, Copy)]
@@ -25,11 +26,1042 @@ pub enum OverlayAnchor {
     Top,
 }
 
-pub struct OverlayConfig<'a> {
-    pub title: &'a str,
-    pub anchor: OverlayAnchor,
-    pub width_percent: u16,
-    pub height_percent: u16,
+pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    app.hit_test_map.clear();
+
+    match app.current_view {
+        View::ProjectList => render_project_list(frame, app),
+        View::Board => render_board(frame, app),
+    }
+
+    if app.active_dialog != ActiveDialog::None {
+        render_dialog(frame, app);
+    }
+}
+
+fn render_project_list(frame: &mut Frame<'_>, app: &App) {
+    let theme = app.theme;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    let mut header = Label::default()
+        .text("Select Project")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.header)
+        .background(theme.base.canvas);
+    header.view(frame, chunks[0]);
+
+    let mut rows = TableBuilder::default();
+    for (idx, project) in app.project_list.iter().enumerate() {
+        let prefix = if idx == app.selected_project_index {
+            ">"
+        } else {
+            " "
+        };
+        rows.add_col(TextSpan::from(prefix))
+            .add_col(TextSpan::from(project.name.clone()))
+            .add_row();
+    }
+    if app.project_list.is_empty() {
+        rows.add_col(TextSpan::from(" "))
+            .add_col(TextSpan::from("No projects found"))
+            .add_row();
+    }
+
+    let selected = app
+        .selected_project_index
+        .min(app.project_list.len().saturating_sub(1));
+    let mut list = List::default()
+        .title("Projects", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
+        .highlighted_str("> ")
+        .scroll(true)
+        .rows(rows.build())
+        .selected_line(selected);
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, chunks[1]);
+
+    let mut footer = Label::default()
+        .text("n: new project  Enter: select  q: quit")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(theme.base.canvas);
+    footer.view(frame, chunks[2]);
+}
+
+fn render_board(frame: &mut Frame<'_>, app: &App) {
+    let theme = app.theme;
+    let mut canvas = Paragraph::default()
+        .background(theme.base.surface)
+        .text([TextSpan::from("")]);
+    canvas.view(frame, frame.area());
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    render_header(frame, chunks[0], app);
+    match app.view_mode {
+        ViewMode::Kanban => render_columns(frame, chunks[1], app),
+        ViewMode::SidePanel => render_side_panel(frame, chunks[1], app),
+    }
+    render_footer(frame, chunks[2], app);
+}
+
+fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let sections = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(area);
+
+    let mut left = Label::default()
+        .text("opencode-kanban")
+        .alignment(Alignment::Left)
+        .foreground(theme.base.header)
+        .background(theme.base.surface);
+    left.view(frame, sections[0]);
+
+    let right_text = format!("tasks: {}  refresh: 0.5s", app.tasks.len());
+    let mut right = Label::default()
+        .text(right_text)
+        .alignment(Alignment::Right)
+        .foreground(theme.base.text_muted)
+        .background(theme.base.surface);
+    right.view(frame, sections[1]);
+}
+
+fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let notice = app.footer_notice.as_deref().unwrap_or(
+        "n:new  Enter:attach  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view",
+    );
+
+    let mut footer = Label::default()
+        .text(notice)
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(theme.base.surface);
+    footer.view(frame, area);
+}
+
+fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    if app.categories.is_empty() {
+        render_empty_state(frame, area, "No categories yet. Press c to add one.", app);
+        return;
+    }
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![
+            Constraint::Ratio(1, app.categories.len() as u32);
+            app.categories.len()
+        ])
+        .split(area);
+
+    for (slot, (column_idx, category)) in sorted_categories(app).into_iter().enumerate() {
+        let mut rows = TableBuilder::default();
+        let tasks = tasks_for_category(app, category.id);
+        let accent = theme.category_accent(category.color.as_deref());
+        let row_count = if tasks.is_empty() {
+            1
+        } else {
+            tasks.iter().map(task_tile_lines).sum()
+        };
+
+        let selected_task = app
+            .selected_task_per_column
+            .get(&column_idx)
+            .copied()
+            .unwrap_or(0)
+            .min(tasks.len().saturating_sub(1));
+        let is_focused_column = column_idx == app.focused_column;
+
+        let tile_width = list_inner_width(columns[slot]);
+        for (task_index, task) in tasks.iter().enumerate() {
+            append_task_tile_rows(
+                &mut rows,
+                app,
+                task,
+                is_focused_column && task_index == selected_task,
+                tile_width,
+                accent,
+            );
+        }
+
+        if tasks.is_empty() {
+            rows.add_col(TextSpan::from("No tasks")).add_row();
+        }
+
+        let selected_line = tasks
+            .iter()
+            .take(selected_task)
+            .map(task_tile_lines)
+            .sum::<usize>()
+            .min(row_count.saturating_sub(1));
+
+        let mut list = List::default()
+            .title(
+                format!("{} ({})", category.name, tasks.len()),
+                Alignment::Left,
+            )
+            .borders(rounded_borders(accent))
+            .foreground(theme.base.text)
+            .background(theme.base.surface)
+            .scroll(true)
+            .rows(rows.build())
+            .selected_line(selected_line)
+            .inactive(Style::default().fg(theme.base.text_muted));
+        list.attr(
+            Attribute::Focus,
+            AttrValue::Flag(column_idx == app.focused_column),
+        );
+        list.view(frame, columns[slot]);
+    }
+}
+
+fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let entries = linear_entries(app);
+    if entries.is_empty() {
+        render_empty_state(frame, area, "No tasks available.", app);
+        return;
+    }
+
+    let width = app.side_panel_width.clamp(20, 80);
+    let sections = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(width),
+            Constraint::Percentage(100 - width),
+        ])
+        .split(area);
+
+    render_side_panel_list(frame, sections[0], app, &entries);
+    render_side_panel_details(frame, sections[1], app, &entries);
+}
+
+fn render_side_panel_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    entries: &[(String, Task)],
+) {
+    let theme = app.theme;
+    let mut rows = TableBuilder::default();
+    let row_count = if entries.is_empty() {
+        1
+    } else {
+        entries.iter().map(|(_, task)| task_tile_lines(task)).sum()
+    };
+    let selected_task = app.selected_task_index.min(entries.len().saturating_sub(1));
+    let tile_width = list_inner_width(area);
+    for (task_index, (_, task)) in entries.iter().enumerate() {
+        append_task_tile_rows(
+            &mut rows,
+            app,
+            task,
+            task_index == selected_task,
+            tile_width,
+            theme.interactive.selected_border,
+        );
+    }
+
+    let selected_line = entries
+        .iter()
+        .take(selected_task)
+        .map(|(_, task)| task_tile_lines(task))
+        .sum::<usize>()
+        .min(row_count.saturating_sub(1));
+    let mut list = List::default()
+        .title("Tasks", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
+        .scroll(true)
+        .rows(rows.build())
+        .selected_line(selected_line)
+        .inactive(Style::default().fg(theme.base.text_muted));
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, area);
+}
+
+fn render_side_panel_details(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    entries: &[(String, Task)],
+) {
+    let theme = app.theme;
+    let selected = app.selected_task_index.min(entries.len().saturating_sub(1));
+    let (_, task) = &entries[selected];
+
+    let repo_name = app
+        .repos
+        .iter()
+        .find(|repo| repo.id == task.repo_id)
+        .map(|repo| repo.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let spinner = status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase);
+    let todos = task
+        .session_todo_summary()
+        .map(|(done, total)| format!("{done}/{total}"))
+        .unwrap_or_else(|| "--".to_string());
+    let session = task.tmux_session_name.as_deref().unwrap_or("n/a");
+
+    let worktree_full = task.worktree_path.as_deref().unwrap_or("n/a");
+    let worktree_short = clamp_text(worktree_full, 70);
+
+    let mut lines = vec![
+        TextSpan::new("OVERVIEW").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Title", &task.title)).fg(theme.base.text),
+        TextSpan::new(detail_kv("Repo", &repo_name)).fg(theme.base.text),
+        TextSpan::new(detail_kv("Branch", &task.branch)).fg(theme.base.text),
+        TextSpan::new(""),
+        TextSpan::new("RUNTIME").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Status", spinner))
+            .fg(theme.status_color(task.tmux_status.as_str())),
+        TextSpan::new(detail_kv("Todos", &todos)).fg(theme.tile.todo),
+        TextSpan::new(detail_kv("Session", session)).fg(theme.base.text),
+        TextSpan::new(""),
+        TextSpan::new("WORKSPACE").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Path", &worktree_short)).fg(theme.base.text),
+    ];
+
+    if worktree_full != worktree_short {
+        lines.push(TextSpan::new(detail_kv("Full", worktree_full)).fg(theme.base.text_muted));
+    }
+
+    lines.push(TextSpan::new(""));
+    lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
+    lines.push(TextSpan::new("Enter attach  d delete  m move  l logs").fg(theme.base.text_muted));
+
+    if let Some(log) = app.current_log_buffer.as_deref() {
+        lines.push(TextSpan::new(""));
+        lines.push(TextSpan::new("LOG PREVIEW").fg(theme.base.header).bold());
+        for line in log.lines().take(8) {
+            lines.push(TextSpan::new(line.to_string()).fg(theme.base.text_muted));
+        }
+    }
+
+    let mut paragraph = Paragraph::default()
+        .title("Details", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
+        .wrap(true)
+        .text(lines);
+    paragraph.view(frame, area);
+}
+
+fn render_dialog(frame: &mut Frame<'_>, app: &App) {
+    if matches!(app.active_dialog, ActiveDialog::Help) {
+        render_help_overlay(frame, app);
+        return;
+    }
+
+    let (width_percent, height_percent) = match &app.active_dialog {
+        ActiveDialog::CommandPalette(_) => command_palette_overlay_size(app.viewport),
+        ActiveDialog::NewTask(_) => (80, 72),
+        ActiveDialog::DeleteTask(_) => (60, 60),
+        ActiveDialog::CategoryInput(_) => (60, 40),
+        ActiveDialog::DeleteCategory(_) => (60, 40),
+        ActiveDialog::NewProject(_) => (60, 35),
+        _ => (60, 45),
+    };
+    let anchor = if matches!(app.active_dialog, ActiveDialog::CommandPalette(_)) {
+        OverlayAnchor::Top
+    } else {
+        OverlayAnchor::Center
+    };
+
+    let dialog_area = calculate_overlay_area(anchor, width_percent, height_percent, frame.area());
+    frame.render_widget(Clear, dialog_area);
+
+    match &app.active_dialog {
+        ActiveDialog::NewTask(state) => render_new_task_dialog(frame, dialog_area, app, state),
+        ActiveDialog::DeleteTask(state) => {
+            render_delete_task_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::CategoryInput(state) => {
+            render_category_dialog(frame, dialog_area, app, state.mode, &state.name_input)
+        }
+        ActiveDialog::DeleteCategory(state) => {
+            let text = format!(
+                "Delete category '{}' and {} tasks?\n\nPress Enter to confirm or Esc to cancel.",
+                state.category_name, state.task_count
+            );
+            render_message_dialog(frame, dialog_area, app, "Delete Category", &text);
+        }
+        ActiveDialog::Error(state) => {
+            let text = format!("{}\n\n{}", state.title, state.detail);
+            render_message_dialog(frame, dialog_area, app, "Error", &text);
+        }
+        ActiveDialog::WorktreeNotFound(state) => {
+            let text = format!(
+                "Worktree missing for task '{}'.\n\nEnter: recreate  m: mark broken  Esc: cancel",
+                state.task_title
+            );
+            render_message_dialog(frame, dialog_area, app, "Worktree Not Found", &text);
+        }
+        ActiveDialog::RepoUnavailable(state) => {
+            let text = format!(
+                "Repository unavailable for '{}'.\nPath: {}\n\nPress Enter or Esc.",
+                state.task_title, state.repo_path
+            );
+            render_message_dialog(frame, dialog_area, app, "Repository Unavailable", &text);
+        }
+        ActiveDialog::ConfirmQuit(state) => {
+            let text = format!(
+                "{} active sessions detected.\n\nPress Enter to quit or Esc to cancel.",
+                state.active_session_count
+            );
+            render_message_dialog(frame, dialog_area, app, "Confirm Quit", &text);
+        }
+        ActiveDialog::CommandPalette(state) => {
+            render_command_palette_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::NewProject(state) => {
+            render_new_project_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::MoveTask(_) | ActiveDialog::None | ActiveDialog::Help => {}
+    }
+}
+
+fn render_new_task_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &crate::app::NewTaskDialogState,
+) {
+    let theme = app.theme;
+    let surface = theme.dialog_surface();
+
+    let mut panel = Paragraph::default()
+        .title("New Task", Alignment::Center)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(surface)
+        .text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
+    render_input_component(
+        frame,
+        layout[0],
+        "Repo",
+        if state.repo_input.is_empty() {
+            app.repos
+                .get(state.repo_idx)
+                .map(|repo| repo.name.as_str())
+                .unwrap_or("")
+        } else {
+            state.repo_input.as_str()
+        },
+        state.focused_field == NewTaskField::Repo,
+        surface,
+        theme,
+    );
+    render_input_component(
+        frame,
+        layout[1],
+        "Branch",
+        &state.branch_input,
+        state.focused_field == NewTaskField::Branch,
+        surface,
+        theme,
+    );
+    render_input_component(
+        frame,
+        layout[2],
+        "Base",
+        &state.base_input,
+        state.focused_field == NewTaskField::Base,
+        surface,
+        theme,
+    );
+    render_input_component(
+        frame,
+        layout[3],
+        "Title",
+        &state.title_input,
+        state.focused_field == NewTaskField::Title,
+        surface,
+        theme,
+    );
+
+    let selected = if state.ensure_base_up_to_date {
+        vec![0]
+    } else {
+        Vec::new()
+    };
+    let mut checkbox = Checkbox::default()
+        .title("Options", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(surface)
+        .choices(["Ensure base is up to date"])
+        .values(&selected)
+        .rewind(false)
+        .inactive(Style::default().fg(theme.base.text_muted));
+    checkbox.attr(
+        Attribute::Focus,
+        AttrValue::Flag(state.focused_field == NewTaskField::EnsureBaseUpToDate),
+    );
+    checkbox.view(frame, layout[4]);
+
+    let actions = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[5]);
+
+    render_action_button(
+        frame,
+        actions[0],
+        "Create",
+        matches!(state.focused_field, NewTaskField::Create),
+        false,
+        app,
+    );
+    render_action_button(
+        frame,
+        actions[1],
+        "Cancel",
+        matches!(state.focused_field, NewTaskField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Tab/Up/Down: move focus  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[6]);
+}
+
+fn render_delete_task_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &crate::app::DeleteTaskDialogState,
+) {
+    let theme = app.theme;
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(3),
+        ])
+        .split(panel_inner);
+
+    let mut panel = Paragraph::default()
+        .title("Delete Task", Alignment::Center)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.canvas)
+        .text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let mut summary = Paragraph::default()
+        .foreground(theme.base.text)
+        .background(theme.base.canvas)
+        .wrap(true)
+        .text([
+            TextSpan::from(format!(
+                "Delete task '{}' ({})",
+                state.task_title, state.task_branch
+            )),
+            TextSpan::from("Use Space to toggle options."),
+        ]);
+    summary.view(frame, layout[0]);
+
+    let selected = [
+        (state.kill_tmux, 0usize),
+        (state.remove_worktree, 1usize),
+        (state.delete_branch, 2usize),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, idx)| enabled.then_some(idx))
+    .collect::<Vec<_>>();
+
+    let mut checkbox = Checkbox::default()
+        .title("Delete Options", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.dialog_surface())
+        .choices(["Kill tmux", "Remove worktree", "Delete branch"])
+        .values(&selected)
+        .rewind(false)
+        .inactive(Style::default().fg(theme.base.text_muted));
+    checkbox.attr(
+        Attribute::Focus,
+        AttrValue::Flag(matches!(
+            state.focused_field,
+            DeleteTaskField::KillTmux
+                | DeleteTaskField::RemoveWorktree
+                | DeleteTaskField::DeleteBranch
+        )),
+    );
+    checkbox.view(frame, layout[1]);
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[3]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Delete",
+        matches!(state.focused_field, DeleteTaskField::Delete),
+        true,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, DeleteTaskField::Cancel),
+        false,
+        app,
+    );
+}
+
+fn render_category_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    mode: CategoryInputMode,
+    name: &str,
+) {
+    let title = match mode {
+        CategoryInputMode::Add => "Add Category",
+        CategoryInputMode::Rename => "Rename Category",
+    };
+    let header = centered_rect(100, 35, area);
+    render_input_component(
+        frame,
+        header,
+        title,
+        name,
+        true,
+        app.theme.dialog_surface(),
+        app.theme,
+    );
+}
+
+fn render_new_project_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &crate::app::NewProjectDialogState,
+) {
+    render_input_component(
+        frame,
+        area,
+        "Project Name",
+        &state.name_input,
+        true,
+        app.theme.dialog_surface(),
+        app.theme,
+    );
+}
+
+fn render_message_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, title: &str, text: &str) {
+    let theme = app.theme;
+    let mut paragraph = Paragraph::default()
+        .title(title, Alignment::Center)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.dialog_surface())
+        .wrap(true)
+        .text(text.lines().map(|line| TextSpan::from(line.to_string())));
+    paragraph.view(frame, area);
+}
+
+fn render_action_button(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    focused: bool,
+    destructive: bool,
+    app: &App,
+) {
+    let theme = app.theme;
+    let accent = if destructive {
+        theme.base.danger
+    } else {
+        theme.interactive.focus
+    };
+    let fg = if focused {
+        theme.dialog.button_fg
+    } else {
+        accent
+    };
+    let bg = if focused {
+        accent
+    } else {
+        theme.dialog.button_bg
+    };
+
+    let mut button = Paragraph::default()
+        .borders(rounded_borders(accent))
+        .foreground(fg)
+        .background(if focused { bg } else { theme.dialog_surface() })
+        .alignment(Alignment::Center)
+        .text([TextSpan::from(label.to_string())]);
+    button.view(frame, area);
+}
+
+fn render_command_palette_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &crate::command_palette::CommandPaletteState,
+) {
+    let theme = app.theme;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    render_input_component(
+        frame,
+        chunks[0],
+        "Command Palette",
+        &state.query,
+        true,
+        theme.dialog_surface(),
+        theme,
+    );
+
+    let mut hint = Label::default()
+        .text("Type to filter. Enter to execute. Esc to close.")
+        .alignment(Alignment::Left)
+        .foreground(theme.base.text_muted)
+        .background(theme.dialog_surface());
+    hint.view(frame, chunks[1]);
+
+    if !should_render_command_palette_results(app.viewport) {
+        return;
+    }
+
+    let mut rows = TableBuilder::default();
+    let commands = all_commands();
+    for ranked in &state.filtered {
+        if let Some(command) = commands.get(ranked.command_idx) {
+            let keybinding = app
+                .keybindings
+                .command_palette_keybinding(command.id)
+                .unwrap_or_else(|| command.keybinding.to_string());
+            rows.add_col(TextSpan::from(command.display_name.to_string()))
+                .add_col(TextSpan::from(keybinding))
+                .add_row();
+        }
+    }
+
+    if state.filtered.is_empty() {
+        rows.add_col(TextSpan::from("No matching commands"))
+            .add_col(TextSpan::from(""))
+            .add_row();
+    }
+
+    let selected = state
+        .selected_index
+        .min(state.filtered.len().saturating_sub(1));
+    let mut list = Table::default()
+        .title("Results", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
+        .highlighted_str("> ")
+        .headers(["Command", "Key"])
+        .widths(&[75, 25])
+        .scroll(true)
+        .table(rows.build())
+        .selected_line(selected)
+        .inactive(Style::default().fg(theme.base.text_muted));
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, chunks[2]);
+}
+
+fn render_help_overlay(frame: &mut Frame<'_>, app: &App) {
+    let area = centered_rect(84, 84, frame.area());
+    frame.render_widget(Clear, area);
+    let theme = app.theme;
+    let lines = app
+        .keybindings
+        .help_lines()
+        .into_iter()
+        .map(|line| {
+            if line.is_empty() {
+                TextSpan::new(line)
+            } else if !line.starts_with(' ') {
+                TextSpan::new(line).fg(theme.base.header).bold()
+            } else {
+                TextSpan::new(line).fg(theme.base.text)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut paragraph = Paragraph::default()
+        .title("Help", Alignment::Center)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.dialog_surface())
+        .wrap(true)
+        .text(lines);
+    paragraph.view(frame, area);
+}
+
+fn render_empty_state(frame: &mut Frame<'_>, area: Rect, message: &str, app: &App) {
+    let theme = app.theme;
+    let mut paragraph = Paragraph::default()
+        .title("opencode-kanban", Alignment::Center)
+        .borders(rounded_borders(theme.base.text_muted))
+        .foreground(theme.base.text_muted)
+        .wrap(true)
+        .text([TextSpan::from(message.to_string())]);
+    paragraph.view(frame, area);
+}
+
+fn render_input_component(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    value: &str,
+    focused: bool,
+    background: Color,
+    theme: Theme,
+) {
+    let mut input = Input::default()
+        .title(title, Alignment::Left)
+        .borders(rounded_borders(if focused {
+            theme.interactive.focus
+        } else {
+            theme.base.text_muted
+        }))
+        .foreground(theme.base.text)
+        .background(background)
+        .inactive(Style::default().fg(theme.base.text_muted))
+        .input_type(InputType::Text)
+        .value(value.to_string());
+    input.attr(Attribute::Focus, AttrValue::Flag(focused));
+    input.view(frame, area);
+}
+
+fn linear_entries(app: &App) -> Vec<(String, Task)> {
+    let mut out = Vec::new();
+    for (_, category) in sorted_categories(app) {
+        let mut tasks = tasks_for_category(app, category.id);
+        tasks.sort_by_key(|task| task.position);
+        for task in tasks {
+            out.push((category.name.clone(), task));
+        }
+    }
+    out
+}
+
+fn tasks_for_category(app: &App, category_id: uuid::Uuid) -> Vec<Task> {
+    let mut tasks: Vec<Task> = app
+        .tasks
+        .iter()
+        .filter(|task| task.category_id == category_id)
+        .cloned()
+        .collect();
+    tasks.sort_by_key(|task| task.position);
+    tasks
+}
+
+fn sorted_categories(app: &App) -> Vec<(usize, &Category)> {
+    let mut categories: Vec<(usize, &Category)> = app.categories.iter().enumerate().collect();
+    categories.sort_by_key(|(_, category)| category.position);
+    categories
+}
+
+const TASK_TITLE_MAX: usize = 34;
+const TASK_REPO_MAX: usize = 18;
+const TASK_BRANCH_MAX: usize = 34;
+
+fn task_tile_lines(_task: &Task) -> usize {
+    5
+}
+
+fn append_task_tile_rows(
+    rows: &mut TableBuilder,
+    app: &App,
+    task: &Task,
+    is_selected: bool,
+    tile_width: usize,
+    selected_border: Color,
+) {
+    let theme = app.theme;
+    let tile = theme.tile_colors(is_selected);
+    let bg = tile.background;
+    let border = if is_selected {
+        selected_border
+    } else {
+        tile.border
+    };
+    let inner_width = tile_width.saturating_sub(2).max(4);
+
+    let top = format!("┌{}┐", "─".repeat(inner_width));
+    rows.add_col(TextSpan::new(top).fg(border).bg(bg)).add_row();
+
+    let status_line = pad_to_width(
+        &format!(" {}", task_tile_status_line(app, task)),
+        inner_width,
+    );
+    rows.add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_col(
+            TextSpan::new(status_line)
+                .fg(theme.status_color(task.tmux_status.as_str()))
+                .bg(bg)
+                .bold(),
+        )
+        .add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_row();
+
+    let title_line = pad_to_width(&format!(" {}", task_tile_title(task)), inner_width);
+    rows.add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_col(TextSpan::new(title_line).fg(theme.base.text).bg(bg).bold())
+        .add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_row();
+
+    let repo = task_tile_repo(app, task);
+    let branch = task_tile_branch(task);
+    let used = 1 + count_chars(&repo) + 1 + count_chars(&branch);
+    let filler = inner_width.saturating_sub(used);
+
+    rows.add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_col(TextSpan::new(" ").bg(bg))
+        .add_col(TextSpan::new(repo).fg(theme.tile.repo).bg(bg))
+        .add_col(TextSpan::new(":").fg(theme.base.text_muted).bg(bg))
+        .add_col(TextSpan::new(branch).fg(theme.tile.branch).bg(bg))
+        .add_col(TextSpan::new(" ".repeat(filler)).bg(bg))
+        .add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_row();
+
+    let bottom = format!("└{}┘", "─".repeat(inner_width));
+    rows.add_col(TextSpan::new(bottom).fg(border).bg(bg))
+        .add_row();
+}
+
+fn task_tile_status_line(app: &App, task: &Task) -> String {
+    let spinner = status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase);
+    match task.session_todo_summary() {
+        Some((done, total)) => format!("{spinner}  todo {done}/{total}"),
+        None => spinner.to_string(),
+    }
+}
+
+fn task_tile_title(task: &Task) -> String {
+    clamp_text(task.title.as_str(), TASK_TITLE_MAX)
+}
+
+fn task_tile_repo(app: &App, task: &Task) -> String {
+    let repo = app
+        .repos
+        .iter()
+        .find(|repo| repo.id == task.repo_id)
+        .map(|repo| repo.name.as_str())
+        .unwrap_or("unknown");
+    clamp_text(repo, TASK_REPO_MAX)
+}
+
+fn task_tile_branch(task: &Task) -> String {
+    clamp_text(task.branch.as_str(), TASK_BRANCH_MAX)
+}
+
+fn list_inner_width(area: Rect) -> usize {
+    area.width.saturating_sub(2) as usize
+}
+
+fn count_chars(value: &str) -> usize {
+    value.chars().count()
+}
+
+fn pad_to_width(value: &str, width: usize) -> String {
+    let len = count_chars(value);
+    if len >= width {
+        return clamp_text(value, width);
+    }
+    format!("{}{}", value, " ".repeat(width - len))
+}
+
+fn detail_kv(label: &str, value: &str) -> String {
+    format!("{label:>8}: {value}")
+}
+
+fn clamp_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return "...".to_string();
+    }
+    let mut shortened = value.chars().take(max_chars - 3).collect::<String>();
+    shortened.push_str("...");
+    shortened
+}
+
+fn status_spinner_ascii(status: &str, pulse_phase: u8) -> &'static str {
+    match status {
+        "running" => match pulse_phase % 4 {
+            0 => ".:",
+            1 => "::",
+            2 => ":.",
+            _ => "..",
+        },
+        "waiting" => "..",
+        "idle" => "--",
+        "dead" => "xx",
+        STATUS_BROKEN => "!!",
+        STATUS_REPO_UNAVAILABLE => "!!",
+        _ => "..",
+    }
+}
+
+fn rounded_borders(color: Color) -> Borders {
+    Borders::default()
+        .modifiers(BorderType::Rounded)
+        .color(color)
 }
 
 fn calculate_overlay_area(
@@ -62,1539 +1094,12 @@ fn calculate_overlay_area(
     }
 }
 
-fn render_overlay_frame(frame: &mut Frame<'_>, config: OverlayConfig) -> Rect {
-    let theme = Theme::default();
-    let area = calculate_overlay_area(
-        config.anchor,
-        config.width_percent,
-        config.height_percent,
-        frame.area(),
-    );
-
-    frame.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(theme.focus))
-        .title(Span::styled(config.title, Style::default().fg(theme.focus)))
-        .title_alignment(Alignment::Center)
-        .style(Style::default().bg(Color::Black));
-
-    let inner_area = block.inner(area);
-    frame.render_widget(block, area);
-
-    inner_area
-}
-
-pub fn render(frame: &mut Frame<'_>, app: &mut App) {
-    match app.current_view {
-        View::ProjectList => render_project_list(frame, app),
-        View::Board => render_board(frame, app),
-    }
-}
-
-fn render_project_list(frame: &mut Frame<'_>, app: &mut App) {
-    app.hit_test_map.clear();
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(0),
-            Constraint::Length(3),
-        ])
-        .split(frame.area());
-
-    let header = Block::default()
-        .borders(Borders::ALL)
-        .title(" Select Project ")
-        .title_alignment(Alignment::Center);
-    frame.render_widget(header, chunks[0]);
-
-    let inner_area = Block::default().borders(Borders::ALL).inner(chunks[1]);
-    let list_height = inner_area.height as usize;
-    let scroll_offset = app.project_list_state.offset();
-    let visible_items: Vec<ListItem> = app
-        .project_list
-        .iter()
-        .skip(scroll_offset)
-        .take(list_height)
-        .enumerate()
-        .map(|(i, project)| {
-            let absolute_idx = scroll_offset + i;
-            let is_selected = app.selected_project_index == absolute_idx;
-            let item_rect = Rect::new(inner_area.x, inner_area.y + i as u16, inner_area.width, 1);
-            let is_hovered = is_area_hovered(item_rect, app);
-
-            let style = if is_selected {
-                Style::default().fg(Color::Yellow).bg(Color::DarkGray)
-            } else if is_hovered {
-                Style::default().bg(Color::DarkGray)
-            } else {
-                Style::default()
-            };
-
-            let prefix = if is_selected { "> " } else { "  " };
-            ListItem::new(Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled(&project.name, style),
-            ]))
-        })
-        .collect();
-
-    let list =
-        List::new(visible_items).block(Block::default().borders(Borders::ALL).title(" Projects "));
-    frame.render_stateful_widget(list, chunks[1], &mut app.project_list_state);
-
-    for (idx, _) in app.project_list.iter().enumerate() {
-        let item_y = inner_area.y + idx as u16 - scroll_offset as u16;
-        if item_y >= inner_area.y && item_y < inner_area.y + inner_area.height {
-            let item_rect = Rect::new(inner_area.x, item_y, inner_area.width, 1);
-            app.hit_test_map
-                .push((item_rect, Message::SelectProject(idx)));
-        }
-    }
-
-    let footer = Block::default()
-        .borders(Borders::ALL)
-        .title(" n: New Project, Enter: Select, q: Quit ")
-        .title_alignment(Alignment::Center);
-    frame.render_widget(footer, chunks[2]);
-
-    if app.active_dialog != ActiveDialog::None {
-        render_dialog(frame, app);
-    }
-}
-
-pub fn render_board(frame: &mut Frame<'_>, app: &mut App) {
-    app.hit_test_map.clear();
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
-
-    render_header(frame, chunks[0], app);
-    match app.view_mode {
-        ViewMode::Kanban => render_columns(frame, chunks[1], app),
-        ViewMode::SidePanel => render_side_panel(frame, chunks[1], app),
-    }
-    render_footer(frame, chunks[2], app);
-
-    if app.active_dialog != ActiveDialog::None {
-        render_dialog(frame, app);
-    }
-
-    if let Some(ref menu) = app.context_menu {
-        render_context_menu(frame, app, menu);
-    }
-}
-
-fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let theme = Theme::default();
-    let header = Block::default()
-        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(theme.header))
-        .title(Span::styled(
-            " opencode-kanban ",
-            Style::default().fg(theme.header),
-        ))
-        .title_alignment(Alignment::Left);
-
-    let refresh_info = format!(" {} tasks - auto-refresh: 0.5s ", app.tasks.len());
-    let header_right = Block::default()
-        .title(Span::styled(
-            refresh_info,
-            Style::default().fg(theme.header),
-        ))
-        .title_alignment(Alignment::Right);
-
-    frame.render_widget(header, area);
-    frame.render_widget(header_right, area);
-}
-
-fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let theme = Theme::default();
-    let notice = app.footer_notice.as_deref().unwrap_or(
-        " n: new task  Enter: attach  Ctrl+P: command palette  c/r/x: category  H/L: move task left/right  J/K: reorder task  tmux Prefix+K: previous session ",
-    );
-    let footer = Block::default()
-        .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(theme.header))
-        .title(Span::styled(
-            format!(" {notice} "),
-            Style::default().fg(theme.header),
-        ))
-        .title_alignment(Alignment::Center);
-    frame.render_widget(footer, area);
-}
-
-fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
-    let theme = Theme::default();
-    if app.categories.is_empty() {
-        render_empty_state(frame, area);
-        return;
-    }
-
-    let min_column_width = 18;
-    if area.width < (app.categories.len() as u16).saturating_mul(min_column_width) {
-        let msg = Paragraph::new(format!(
-            "Terminal too narrow for {} columns. Increase width to at least {} cells.",
-            app.categories.len(),
-            (app.categories.len() as u16).saturating_mul(min_column_width)
-        ))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Double)
-                .border_style(Style::default().fg(theme.secondary))
-                .title(Span::styled(
-                    " Resize Needed ",
-                    Style::default().fg(theme.secondary),
-                )),
-        );
-        frame.render_widget(msg, area);
-        return;
-    }
-
-    let constraints: Vec<Constraint> = (0..app.categories.len())
-        .map(|_| Constraint::Ratio(1, app.categories.len() as u32))
-        .collect();
-
-    let column_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(area);
-
-    for (i, category) in app.categories.iter().enumerate() {
-        let is_focused = i == app.focused_column;
-        let border_type = if is_focused {
-            BorderType::Double
-        } else {
-            BorderType::Plain
-        };
-
-        let category_color = category
-            .color
-            .as_deref()
-            .and_then(parse_color)
-            .unwrap_or(theme.column);
-        let border_color = if is_focused {
-            theme.focus
-        } else {
-            category_color
-        };
-
-        let tasks_in_col: Vec<&Task> = app
-            .tasks
-            .iter()
-            .filter(|t| t.category_id == category.id)
-            .collect();
-        let mut tasks_sorted = tasks_in_col.clone();
-        tasks_sorted.sort_by_key(|t| t.position);
-        let scroll_offset = app.clamped_scroll_offset_for_column(i);
-
-        let title = format!(" {} ({}) ", category.name, tasks_sorted.len());
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(border_type)
-            .border_style(Style::default().fg(border_color))
-            .title(Span::styled(title, Style::default().fg(border_color)))
-            .title_alignment(Alignment::Center);
-
-        let inner_area = block.inner(column_chunks[i]);
-        frame.render_widget(block, column_chunks[i]);
-
-        app.hit_test_map.push((
-            Rect {
-                x: column_chunks[i].x,
-                y: column_chunks[i].y,
-                width: column_chunks[i].width,
-                height: 1,
-            },
-            Message::FocusColumn(i),
-        ));
-
-        let mut y_offset = 0;
-        for (j, task) in tasks_sorted.iter().enumerate().skip(scroll_offset) {
-            if y_offset + 2 > inner_area.height {
-                break;
-            }
-
-            let is_selected = is_focused && app.selected_task_per_column.get(&i) == Some(&j);
-
-            let status_icon = match task.tmux_status.as_str() {
-                "running" => "●",
-                "idle" => "○",
-                "waiting" => "◐",
-                "dead" => "✕",
-                "repo_unavailable" => "!",
-                "broken" => "!",
-                _ => "?",
-            };
-
-            let status_color = match task.tmux_status.as_str() {
-                "running" => theme.focus,
-                "idle" => theme.task,
-                "waiting" => theme.secondary,
-                "dead" => theme.secondary,
-                "repo_unavailable" => theme.secondary,
-                "broken" => theme.secondary,
-                _ => theme.secondary,
-            };
-
-            let prefix = if is_selected { "▸" } else { " " };
-            let is_hovered = app
-                .hovered_message
-                .as_ref()
-                .map(|m| m == &Message::SelectTask(i, j))
-                .unwrap_or(false);
-            let bg_color = if is_selected {
-                if is_hovered {
-                    theme.focus // Combined hover + selected: prominent highlight
-                } else {
-                    theme.secondary
-                }
-            } else if is_hovered {
-                Color::DarkGray // Just hover: subtle highlight
-            } else {
-                Color::Reset
-            };
-
-            let line1 = Line::from(vec![
-                Span::styled(prefix, Style::default().fg(theme.focus)),
-                Span::styled(status_icon, Style::default().fg(status_color)),
-                Span::raw(" "),
-                Span::styled(&task.title, Style::default().fg(theme.task)),
-            ]);
-
-            let repo = app.repos.iter().find(|repo| repo.id == task.repo_id);
-            let repo_name = repo.map(|repo| repo.name.as_str()).unwrap_or("unknown");
-            let repo_available = repo
-                .map(|repo| Path::new(&repo.path).exists())
-                .unwrap_or(false);
-            let repo_label = if repo_available {
-                format!("{}:{}", repo_name, task.branch)
-            } else {
-                format!("{}:{} (repo unavailable)", repo_name, task.branch)
-            };
-            let todo_label = task
-                .session_todo_summary()
-                .map(|(completed, total)| format!("  todo {completed}/{total}"))
-                .unwrap_or_default();
-
-            let line2 = Line::from(vec![
-                Span::raw("   "),
-                Span::styled(
-                    format!("{repo_label}{todo_label}"),
-                    Style::default().fg(theme.secondary),
-                ),
-            ]);
-
-            let task_area = Rect {
-                x: inner_area.x,
-                y: inner_area.y + y_offset,
-                width: inner_area.width,
-                height: 2,
-            };
-
-            let paragraph = Paragraph::new(vec![line1, line2]).style(Style::default().bg(bg_color));
-
-            frame.render_widget(paragraph, task_area);
-
-            app.hit_test_map
-                .push((task_area, Message::SelectTask(i, j)));
-
-            y_offset += 3;
-        }
-
-        if tasks_sorted.is_empty() {
-            frame.render_widget(
-                Paragraph::new("No tasks in this category")
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(theme.secondary)),
-                inner_area,
-            );
-        } else {
-            // Render scrollbar if there are more tasks than visible
-            let total_tasks = tasks_sorted.len() as u16;
-            let visible_tasks = inner_area.height / 3;
-            if total_tasks > visible_tasks {
-                let mut scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .thumb_style(Style::default().fg(category_color).bg(theme.secondary));
-                scrollbar = scrollbar
-                    .track_symbol(Some("│"))
-                    .begin_symbol(Some("↑"))
-                    .end_symbol(Some("↓"));
-                frame.render_stateful_widget(
-                    scrollbar,
-                    Rect {
-                        x: column_chunks[i].x + column_chunks[i].width - 1,
-                        y: inner_area.y,
-                        height: inner_area.height,
-                        width: 1,
-                    },
-                    &mut app.column_scroll_states[i],
-                );
-            }
-        }
-    }
-}
-
-fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
-    if app.categories.is_empty() {
-        render_empty_state(frame, area);
-        return;
-    }
-
-    let left_width = app.side_panel_width;
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(left_width),
-            Constraint::Percentage(100 - left_width),
-        ])
-        .split(area);
-
-    render_side_panel_task_list(frame, chunks[0], app);
-    render_side_panel_details(frame, chunks[1], app);
-}
-
-fn render_side_panel_task_list(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
-    let theme = Theme::default();
-
-    let flat_tasks: Vec<(usize, &Category, &Task)> = app
-        .categories
-        .iter()
-        .enumerate()
-        .flat_map(|(cat_idx, cat)| {
-            let mut tasks: Vec<_> = app
-                .tasks
-                .iter()
-                .filter(|t| t.category_id == cat.id)
-                .collect();
-            tasks.sort_by_key(|t| t.position);
-            tasks.into_iter().map(move |t| (cat_idx, cat, t))
-        })
-        .collect();
-
-    if area.height < 6 {
-        return;
-    }
-
-    let block_inner_height = area.height.saturating_sub(3);
-
-    let selected_flat_index = app
-        .selected_task_index
-        .min(flat_tasks.len().saturating_sub(1));
-    let mut y_offset = 1u16;
-
-    for (flat_idx, (cat_idx, category, task)) in flat_tasks.iter().enumerate() {
-        if *cat_idx > 0 {
-            let prev_cat_idx = if flat_idx > 0 {
-                flat_tasks[flat_idx - 1].0
-            } else {
-                0
-            };
-            if *cat_idx != prev_cat_idx && y_offset < block_inner_height.saturating_sub(1) {
-                let sep_area = Rect {
-                    x: area.x,
-                    y: area.y + y_offset,
-                    width: area.width,
-                    height: 1,
-                };
-                let cat_name: String = category
-                    .name
-                    .chars()
-                    .take(area.width as usize - 6)
-                    .collect();
-                let sep_line = format!("┄{}┄", cat_name);
-                let total_width = area.width as usize;
-                let sep_len = sep_line.len();
-                let left_pad = if sep_len < total_width {
-                    (total_width - sep_len) / 2
-                } else {
-                    0
-                };
-                let sep_text = format!("{}{}", " ".repeat(left_pad), sep_line);
-                frame.render_widget(
-                    Paragraph::new(sep_text).style(Style::default().fg(theme.secondary).bold()),
-                    sep_area,
-                );
-                y_offset += 1;
-            }
-        }
-
-        if y_offset + 2 > block_inner_height {
-            break;
-        }
-
-        let is_selected = flat_idx == selected_flat_index;
-
-        let status_icon = match task.tmux_status.as_str() {
-            "running" => "●",
-            "idle" => "○",
-            "waiting" => "◐",
-            "dead" => "✕",
-            "repo_unavailable" => "!",
-            "broken" => "!",
-            _ => "?",
-        };
-
-        let status_color = match task.tmux_status.as_str() {
-            "running" => theme.focus,
-            "idle" => theme.task,
-            _ => theme.secondary,
-        };
-
-        let prefix = if is_selected { "▸" } else { " " };
-        let bg_color = if is_selected {
-            theme.secondary
-        } else {
-            Color::Reset
-        };
-
-        let repo_name = app
-            .repos
-            .iter()
-            .find(|r| r.id == task.repo_id)
-            .map(|r| r.name.as_str())
-            .unwrap_or("unknown");
-
-        let line1 = Line::from(vec![
-            Span::styled(prefix, Style::default().fg(theme.focus)),
-            Span::styled(status_icon, Style::default().fg(status_color)),
-            Span::raw(" "),
-            Span::styled(&task.title, Style::default().fg(theme.task)),
-        ]);
-
-        let line2 = Line::from(vec![
-            Span::raw("   "),
-            Span::styled(
-                format!(
-                    "{}:{}{}",
-                    repo_name,
-                    task.branch,
-                    task.session_todo_summary()
-                        .map(|(completed, total)| format!("  todo {completed}/{total}"))
-                        .unwrap_or_default()
-                ),
-                Style::default().fg(theme.secondary),
-            ),
-        ]);
-
-        let task_area = Rect {
-            x: area.x,
-            y: area.y + y_offset,
-            width: area.width,
-            height: 2,
-        };
-
-        frame.render_widget(
-            Paragraph::new(vec![line1, line2]).style(Style::default().bg(bg_color)),
-            task_area,
-        );
-
-        app.hit_test_map
-            .push((task_area, Message::SelectTaskInSidePanel(flat_idx)));
-        y_offset += 3;
-    }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.column))
-        .title(Span::styled(" Tasks ", Style::default().fg(theme.column)));
-    frame.render_widget(block, area);
-}
-
-fn render_side_panel_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let theme = Theme::default();
-
-    let flat_tasks: Vec<&Task> = app
-        .categories
-        .iter()
-        .flat_map(|cat| {
-            let mut tasks: Vec<_> = app
-                .tasks
-                .iter()
-                .filter(|t| t.category_id == cat.id)
-                .collect();
-            tasks.sort_by_key(|t| t.position);
-            tasks
-        })
-        .collect();
-
-    let selected_task = flat_tasks.get(app.selected_task_index);
-
-    let content = if let Some(task) = selected_task {
-        let repo_name = app
-            .repos
-            .iter()
-            .find(|r| r.id == task.repo_id)
-            .map(|r| r.name.as_str())
-            .unwrap_or("unknown");
-
-        let mut lines = vec![
-            Line::from(vec![Span::styled(
-                "Task Details",
-                Style::default().fg(theme.focus).bold(),
-            )]),
-            Line::from(vec![Span::raw("")]),
-            Line::from(vec![
-                Span::styled("Title: ", Style::default().fg(theme.secondary)),
-                Span::raw(&task.title),
-            ]),
-            Line::from(vec![
-                Span::styled("Repo: ", Style::default().fg(theme.secondary)),
-                Span::raw(repo_name),
-            ]),
-            Line::from(vec![
-                Span::styled("Branch: ", Style::default().fg(theme.secondary)),
-                Span::raw(&task.branch),
-            ]),
-            Line::from(vec![
-                Span::styled("Status: ", Style::default().fg(theme.secondary)),
-                Span::raw(&task.tmux_status),
-            ]),
-            Line::from(vec![
-                Span::styled("Todos: ", Style::default().fg(theme.secondary)),
-                Span::raw(
-                    task.session_todo_summary()
-                        .map(|(completed, total)| format!("{completed}/{total} done"))
-                        .unwrap_or_else(|| "none".to_string()),
-                ),
-            ]),
-            Line::from(vec![Span::raw("")]),
-        ];
-
-        let todos = task.session_todos();
-        if !todos.is_empty() {
-            lines.push(Line::from(vec![Span::styled(
-                "Checklist:",
-                Style::default().fg(theme.focus).bold(),
-            )]));
-            for todo in todos.iter().take(8) {
-                let marker = if todo.completed { "[x]" } else { "[ ]" };
-                lines.push(Line::from(vec![Span::raw(format!(
-                    "  {marker} {}",
-                    todo.content
-                ))]));
-            }
-            if todos.len() > 8 {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("  ... {} more", todos.len() - 8),
-                    Style::default().fg(theme.secondary),
-                )]));
-            }
-            lines.push(Line::from(vec![Span::raw("")]));
-        }
-
-        if let Some(ref logs) = app.current_log_buffer {
-            lines.push(Line::from(vec![Span::styled(
-                "Logs:",
-                Style::default().fg(theme.focus).bold(),
-            )]));
-            lines.push(Line::from(vec![Span::raw("")]));
-            for log_line in logs.lines().rev().take(30) {
-                lines.push(Line::from(vec![Span::raw(log_line)]));
-            }
-        } else if task.tmux_status == "running" {
-            lines.push(Line::from(vec![Span::styled(
-                "Logs: (no output yet)",
-                Style::default().fg(theme.secondary),
-            )]));
-        } else {
-            lines.push(Line::from(vec![Span::styled(
-                "Logs: (task not running)",
-                Style::default().fg(theme.secondary),
-            )]));
-        }
-
-        Paragraph::new(lines)
-    } else {
-        Paragraph::new("No task selected")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.secondary))
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.column))
-        .title(Span::styled(" Details ", Style::default().fg(theme.column)));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    frame.render_widget(content, inner);
-}
-
-fn render_empty_state(frame: &mut Frame<'_>, area: Rect) {
-    let theme = Theme::default();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.header))
-        .title(Span::styled(" Welcome ", Style::default().fg(theme.header)))
-        .title_alignment(Alignment::Center);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    frame.render_widget(
-        Paragraph::new(
-            "No tasks yet. Press n to create your first task.\nPress ? to view keybindings and mouse actions.",
-        )
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(theme.task)),
-        inner,
-    );
-}
-
-fn render_command_palette(frame: &mut Frame<'_>, area: Rect, app: &mut App, show_results: bool) {
-    let state = if let ActiveDialog::CommandPalette(state) = &app.active_dialog {
-        state.clone()
-    } else {
-        return;
-    };
-    let theme = Theme::default();
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
-        .split(area);
-
-    let search_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Search ")
-        .border_style(Style::default().fg(theme.focus));
-
-    let search_text = Paragraph::new(state.query.as_str()).block(search_block);
-    frame.render_widget(search_text, layout[0]);
-
-    if !show_results {
-        return;
-    }
-
-    if state.filtered.is_empty() {
-        let no_match = Paragraph::new("No matching commands")
-            .style(Style::default().fg(theme.secondary))
-            .alignment(Alignment::Center);
-        frame.render_widget(no_match, layout[1]);
-        return;
-    }
-
-    let all_cmds = all_commands();
-    let list_height = layout[1].height as usize;
-    let total_items = state.filtered.len();
-
-    let scroll_offset = if total_items <= list_height {
-        0
-    } else {
-        let half_height = list_height / 2;
-        if state.selected_index > half_height {
-            (state.selected_index - half_height).min(total_items - list_height)
-        } else {
-            0
-        }
-    };
-
-    let visible_commands = state.filtered.iter().skip(scroll_offset).take(list_height);
-
-    for (i, ranked_cmd) in visible_commands.enumerate() {
-        let cmd_def = &all_cmds[ranked_cmd.command_idx];
-        let is_selected = (scroll_offset + i) == state.selected_index;
-
-        let (prefix, bg_style) = if is_selected {
-            ("▸ ", Style::default().bg(theme.secondary))
-        } else {
-            ("  ", Style::default())
-        };
-
-        let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.focus))];
-
-        let name = cmd_def.display_name;
-        let mut last_idx = 0;
-
-        for &idx in &ranked_cmd.matched_indices {
-            if idx >= name.len() {
-                continue;
-            }
-
-            if idx > last_idx {
-                spans.push(Span::raw(&name[last_idx..idx]));
-            }
-            spans.push(Span::styled(
-                &name[idx..idx + 1],
-                Style::default()
-                    .fg(theme.focus)
-                    .add_modifier(ratatui::style::Modifier::BOLD),
-            ));
-            last_idx = idx + 1;
-        }
-        if last_idx < name.len() {
-            spans.push(Span::raw(&name[last_idx..]));
-        }
-
-        let row_area = Rect {
-            x: layout[1].x,
-            y: layout[1].y + i as u16,
-            width: layout[1].width,
-            height: 1,
-        };
-
-        let is_hovered = is_area_hovered(row_area, app);
-        let hover_style = if is_hovered && !is_selected {
-            Style::default().bg(Color::DarkGray)
-        } else {
-            bg_style
-        };
-
-        frame.render_widget(
-            Paragraph::new(Line::from(spans)).style(hover_style),
-            row_area,
-        );
-
-        if !cmd_def.keybinding.is_empty() {
-            let key_hint = Span::styled(cmd_def.keybinding, Style::default().fg(theme.secondary));
-            frame.render_widget(
-                Paragraph::new(Line::from(key_hint)).alignment(Alignment::Right),
-                row_area,
-            );
-        }
-
-        let absolute_idx = scroll_offset + i;
-        app.hit_test_map
-            .push((row_area, Message::SelectCommandPaletteItem(absolute_idx)));
-    }
-
-    if total_items > list_height {
-        let mut scrollbar_state =
-            ScrollbarState::new(total_items.saturating_sub(1)).position(scroll_offset);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_style(Style::default().fg(theme.secondary).bg(theme.secondary))
-            .track_symbol(Some("│"))
-            .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓"));
-
-        frame.render_stateful_widget(scrollbar, layout[1], &mut scrollbar_state);
-    }
-}
-
-fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
-    if matches!(app.active_dialog, ActiveDialog::Help) {
-        render_help_overlay(frame);
-        return;
-    }
-
-    let (percent_x, percent_y) = match &app.active_dialog {
-        ActiveDialog::NewTask(_) => (80, 72),
-        ActiveDialog::DeleteTask(_) => (50, 50),
-        ActiveDialog::CategoryInput(_) => (50, 50),
-        ActiveDialog::DeleteCategory(_) => (50, 50),
-        ActiveDialog::WorktreeNotFound(_) => (60, 50),
-        ActiveDialog::RepoUnavailable(_) => (60, 50),
-        ActiveDialog::Error(_) => (60, 60),
-        ActiveDialog::CommandPalette(_) => command_palette_overlay_size(app.viewport),
-        ActiveDialog::NewProject(_) => (50, 30),
-        _ => (60, 20),
-    };
-
-    let title = match &app.active_dialog {
-        ActiveDialog::NewTask(_) => " New Task ",
-        ActiveDialog::CategoryInput(state) => match state.mode {
-            CategoryInputMode::Add => " Add Category ",
-            CategoryInputMode::Rename => " Rename Category ",
-        },
-        ActiveDialog::DeleteCategory(_) => " Delete Category ",
-        ActiveDialog::Error(_) => " Error ",
-        ActiveDialog::DeleteTask(_) => " Delete Task ",
-        ActiveDialog::CommandPalette(_) => " Command Palette ",
-        ActiveDialog::MoveTask(_) => " Move Task ",
-        ActiveDialog::WorktreeNotFound(_) => " Worktree Not Found ",
-        ActiveDialog::RepoUnavailable(_) => " Repo Unavailable ",
-        ActiveDialog::Help => " Help ",
-        ActiveDialog::NewProject(_) => " New Project ",
-        ActiveDialog::ConfirmQuit(_) => " Confirm Quit ",
-        ActiveDialog::None => "",
-    };
-
-    let anchor = match &app.active_dialog {
-        ActiveDialog::CommandPalette(_) => OverlayAnchor::Top,
-        _ => OverlayAnchor::Center,
-    };
-
-    let inner_area = render_overlay_frame(
-        frame,
-        OverlayConfig {
-            title,
-            anchor,
-            width_percent: percent_x,
-            height_percent: percent_y,
-        },
-    );
-
-    match &app.active_dialog {
-        ActiveDialog::CommandPalette(_) => {
-            render_command_palette(
-                frame,
-                inner_area,
-                app,
-                should_render_command_palette_results(app.viewport),
-            );
-        }
-        ActiveDialog::NewTask(state) => {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                ])
-                .split(inner_area);
-
-            let repo_name = if !app.repos.is_empty() {
-                if state.repo_input.trim().is_empty() {
-                    &app.repos[state.repo_idx].name
-                } else {
-                    &state.repo_input
-                }
-            } else if state.repo_input.trim().is_empty() {
-                "No repos found"
-            } else {
-                &state.repo_input
-            };
-            render_input_field(
-                frame,
-                layout[0],
-                "Repo (name or path)",
-                repo_name,
-                state.focused_field == NewTaskField::Repo,
-                is_area_hovered(layout[0], app),
-                true,
-            );
-            app.hit_test_map
-                .push((layout[0], Message::FocusNewTaskField(NewTaskField::Repo)));
-
-            render_input_field(
-                frame,
-                layout[1],
-                "Branch",
-                &state.branch_input,
-                state.focused_field == NewTaskField::Branch,
-                is_area_hovered(layout[1], app),
-                true,
-            );
-            app.hit_test_map
-                .push((layout[1], Message::FocusNewTaskField(NewTaskField::Branch)));
-
-            render_input_field(
-                frame,
-                layout[2],
-                "Base",
-                &state.base_input,
-                state.focused_field == NewTaskField::Base,
-                is_area_hovered(layout[2], app),
-                true,
-            );
-            app.hit_test_map
-                .push((layout[2], Message::FocusNewTaskField(NewTaskField::Base)));
-
-            render_input_field(
-                frame,
-                layout[3],
-                "Title",
-                &state.title_input,
-                state.focused_field == NewTaskField::Title,
-                is_area_hovered(layout[3], app),
-                true,
-            );
-            app.hit_test_map
-                .push((layout[3], Message::FocusNewTaskField(NewTaskField::Title)));
-
-            let checkbox_focused = state.focused_field == NewTaskField::EnsureBaseUpToDate;
-            render_checkbox(
-                frame,
-                layout[4],
-                "Ensure base branch up-to-date",
-                state.ensure_base_up_to_date,
-                checkbox_focused,
-                is_area_hovered(layout[4], app),
-            );
-            app.hit_test_map
-                .push((layout[4], Message::ToggleNewTaskCheckbox));
-
-            let button_layout = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(layout[5]);
-
-            render_button(
-                frame,
-                button_layout[0],
-                if state.loading_message.is_some() {
-                    "[ Creating... ]"
-                } else {
-                    "[ Create ]"
-                },
-                state.focused_field == NewTaskField::Create,
-                is_area_hovered(button_layout[0], app),
-            );
-            render_button(
-                frame,
-                button_layout[1],
-                "[ Cancel ]",
-                state.focused_field == NewTaskField::Cancel,
-                is_area_hovered(button_layout[1], app),
-            );
-
-            app.hit_test_map
-                .push((button_layout[0], Message::CreateTask));
-            app.hit_test_map
-                .push((button_layout[1], Message::DismissDialog));
-
-            if let Some(loading_message) = state.loading_message.as_deref() {
-                let loading_area = Rect {
-                    x: inner_area.x,
-                    y: inner_area.y + inner_area.height.saturating_sub(1),
-                    width: inner_area.width,
-                    height: 1,
-                };
-                frame.render_widget(
-                    Paragraph::new(loading_message).alignment(Alignment::Center),
-                    loading_area,
-                );
-            }
-        }
-        ActiveDialog::DeleteTask(state) => {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                ])
-                .split(inner_area);
-
-            let text = format!(
-                "Delete \"{}\"?\n({}:{})",
-                state.task_title, "repo", state.task_branch
-            );
-            frame.render_widget(Paragraph::new(text).alignment(Alignment::Center), layout[0]);
-
-            render_checkbox(
-                frame,
-                layout[1],
-                "Kill tmux session",
-                state.kill_tmux,
-                state.focused_field == DeleteTaskField::KillTmux,
-                is_area_hovered(layout[1], app),
-            );
-            render_checkbox(
-                frame,
-                layout[2],
-                "Remove worktree",
-                state.remove_worktree,
-                state.focused_field == DeleteTaskField::RemoveWorktree,
-                is_area_hovered(layout[2], app),
-            );
-            render_checkbox(
-                frame,
-                layout[3],
-                "Delete branch",
-                state.delete_branch,
-                state.focused_field == DeleteTaskField::DeleteBranch,
-                is_area_hovered(layout[3], app),
-            );
-
-            let button_layout = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(layout[4]);
-
-            render_button(
-                frame,
-                button_layout[0],
-                "[ Delete ]",
-                state.focused_field == DeleteTaskField::Delete,
-                is_area_hovered(button_layout[0], app),
-            );
-            render_button(
-                frame,
-                button_layout[1],
-                "[ Cancel ]",
-                state.focused_field == DeleteTaskField::Cancel,
-                is_area_hovered(button_layout[1], app),
-            );
-
-            app.hit_test_map.push((
-                layout[1],
-                Message::ToggleDeleteTaskCheckbox(DeleteTaskField::KillTmux),
-            ));
-            app.hit_test_map.push((
-                layout[2],
-                Message::ToggleDeleteTaskCheckbox(DeleteTaskField::RemoveWorktree),
-            ));
-            app.hit_test_map.push((
-                layout[3],
-                Message::ToggleDeleteTaskCheckbox(DeleteTaskField::DeleteBranch),
-            ));
-            app.hit_test_map
-                .push((button_layout[0], Message::ConfirmDeleteTask));
-            app.hit_test_map
-                .push((button_layout[1], Message::DismissDialog));
-        }
-        ActiveDialog::CategoryInput(state) => {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3),
-                    Constraint::Length(1),
-                    Constraint::Length(3),
-                ])
-                .split(inner_area);
-
-            render_input_field(
-                frame,
-                layout[0],
-                "Name",
-                &state.name_input,
-                state.focused_field == CategoryInputField::Name,
-                is_area_hovered(layout[0], app),
-                true,
-            );
-            app.hit_test_map.push((
-                layout[0],
-                Message::FocusCategoryInputField(CategoryInputField::Name),
-            ));
-
-            let buttons = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(layout[2]);
-
-            render_button(
-                frame,
-                buttons[0],
-                if state.mode == CategoryInputMode::Add {
-                    "[ Add ]"
-                } else {
-                    "[ Rename ]"
-                },
-                state.focused_field == CategoryInputField::Confirm,
-                is_area_hovered(buttons[0], app),
-            );
-            render_button(
-                frame,
-                buttons[1],
-                "[ Cancel ]",
-                state.focused_field == CategoryInputField::Cancel,
-                is_area_hovered(buttons[1], app),
-            );
-
-            app.hit_test_map
-                .push((buttons[0], Message::SubmitCategoryInput));
-            app.hit_test_map.push((buttons[1], Message::DismissDialog));
-        }
-        ActiveDialog::DeleteCategory(state) => {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(4), Constraint::Length(3)])
-                .split(inner_area);
-
-            let detail = if state.task_count == 0 {
-                format!("Delete category '{}' ?", state.category_name)
-            } else {
-                format!(
-                    "'{}' still has {} task(s).\nDeletion will fail.",
-                    state.category_name, state.task_count
-                )
-            };
-            frame.render_widget(
-                Paragraph::new(detail).alignment(Alignment::Center),
-                layout[0],
-            );
-
-            let buttons = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(layout[1]);
-
-            render_button(
-                frame,
-                buttons[0],
-                "[ Delete ]",
-                state.focused_field == DeleteCategoryField::Delete,
-                is_area_hovered(buttons[0], app),
-            );
-            render_button(
-                frame,
-                buttons[1],
-                "[ Cancel ]",
-                state.focused_field == DeleteCategoryField::Cancel,
-                is_area_hovered(buttons[1], app),
-            );
-
-            app.hit_test_map
-                .push((buttons[0], Message::ConfirmDeleteCategory));
-            app.hit_test_map.push((buttons[1], Message::DismissDialog));
-        }
-        ActiveDialog::Help => {}
-        ActiveDialog::WorktreeNotFound(state) => {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(5),
-                    Constraint::Length(1),
-                    Constraint::Length(3),
-                ])
-                .split(inner_area);
-
-            let text = format!(
-                "Worktree not found for \"{}\".\n\nRecreate?",
-                state.task_title
-            );
-            let paragraph = Paragraph::new(text)
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true });
-            frame.render_widget(paragraph, layout[0]);
-
-            let buttons = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(34),
-                    Constraint::Percentage(33),
-                    Constraint::Percentage(33),
-                ])
-                .split(layout[2]);
-
-            render_button(
-                frame,
-                buttons[0],
-                "[ Recreate ]",
-                state.focused_field == WorktreeNotFoundField::Recreate,
-                is_area_hovered(buttons[0], app),
-            );
-            render_button(
-                frame,
-                buttons[1],
-                "[ Mark as broken ]",
-                state.focused_field == WorktreeNotFoundField::MarkBroken,
-                is_area_hovered(buttons[1], app),
-            );
-            render_button(
-                frame,
-                buttons[2],
-                "[ Cancel ]",
-                state.focused_field == WorktreeNotFoundField::Cancel,
-                is_area_hovered(buttons[2], app),
-            );
-
-            app.hit_test_map
-                .push((buttons[0], Message::WorktreeNotFoundRecreate));
-            app.hit_test_map
-                .push((buttons[1], Message::WorktreeNotFoundMarkBroken));
-            app.hit_test_map.push((buttons[2], Message::DismissDialog));
-        }
-        ActiveDialog::RepoUnavailable(state) => {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(6), Constraint::Length(3)])
-                .split(inner_area);
-
-            let text = format!(
-                "Repo unavailable for \"{}\"\n\n{}",
-                state.task_title, state.repo_path
-            );
-            let paragraph = Paragraph::new(text)
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true });
-            frame.render_widget(paragraph, layout[0]);
-
-            render_button(
-                frame,
-                layout[1],
-                "[ Dismiss ]",
-                true,
-                is_area_hovered(layout[1], app),
-            );
-            app.hit_test_map
-                .push((layout[1], Message::RepoUnavailableDismiss));
-        }
-        ActiveDialog::Error(state) => {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(8), Constraint::Length(3)])
-                .split(inner_area);
-
-            let text = format!("{}\n\n{}", state.title, state.detail);
-            let paragraph = Paragraph::new(text)
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true });
-            frame.render_widget(paragraph, layout[0]);
-            render_button(
-                frame,
-                layout[1],
-                "[ Dismiss ]",
-                true,
-                is_area_hovered(layout[1], app),
-            );
-            app.hit_test_map.push((layout[1], Message::DismissDialog));
-        }
-        ActiveDialog::NewProject(state) => {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3),
-                    Constraint::Length(1),
-                    Constraint::Length(3),
-                ])
-                .split(inner_area);
-
-            render_input_field(
-                frame,
-                layout[0],
-                "Project Name",
-                &state.name_input,
-                state.focused_field == NewProjectField::Name,
-                is_area_hovered(layout[0], app),
-                true,
-            );
-            app.hit_test_map.push((
-                layout[0],
-                Message::FocusNewProjectField(NewProjectField::Name),
-            ));
-
-            let buttons = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(layout[2]);
-
-            render_button(
-                frame,
-                buttons[0],
-                "[ Create ]",
-                state.focused_field == NewProjectField::Create,
-                is_area_hovered(buttons[0], app),
-            );
-            render_button(
-                frame,
-                buttons[1],
-                "[ Cancel ]",
-                state.focused_field == NewProjectField::Cancel,
-                is_area_hovered(buttons[1], app),
-            );
-
-            app.hit_test_map.push((buttons[0], Message::CreateProject));
-            app.hit_test_map.push((buttons[1], Message::DismissDialog));
-        }
-        ActiveDialog::ConfirmQuit(state) => {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(4), Constraint::Length(3)])
-                .split(inner_area);
-
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "{} active tmux session(s) still running.\nQuit anyway?",
-                    state.active_session_count
-                ))
-                .alignment(Alignment::Center),
-                layout[0],
-            );
-
-            let buttons = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(layout[1]);
-            render_button(
-                frame,
-                buttons[0],
-                "[ Quit ]",
-                true,
-                is_area_hovered(buttons[0], app),
-            );
-            render_button(
-                frame,
-                buttons[1],
-                "[ Cancel ]",
-                false,
-                is_area_hovered(buttons[1], app),
-            );
-            app.hit_test_map.push((buttons[0], Message::ConfirmQuit));
-            app.hit_test_map.push((buttons[1], Message::CancelQuit));
-        }
-        ActiveDialog::MoveTask(_) => {
-            // MoveTask dialog handled in columns - this is a placeholder
-        }
-        ActiveDialog::None => {}
-    }
-}
-
 fn command_palette_overlay_size(viewport: (u16, u16)) -> (u16, u16) {
-    let width = if viewport.0 < 30 { 90 } else { 60 };
-    (width, 50)
+    if viewport.0 < 30 { (90, 50) } else { (60, 50) }
 }
 
 fn should_render_command_palette_results(viewport: (u16, u16)) -> bool {
     viewport.1 >= 10
-}
-
-fn render_input_field(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    label: &str,
-    value: &str,
-    is_focused: bool,
-    is_hovered: bool,
-    show_cursor: bool,
-) {
-    let theme = Theme::default();
-    let border_color = if is_focused {
-        theme.focus
-    } else if is_hovered {
-        theme.secondary
-    } else {
-        theme.task
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(label)
-        .style(Style::default().fg(border_color));
-
-    let paragraph = if show_cursor && is_focused {
-        let cursor_style = Style::default().bg(theme.focus).fg(Color::Black);
-        let text = Line::from(vec![Span::raw(value), Span::styled("█", cursor_style)]);
-        Paragraph::new(text).block(block)
-    } else {
-        Paragraph::new(value.to_string()).block(block)
-    };
-
-    frame.render_widget(paragraph, area);
-}
-
-fn is_area_hovered(area: Rect, app: &App) -> bool {
-    if let Some(mouse) = app.last_mouse_event {
-        let x = mouse.column;
-        let y = mouse.row;
-        x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height
-    } else {
-        false
-    }
-}
-
-fn render_button(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    label: &str,
-    is_focused: bool,
-    is_hovered: bool,
-) {
-    let theme = Theme::default();
-    let (bg, fg) = if is_focused {
-        (theme.focus, Color::Black)
-    } else if is_hovered {
-        (Color::DarkGray, theme.task)
-    } else {
-        (Color::Reset, theme.task)
-    };
-    let border_color = if is_focused || is_hovered {
-        theme.focus
-    } else {
-        theme.secondary
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(bg).fg(fg));
-    frame.render_widget(
-        Paragraph::new(label)
-            .alignment(Alignment::Center)
-            .block(block),
-        area,
-    );
-}
-
-fn render_checkbox(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    label: &str,
-    checked: bool,
-    is_focused: bool,
-    is_hovered: bool,
-) {
-    let theme = Theme::default();
-    let check_mark = if checked { "■ " } else { "□ " };
-
-    let (fg, bg, border_color) = if is_focused {
-        (theme.focus, Color::DarkGray, theme.focus)
-    } else if is_hovered {
-        (Color::Yellow, Color::DarkGray, Color::Yellow)
-    } else {
-        (theme.task, Color::Reset, theme.secondary)
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(bg));
-
-    let text = format!("{} {}", check_mark, label);
-    let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(fg))
-        .alignment(Alignment::Center)
-        .block(block);
-
-    frame.render_widget(paragraph, area);
-}
-
-fn render_help_overlay(frame: &mut Frame<'_>) {
-    let theme = Theme::default();
-    let inner = render_overlay_frame(
-        frame,
-        OverlayConfig {
-            title: " Help ",
-            anchor: OverlayAnchor::Center,
-            width_percent: 70,
-            height_percent: 80,
-        },
-    );
-    let text = [
-        "Navigation",
-        "  h/l or arrows: switch columns",
-        "  j/k or arrows: select task",
-        "Task Actions",
-        "  n: new task",
-        "  Enter: attach selected task",
-        "  in task session: Prefix+K returns to previous session",
-        "  J/K: move selected task in column",
-        "Category Management",
-        "  c: add category",
-        "  r: rename category",
-        "  x: delete category",
-        "  H/L: move focused category",
-        "Mouse",
-        "  left click: focus column or task",
-        "  scroll: move through focused column",
-        "  click outside this panel: dismiss",
-        "General",
-        "  Ctrl+P: open command palette",
-        "  ?: toggle help",
-        "  Esc: dismiss",
-        "  q: quit (asks confirmation if sessions are active)",
-    ]
-    .join("\n");
-
-    frame.render_widget(
-        Paragraph::new(text).style(Style::default().fg(theme.task)),
-        inner,
-    );
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -1617,72 +1122,17 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-fn render_context_menu(frame: &mut Frame<'_>, app: &App, menu: &crate::app::ContextMenuState) {
-    use crate::app::ContextMenuItem;
-
-    let theme = Theme::default();
-    let viewport = app.viewport;
-
-    let menu_width = 15u16;
-    let menu_height = menu.items.len() as u16;
-
-    let mut x = menu.position.0;
-    let mut y = menu.position.1;
-
-    if x + menu_width > viewport.0 {
-        x = viewport.0.saturating_sub(menu_width);
-    }
-    if y + menu_height > viewport.1 {
-        y = viewport.1.saturating_sub(menu_height);
-    }
-
-    let menu_rect = Rect::new(x, y, menu_width, menu_height);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.focus))
-        .style(Style::default().bg(Color::Black));
-    frame.render_widget(block, menu_rect);
-
-    let is_hovered = |idx: usize| -> bool {
-        if let Some(mouse) = app.last_mouse_event {
-            let mouse_y = mouse.row;
-            mouse_y == y + idx as u16
-        } else {
-            false
-        }
-    };
-
-    for (i, item) in menu.items.iter().enumerate() {
-        let item_y = y + i as u16;
-        let item_rect = Rect::new(x, item_y, menu_width, 1);
-
-        let label = match item {
-            ContextMenuItem::Attach => " Attach ",
-            ContextMenuItem::Delete => " Delete ",
-            ContextMenuItem::Move => " Move ",
-        };
-
-        let is_selected = i == menu.selected_index;
-        let hover = is_hovered(i);
-
-        let (bg, fg) = if is_selected || hover {
-            (theme.focus, Color::Black)
-        } else {
-            (Color::Black, theme.task)
-        };
-
-        let text = Paragraph::new(label)
-            .alignment(Alignment::Left)
-            .style(Style::default().bg(bg).fg(fg));
-        frame.render_widget(text, item_rect);
-    }
+fn inset_rect(area: Rect, horizontal: u16, vertical: u16) -> Rect {
+    let x = area.x.saturating_add(horizontal);
+    let y = area.y.saturating_add(vertical);
+    let width = area.width.saturating_sub(horizontal.saturating_mul(2));
+    let height = area.height.saturating_sub(vertical.saturating_mul(2));
+    Rect::new(x, y, width, height)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::layout::Rect;
 
     #[test]
     fn test_calculate_overlay_area_center() {

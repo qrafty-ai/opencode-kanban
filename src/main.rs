@@ -1,20 +1,28 @@
-use std::{io, panic, process::Command, time::Duration};
+use std::{
+    io, panic,
+    process::Command,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture},
+    event::DisableMouseCapture,
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{LeaveAlternateScreen, disable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use tuirealm::{
+    PollStrategy,
+    terminal::{CrosstermTerminalAdapter, TerminalBridge},
+};
 
 use opencode_kanban::{
     app::App,
-    input::event_to_message,
     logging::{init_logging, print_log_location},
+    realm::{RootId, apply_message, init_application, should_quit},
+    theme::ThemePreset,
     tmux::{ensure_tmux_installed, tmux_session_exists},
-    ui,
 };
 
 #[derive(Parser, Debug)]
@@ -28,6 +36,9 @@ use opencode_kanban::{
 struct Cli {
     #[arg(short, long, value_name = "PROJECT")]
     project: Option<String>,
+
+    #[arg(long, value_name = "PRESET")]
+    theme: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -50,30 +61,33 @@ fn run_app() -> Result<()> {
     let _guard = TerminalGuard;
 
     let project_name = cli.project.as_deref();
-    let mut app = App::new(project_name)?;
+    let preset = cli
+        .theme
+        .as_deref()
+        .and_then(|value| ThemePreset::from_str(value).ok())
+        .unwrap_or_default();
+    let app = Arc::new(Mutex::new(App::new_with_theme(project_name, preset)?));
+    let mut realm = init_application(Arc::clone(&app))?;
 
-    let mut last_tick = std::time::Instant::now();
-    let tick_rate = Duration::from_millis(500);
-
-    while !app.should_quit() {
-        terminal
-            .draw(|frame| ui::render(frame, &mut app))
-            .context("failed to render frame")?;
-
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
-
-        if event::poll(timeout.min(Duration::from_millis(100))).context("failed to poll events")? {
-            let event = event::read().context("failed to read terminal event")?;
-            if let Some(message) = event_to_message(event) {
-                app.update(message)?;
-            }
+    let mut redraw = true;
+    while !should_quit(&app)? {
+        if redraw {
+            terminal
+                .draw(|frame| realm.view(&RootId::Root, frame, frame.area()))
+                .context("failed to render frame")?;
+            redraw = false;
         }
 
-        if last_tick.elapsed() >= tick_rate {
-            app.update(opencode_kanban::app::Message::Tick)?;
-            last_tick = std::time::Instant::now();
+        let messages = realm
+            .tick(PollStrategy::Once)
+            .context("failed to process tui-realm tick")?;
+
+        if !messages.is_empty() {
+            redraw = true;
+        }
+
+        for message in messages {
+            apply_message(&app, message)?;
         }
     }
 
@@ -122,14 +136,14 @@ fn validate_runtime_environment() -> Result<()> {
     Ok(())
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
-    enable_raw_mode().context("failed to enable raw mode")?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("failed to enter alternate screen")?;
+fn setup_terminal() -> Result<TerminalBridge<CrosstermTerminalAdapter>> {
+    let mut terminal =
+        TerminalBridge::init_crossterm().context("failed to initialize terminal bridge")?;
+    terminal
+        .enable_mouse_capture()
+        .context("failed to enable mouse capture")?;
 
-    let backend = CrosstermBackend::new(stdout);
-    Terminal::new(backend).context("failed to create terminal")
+    Ok(terminal)
 }
 
 fn install_panic_hook_with_log(log_path: std::path::PathBuf) {
