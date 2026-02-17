@@ -13,7 +13,8 @@ use tuirealm::{
 };
 
 use crate::app::{
-    ActiveDialog, App, CategoryInputMode, DeleteTaskField, NewTaskField, View, ViewMode,
+    ActiveDialog, App, CategoryInputMode, DeleteTaskField, NewTaskField, STATUS_BROKEN,
+    STATUS_REPO_UNAVAILABLE, View, ViewMode,
 };
 use crate::command_palette::all_commands;
 use crate::theme::{Theme, parse_color};
@@ -169,27 +170,40 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
     for (slot, (column_idx, category)) in sorted_categories(app).into_iter().enumerate() {
         let mut rows = TableBuilder::default();
         let tasks = tasks_for_category(app, category.id);
+        let row_count = if tasks.is_empty() {
+            1
+        } else {
+            tasks.iter().map(task_tile_lines).sum()
+        };
 
-        for task in &tasks {
-            let status = task.tmux_status.clone();
-            let title = format!("{} [{}]", task.title, status);
-            rows.add_col(TextSpan::from(title))
-                .add_col(TextSpan::from(task.branch.clone()))
-                .add_row();
-        }
-
-        if tasks.is_empty() {
-            rows.add_col(TextSpan::from("No tasks"))
-                .add_col(TextSpan::from(""))
-                .add_row();
-        }
-
-        let selected = app
+        let selected_task = app
             .selected_task_per_column
             .get(&column_idx)
             .copied()
             .unwrap_or(0)
             .min(tasks.len().saturating_sub(1));
+
+        let tile_width = list_inner_width(columns[slot]);
+        for (task_index, task) in tasks.iter().enumerate() {
+            append_task_tile_rows(
+                &mut rows,
+                app,
+                task,
+                task_index == selected_task,
+                tile_width,
+            );
+        }
+
+        if tasks.is_empty() {
+            rows.add_col(TextSpan::from("No tasks")).add_row();
+        }
+
+        let selected_line = tasks
+            .iter()
+            .take(selected_task)
+            .map(task_tile_lines)
+            .sum::<usize>()
+            .min(row_count.saturating_sub(1));
 
         let accent = category
             .color
@@ -197,26 +211,22 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .and_then(parse_color)
             .unwrap_or(theme.column);
 
-        let mut table = Table::default()
+        let mut list = List::default()
             .title(
                 format!("{} ({})", category.name, tasks.len()),
                 Alignment::Left,
             )
             .borders(rounded_borders(accent))
-            .foreground(accent)
-            .highlighted_color(theme.focus)
-            .highlighted_str("> ")
-            .headers(["Task", "Branch"])
-            .widths(&[72, 28])
+            .foreground(theme.task)
             .scroll(true)
-            .table(rows.build())
-            .selected_line(selected)
+            .rows(rows.build())
+            .selected_line(selected_line)
             .inactive(Style::default().fg(theme.secondary));
-        table.attr(
+        list.attr(
             Attribute::Focus,
             AttrValue::Flag(column_idx == app.focused_column),
         );
-        table.view(frame, columns[slot]);
+        list.view(frame, columns[slot]);
     }
 }
 
@@ -248,27 +258,39 @@ fn render_side_panel_list(
 ) {
     let theme = Theme::default();
     let mut rows = TableBuilder::default();
-    for (category_name, task) in entries {
-        rows.add_col(TextSpan::from(task.title.clone()))
-            .add_col(TextSpan::from(category_name.clone()))
-            .add_row();
+    let row_count = if entries.is_empty() {
+        1
+    } else {
+        entries.iter().map(|(_, task)| task_tile_lines(task)).sum()
+    };
+    let selected_task = app.selected_task_index.min(entries.len().saturating_sub(1));
+    let tile_width = list_inner_width(area);
+    for (task_index, (_, task)) in entries.iter().enumerate() {
+        append_task_tile_rows(
+            &mut rows,
+            app,
+            task,
+            task_index == selected_task,
+            tile_width,
+        );
     }
 
-    let selected = app.selected_task_index.min(entries.len().saturating_sub(1));
-    let mut table = Table::default()
+    let selected_line = entries
+        .iter()
+        .take(selected_task)
+        .map(|(_, task)| task_tile_lines(task))
+        .sum::<usize>()
+        .min(row_count.saturating_sub(1));
+    let mut list = List::default()
         .title("Tasks", Alignment::Left)
         .borders(rounded_borders(theme.focus))
         .foreground(theme.task)
-        .highlighted_color(theme.focus)
-        .highlighted_str("> ")
-        .headers(["Task", "Category"])
-        .widths(&[65, 35])
         .scroll(true)
-        .table(rows.build())
-        .selected_line(selected)
+        .rows(rows.build())
+        .selected_line(selected_line)
         .inactive(Style::default().fg(theme.secondary));
-    table.attr(Attribute::Focus, AttrValue::Flag(true));
-    table.view(frame, area);
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, area);
 }
 
 fn render_side_panel_details(
@@ -292,7 +314,10 @@ fn render_side_panel_details(
         TextSpan::from(format!("Title: {}", task.title)),
         TextSpan::from(format!("Branch: {}", task.branch)),
         TextSpan::from(format!("Repo: {}", repo_name)),
-        TextSpan::from(format!("Status: {}", task.tmux_status)),
+        TextSpan::from(format!(
+            "Status: {}",
+            status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase)
+        )),
         TextSpan::from(format!(
             "Worktree: {}",
             task.worktree_path.as_deref().unwrap_or("n/a")
@@ -821,6 +846,163 @@ fn sorted_categories(app: &App) -> Vec<(usize, &Category)> {
     let mut categories: Vec<(usize, &Category)> = app.categories.iter().enumerate().collect();
     categories.sort_by_key(|(_, category)| category.position);
     categories
+}
+
+const TASK_TITLE_MAX: usize = 34;
+const TASK_REPO_MAX: usize = 18;
+const TASK_BRANCH_MAX: usize = 34;
+
+fn task_tile_lines(_task: &Task) -> usize {
+    5
+}
+
+fn append_task_tile_rows(
+    rows: &mut TableBuilder,
+    app: &App,
+    task: &Task,
+    is_selected: bool,
+    tile_width: usize,
+) {
+    let theme = Theme::default();
+    let bg = tile_background(is_selected);
+    let border = if is_selected {
+        Color::LightCyan
+    } else {
+        Color::DarkGray
+    };
+    let inner_width = tile_width.saturating_sub(2).max(4);
+
+    let top = format!("┌{}┐", "─".repeat(inner_width));
+    rows.add_col(TextSpan::new(top).fg(border).bg(bg)).add_row();
+
+    let status_line = pad_to_width(
+        &format!(" {}", task_tile_status_line(app, task)),
+        inner_width,
+    );
+    rows.add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_col(
+            TextSpan::new(status_line)
+                .fg(task_status_color(task.tmux_status.as_str()))
+                .bg(bg)
+                .bold(),
+        )
+        .add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_row();
+
+    let title_line = pad_to_width(&format!(" {}", task_tile_title(task)), inner_width);
+    rows.add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_col(TextSpan::new(title_line).fg(theme.task).bg(bg).bold())
+        .add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_row();
+
+    let repo = task_tile_repo(app, task);
+    let branch = task_tile_branch(task);
+    let used = 1 + count_chars(&repo) + 1 + count_chars(&branch);
+    let filler = inner_width.saturating_sub(used);
+
+    rows.add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_col(TextSpan::new(" ").bg(bg))
+        .add_col(TextSpan::new(repo).fg(Color::LightCyan).bg(bg))
+        .add_col(TextSpan::new(":").fg(theme.secondary).bg(bg))
+        .add_col(TextSpan::new(branch).fg(Color::LightYellow).bg(bg))
+        .add_col(TextSpan::new(" ".repeat(filler)).bg(bg))
+        .add_col(TextSpan::new("│").fg(border).bg(bg))
+        .add_row();
+
+    let bottom = format!("└{}┘", "─".repeat(inner_width));
+    rows.add_col(TextSpan::new(bottom).fg(border).bg(bg))
+        .add_row();
+}
+
+fn task_tile_status_line(app: &App, task: &Task) -> String {
+    let spinner = status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase);
+    match task.session_todo_summary() {
+        Some((done, total)) => format!("{spinner}  todo {done}/{total}"),
+        None => spinner.to_string(),
+    }
+}
+
+fn task_tile_title(task: &Task) -> String {
+    clamp_text(task.title.as_str(), TASK_TITLE_MAX)
+}
+
+fn task_tile_repo(app: &App, task: &Task) -> String {
+    let repo = app
+        .repos
+        .iter()
+        .find(|repo| repo.id == task.repo_id)
+        .map(|repo| repo.name.as_str())
+        .unwrap_or("unknown");
+    clamp_text(repo, TASK_REPO_MAX)
+}
+
+fn task_tile_branch(task: &Task) -> String {
+    clamp_text(task.branch.as_str(), TASK_BRANCH_MAX)
+}
+
+fn list_inner_width(area: Rect) -> usize {
+    area.width.saturating_sub(2) as usize
+}
+
+fn count_chars(value: &str) -> usize {
+    value.chars().count()
+}
+
+fn pad_to_width(value: &str, width: usize) -> String {
+    let len = count_chars(value);
+    if len >= width {
+        return clamp_text(value, width);
+    }
+    format!("{}{}", value, " ".repeat(width - len))
+}
+
+fn tile_background(is_selected: bool) -> Color {
+    if is_selected {
+        Color::Rgb(40, 46, 66)
+    } else {
+        Color::Reset
+    }
+}
+
+fn task_status_color(status: &str) -> Color {
+    match status {
+        "running" => Color::LightGreen,
+        "waiting" => Color::Yellow,
+        "idle" => Color::Gray,
+        "dead" => Color::Red,
+        STATUS_BROKEN => Color::LightRed,
+        STATUS_REPO_UNAVAILABLE => Color::Red,
+        _ => Color::White,
+    }
+}
+
+fn clamp_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return "...".to_string();
+    }
+    let mut shortened = value.chars().take(max_chars - 3).collect::<String>();
+    shortened.push_str("...");
+    shortened
+}
+
+fn status_spinner_ascii(status: &str, pulse_phase: u8) -> &'static str {
+    match status {
+        "running" => match pulse_phase % 4 {
+            0 => ".:",
+            1 => "::",
+            2 => ":.",
+            _ => "..",
+        },
+        "waiting" => "..",
+        "idle" => "--",
+        "dead" => "xx",
+        STATUS_BROKEN => "!!",
+        STATUS_REPO_UNAVAILABLE => "!!",
+        _ => "..",
+    }
 }
 
 fn rounded_borders(color: Color) -> Borders {

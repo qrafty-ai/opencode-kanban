@@ -48,6 +48,7 @@ use self::state::{AttachTaskResult, CreateTaskOutcome, DesiredTaskState, Observe
 
 pub struct App {
     pub should_quit: bool,
+    pub pulse_phase: u8,
     pub layout_epoch: u64,
     pub viewport: (u16, u16),
     pub last_mouse_event: Option<MouseEvent>,
@@ -97,6 +98,7 @@ impl App {
 
         let mut app = Self {
             should_quit: false,
+            pulse_phase: 0,
             layout_epoch: 0,
             viewport: (80, 24),
             last_mouse_event: None,
@@ -241,6 +243,7 @@ impl App {
             Message::Key(key) => self.handle_key(key)?,
             Message::Mouse(mouse) => self.handle_mouse(mouse)?,
             Message::Tick => {
+                self.pulse_phase = (self.pulse_phase + 1) % 4;
                 self.refresh_data()?;
 
                 if self.view_mode == ViewMode::SidePanel {
