@@ -50,6 +50,7 @@ Rust TUI kanban board for managing git worktrees and OpenCode sessions, orchestr
 
 ## CONVENTIONS (THIS PROJECT)
 - **Never use `sh -c`**: always `Command::new().args([])`
+- **HTTP requests**: use `reqwest` (or another request library) instead of manual raw HTTP request construction whenever possible
 - **Tmux socket**: use `-L opencode-kanban` for task sessions (default socket for kanban)
 - **TDD**: unit tests in `mod tests` blocks, integration in `tests/`
 - **No auto-attach**: task creation does NOT switch tmux client; user presses Enter to attach
