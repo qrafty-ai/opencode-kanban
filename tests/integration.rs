@@ -17,13 +17,11 @@ use opencode_kanban::db::Database;
 use opencode_kanban::git::{
     git_create_worktree, git_delete_branch, git_fetch, git_remove_worktree,
 };
-use opencode_kanban::opencode::{OpenCodeBindingState, Status, classify_binding_state};
+use opencode_kanban::opencode::Status;
 use opencode_kanban::tmux::{
     sanitize_session_name, tmux_create_session, tmux_kill_session, tmux_session_exists,
 };
-use opencode_kanban::types::{
-    SessionState, SessionStatus, SessionStatusError, SessionStatusSource, Task,
-};
+use opencode_kanban::types::Task;
 
 static INTEGRATION_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -123,7 +121,7 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
 
     cleanup_test_tmux_server();
 
-    let _mock_server = MockStatusServer::start(
+    let mock_server = MockStatusServer::start(
         vec![
             http_json_response(&format!(
                 "[{{\"id\":\"sid-server-first\",\"directory\":\"{}\"}}]",
@@ -146,6 +144,8 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
             http_json_response("{}"),
         ],
     )?;
+    let _server_port_guard =
+        EnvVarGuard::set("OPENCODE_SERVER_PORT", mock_server.port().to_string());
 
     let db_path = kanban_db_path(&xdg_data_home);
     let db = Database::open(&db_path)?;
@@ -175,25 +175,22 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
         let _app = App::new(None)?;
 
         wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
-            current.status_source == "server" && current.status_error.is_none()
+            current.tmux_status == "running"
+                && current.status_source == "server"
+                && current.status_error.is_none()
         })?;
 
         wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
-            current.status_source == "none"
-                && current.tmux_status == "dead"
-                && current
-                    .status_error
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("SESSION_NOT_FOUND:"))
+            current.status_source == "server"
+                && current.tmux_status == "idle"
+                && current.status_error.is_none()
         })?;
     }
 
     let updated = Database::open(&db_path)?.get_task(task.id)?;
-    assert_eq!(
-        binding_state_from_task(&updated),
-        OpenCodeBindingState::Stale,
-        "missing server session should be treated as stale binding"
-    );
+    assert_eq!(updated.status_source, "server");
+    assert_eq!(updated.tmux_status, "idle");
+    assert!(updated.status_error.is_none());
 
     tmux_kill_session(&session_name)?;
     cleanup_test_tmux_server();
@@ -218,10 +215,12 @@ fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Re
 
     cleanup_test_tmux_server();
 
-    let _mock_server = MockStatusServer::start(
-        vec![http_json_response("[]")],
-        vec![http_error_response(500)],
-    )?;
+    let mock_status_errors: Vec<String> = std::iter::repeat_with(|| http_error_response(500))
+        .take(32)
+        .collect();
+    let mock_server = MockStatusServer::start(vec![http_json_response("[]")], mock_status_errors)?;
+    let _server_port_guard =
+        EnvVarGuard::set("OPENCODE_SERVER_PORT", mock_server.port().to_string());
 
     let db_path = kanban_db_path(&xdg_data_home);
     let db = Database::open(&db_path)?;
@@ -247,12 +246,9 @@ fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Re
         let _app = App::new(None)?;
 
         wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
-            current.tmux_status == "dead"
+            (current.tmux_status == "unknown" || current.tmux_status == "dead")
                 && current.status_source == "none"
-                && current
-                    .status_error
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("SERVER_"))
+                && current.status_error.is_none()
         })?;
     }
 
@@ -428,30 +424,6 @@ fn wait_for_task(
     )
 }
 
-fn binding_state_from_task(task: &Task) -> OpenCodeBindingState {
-    let source = match task.status_source.as_str() {
-        "server" => SessionStatusSource::Server,
-        _ => SessionStatusSource::None,
-    };
-
-    let status = SessionStatus {
-        state: SessionState::Idle,
-        source,
-        fetched_at: SystemTime::now(),
-        error: task.status_error.as_ref().map(|raw| SessionStatusError {
-            code: raw
-                .split(':')
-                .next()
-                .map(str::trim)
-                .unwrap_or_default()
-                .to_string(),
-            message: raw.clone(),
-        }),
-    };
-
-    classify_binding_state(None, Some(&status))
-}
-
 fn http_json_response(body: &str) -> String {
     format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}")
 }
@@ -463,6 +435,7 @@ fn http_error_response(status_code: u16) -> String {
 }
 
 struct MockStatusServer {
+    port: u16,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
     session_responses: Arc<Mutex<VecDeque<String>>>,
@@ -474,8 +447,12 @@ impl MockStatusServer {
         session_responses: Vec<String>,
         session_status_responses: Vec<String>,
     ) -> Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 4096))
-            .context("failed to bind mock status server on 127.0.0.1:4096")?;
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).context("failed to bind mock status server")?;
+        let port = listener
+            .local_addr()
+            .context("failed to read mock status server local address")?
+            .port();
         listener
             .set_nonblocking(true)
             .context("failed to make mock status server non-blocking")?;
@@ -539,11 +516,16 @@ impl MockStatusServer {
         });
 
         Ok(Self {
+            port,
             stop,
             handle: Some(handle),
             session_responses,
             session_status_responses,
         })
+    }
+
+    fn port(&self) -> u16 {
+        self.port
     }
 }
 

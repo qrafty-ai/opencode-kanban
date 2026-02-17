@@ -1,0 +1,110 @@
+# Keybinding Configuration
+# Default keybindings for opencode-kanban TUI application
+#
+# Key syntax: simple keys (a, b, enter), modifiers (ctrl-c, shift-enter)
+# Arrow keys: left, right, up, down
+# Special: esc, enter, space, tab, backspace
+
+# =============================================================================
+# Navigation - Column and task selection
+# =============================================================================
+[navigation]
+# Move focus to previous column (left)
+move_left = "h"
+move_left_alt = "left"
+
+# Move focus to next column (right)
+move_right = "l"
+move_right_alt = "right"
+
+# Select previous task (up)
+select_up = "k"
+select_up_alt = "up"
+
+# Select next task (down)
+select_down = "j"
+select_down_alt = "down"
+
+# Move focused category left
+category_move_left = "H"
+
+# Move focused category right
+category_move_right = "L"
+
+# Reorder task up within column
+task_move_up = "K"
+
+# Reorder task down within column
+task_move_down = "J"
+
+# =============================================================================
+# Task Actions - Create, attach, delete tasks
+# =============================================================================
+[tasks]
+# Open new task dialog
+new_task = "n"
+
+# Attach to selected task (tmux session)
+attach = "enter"
+attach_alt = "ctrl-e"
+
+# Open delete task confirmation
+delete_task = "d"
+
+# =============================================================================
+# Category Actions - Add, rename, delete categories
+# =============================================================================
+[categories]
+# Add new category
+add = "c"
+
+# Rename category
+rename = "r"
+
+# Delete category
+delete = "x"
+
+# Cycle category color
+cycle_color = "t"
+
+# =============================================================================
+# Dialog Actions - Command palette, help, quit
+# =============================================================================
+[dialogs]
+# Open command palette (fuzzy search)
+command_palette = "ctrl-p"
+
+# Toggle help overlay
+help = "?"
+
+# Dismiss current dialog
+dismiss = "esc"
+dismiss_alt = "ctrl-c"
+
+# Confirm action (generic)
+confirm = "enter"
+
+# Cancel action (generic)
+cancel = "esc"
+
+# =============================================================================
+# Global - Application-wide actions
+# =============================================================================
+[global]
+# Quit application
+quit = "q"
+
+# Return to previous tmux session (Prefix+K pattern, mapped to single key)
+return_tmux = "ctrl-k"
+
+# Switch to project list view
+project_list = "ctrl-o"
+
+# Toggle between kanban and side panel views
+toggle_view = "\\"
+
+# Submit form / confirm input
+submit = "enter"
+
+# Toggle checkbox
+toggle_checkbox = "space"

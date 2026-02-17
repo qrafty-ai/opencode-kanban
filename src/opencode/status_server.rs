@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, SystemTime};
@@ -9,6 +10,16 @@ use urlencoding::encode;
 use crate::types::{SessionState, SessionStatus, SessionStatusError, SessionStatusSource};
 
 use super::StatusProvider;
+
+const DEFAULT_SERVER_PORT: u16 = 4096;
+
+fn default_server_port() -> u16 {
+    env::var("OPENCODE_SERVER_PORT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .unwrap_or(DEFAULT_SERVER_PORT)
+}
 
 #[derive(Debug, Clone)]
 pub struct ServerStatusProvider {
@@ -26,7 +37,7 @@ impl Default for ServerStatusConfig {
     fn default() -> Self {
         Self {
             hostname: "127.0.0.1".to_string(),
-            port: 4096,
+            port: default_server_port(),
             request_timeout: Duration::from_millis(300),
         }
     }

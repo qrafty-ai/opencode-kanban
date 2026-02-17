@@ -1,9 +1,20 @@
+use std::env;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+const DEFAULT_SERVER_PORT: u16 = 4096;
+
+fn default_server_port() -> u16 {
+    env::var("OPENCODE_SERVER_PORT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .unwrap_or(DEFAULT_SERVER_PORT)
+}
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub enum OpenCodeServerState {
@@ -55,7 +66,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             hostname: "127.0.0.1".to_string(),
-            port: 4096,
+            port: default_server_port(),
             request_timeout: Duration::from_millis(300),
             startup_timeout: Duration::from_secs(5),
             initial_backoff: Duration::from_millis(100),

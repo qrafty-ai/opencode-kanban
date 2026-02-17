@@ -1,21 +1,122 @@
-use std::{io, panic, process::Command, time::Duration};
+use std::{panic, path::PathBuf, process::Command, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+use tuirealm::terminal::TerminalBridge;
+use tuirealm::{
+    AttrValue, Attribute, Component, Event, Frame, MockComponent, NoUserEvent, PollStrategy, State,
+    Sub, SubClause, SubEventClause, Update,
+    command::{Cmd, CmdResult},
+    event::{Key, KeyEvent, KeyModifiers},
+    listener::EventListenerCfg,
+    tui::layout::Rect,
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
 
 use opencode_kanban::{
-    app::App,
-    input::event_to_message,
+    db::Database,
     logging::{init_logging, print_log_location},
+    projects,
     tmux::{ensure_tmux_installed, tmux_session_exists},
-    ui,
+    ui_realm::{
+        ComponentId, application::TuiApplication, components::Footer, messages::Msg, model::Model,
+    },
 };
+
+struct GlobalHotkeysFooter {
+    inner: Footer,
+}
+
+impl GlobalHotkeysFooter {
+    fn new() -> Self {
+        Self {
+            inner: Footer::new(),
+        }
+    }
+}
+
+impl MockComponent for GlobalHotkeysFooter {
+    fn view(&mut self, frame: &mut Frame, area: Rect) {
+        self.inner.view(frame, area);
+    }
+
+    fn query(&self, attr: Attribute) -> Option<AttrValue> {
+        self.inner.query(attr)
+    }
+
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        self.inner.attr(attr, value);
+    }
+
+    fn state(&self) -> State {
+        self.inner.state()
+    }
+
+    fn perform(&mut self, cmd: Cmd) -> CmdResult {
+        self.inner.perform(cmd)
+    }
+}
+
+impl Component<Msg, NoUserEvent> for GlobalHotkeysFooter {
+    fn on(&mut self, ev: Event<NoUserEvent>) -> Option<Msg> {
+        match ev {
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('q'),
+                ..
+            })
+            | Event::Keyboard(KeyEvent {
+                code: Key::Char('Q'),
+                ..
+            }) => Some(Msg::ConfirmQuit),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('c'),
+                modifiers,
+            }) if modifiers.contains(KeyModifiers::CONTROL) => Some(Msg::ConfirmQuit),
+            _ => self.inner.on(ev),
+        }
+    }
+}
+
+/// RAII guard for TerminalBridge cleanup.
+/// Ensures terminal is restored even on early error returns.
+struct TerminalGuard {
+    bridge: Option<TerminalBridge>,
+}
+
+impl TerminalGuard {
+    fn new() -> Result<Self> {
+        let bridge = TerminalBridge::new().context("failed to initialize terminal")?;
+        Ok(Self {
+            bridge: Some(bridge),
+        })
+    }
+
+    fn initialize(&mut self) -> Result<()> {
+        let bridge = self
+            .bridge
+            .as_mut()
+            .context("TerminalGuard already taken")?;
+        bridge
+            .enable_raw_mode()
+            .context("failed to enable raw mode")?;
+        bridge
+            .enter_alternate_screen()
+            .context("failed to enter alternate screen")?;
+        Ok(())
+    }
+
+    fn take(&mut self) -> TerminalBridge {
+        self.bridge.take().expect("TerminalGuard already taken")
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if let Some(mut bridge) = self.bridge.take() {
+            let _ = bridge.leave_alternate_screen();
+            let _ = bridge.disable_raw_mode();
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -46,38 +147,127 @@ fn run_app() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let mut terminal = setup_terminal()?;
-    let _guard = TerminalGuard;
+    // RAII guard ensures terminal cleanup on all error paths
+    let mut guard = TerminalGuard::new()?;
+    guard.initialize()?;
 
-    let project_name = cli.project.as_deref();
-    let mut app = App::new(project_name)?;
+    let model_path = resolve_model_db_path(cli.project.as_deref())?;
+    let db = Database::open(&model_path).context("failed to open model database")?;
+    let mut model = Model::new(db).context("failed to initialize model")?;
 
-    let mut last_tick = std::time::Instant::now();
-    let tick_rate = Duration::from_millis(500);
+    let listener_cfg = EventListenerCfg::default()
+        .default_input_listener(Duration::from_millis(16))
+        .poll_timeout(Duration::from_millis(16))
+        .tick_interval(Duration::from_millis(250));
+    let mut tui_app = TuiApplication::with_listener(listener_cfg);
+    tui_app
+        .wire_components(&model)
+        .context("failed to wire tui-realm components")?;
+    tui_app
+        .app_mut()
+        .remount(
+            ComponentId::Footer,
+            Box::new(GlobalHotkeysFooter::new()),
+            vec![
+                Sub::new(
+                    SubEventClause::Keyboard(KeyEvent::from(Key::Char('q'))),
+                    SubClause::Always,
+                ),
+                Sub::new(
+                    SubEventClause::Keyboard(KeyEvent::from(Key::Char('Q'))),
+                    SubClause::Always,
+                ),
+                Sub::new(
+                    SubEventClause::Keyboard(KeyEvent::new(Key::Char('c'), KeyModifiers::CONTROL)),
+                    SubClause::Always,
+                ),
+            ],
+        )
+        .context("failed to register global hotkeys")?;
+    tui_app
+        .app_mut()
+        .active(&ComponentId::ProjectList)
+        .context("failed to set initial active component")?;
 
-    while !app.should_quit() {
-        terminal
-            .draw(|frame| ui::render(frame, &mut app))
+    let mut should_quit = false;
+    while !should_quit {
+        let messages = tui_app
+            .tick(PollStrategy::UpTo(8))
+            .context("failed during tui tick")?;
+        should_quit =
+            should_quit || update_model_from_messages(&mut model, &mut tui_app, messages)?;
+
+        let active_component = tui_app
+            .app()
+            .focus()
+            .copied()
+            .unwrap_or(ComponentId::ProjectList);
+
+        let bridge = guard
+            .bridge
+            .as_mut()
+            .context("TerminalGuard already taken")?;
+        bridge
+            .raw_mut()
+            .draw(|frame| tui_app.view(&active_component, frame, frame.size()))
             .context("failed to render frame")?;
+    }
 
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
+    // Explicit cleanup via guard (RAII will also cleanup on any error)
+    let mut bridge = guard.take();
+    bridge
+        .leave_alternate_screen()
+        .context("failed to leave alternate screen")?;
+    bridge
+        .disable_raw_mode()
+        .context("failed to disable raw mode")?;
 
-        if event::poll(timeout.min(Duration::from_millis(100))).context("failed to poll events")? {
-            let event = event::read().context("failed to read terminal event")?;
-            if let Some(message) = event_to_message(event) {
-                app.update(message)?;
-            }
+    Ok(())
+}
+
+fn resolve_model_db_path(project_name: Option<&str>) -> Result<PathBuf> {
+    if let Some(project_name) = project_name {
+        let project = projects::list_projects()?
+            .into_iter()
+            .find(|project| project.name == project_name)
+            .with_context(|| format!("project '{}' not found", project_name))?;
+        return Ok(project.path);
+    }
+
+    let path = projects::get_project_path(projects::DEFAULT_PROJECT);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create data dir {}", parent.display()))?;
+    }
+    Ok(path)
+}
+
+fn update_model_from_messages(
+    model: &mut Model,
+    tui_app: &mut TuiApplication,
+    messages: Vec<Msg>,
+) -> Result<bool> {
+    for message in messages {
+        if matches!(&message, Msg::SelectProject(_)) {
+            tui_app
+                .app_mut()
+                .active(&ComponentId::KanbanColumn(0))
+                .context("failed to focus board after project selection")?;
         }
 
-        if last_tick.elapsed() >= tick_rate {
-            app.update(opencode_kanban::app::Message::Tick)?;
-            last_tick = std::time::Instant::now();
+        if matches!(&message, Msg::ConfirmQuit)
+            || matches!(&message, Msg::ExecuteCommand(command) if command == "quit")
+        {
+            return Ok(true);
+        }
+
+        let mut next = Some(message);
+        while next.is_some() {
+            next = model.update(next);
         }
     }
 
-    Ok(())
+    Ok(false)
 }
 
 fn validate_runtime_environment() -> Result<()> {
@@ -122,20 +312,9 @@ fn validate_runtime_environment() -> Result<()> {
     Ok(())
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
-    enable_raw_mode().context("failed to enable raw mode")?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("failed to enter alternate screen")?;
-
-    let backend = CrosstermBackend::new(stdout);
-    Terminal::new(backend).context("failed to create terminal")
-}
-
 fn install_panic_hook_with_log(log_path: std::path::PathBuf) {
     let previous_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
-        let _ = restore_terminal();
         eprintln!();
         eprintln!("═══════════════════════════════════════════════════════════════");
         eprintln!("  📝 Log file: {}", log_path.display());
@@ -143,20 +322,4 @@ fn install_panic_hook_with_log(log_path: std::path::PathBuf) {
         eprintln!();
         previous_hook(panic_info);
     }));
-}
-
-fn restore_terminal() -> Result<()> {
-    disable_raw_mode().context("failed to disable raw mode")?;
-    let mut stdout = io::stdout();
-    execute!(stdout, LeaveAlternateScreen, DisableMouseCapture)
-        .context("failed to leave alternate screen")?;
-    Ok(())
-}
-
-struct TerminalGuard;
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = restore_terminal();
-    }
 }
