@@ -384,10 +384,17 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             } else {
                 format!("{}:{} (repo unavailable)", repo_name, task.branch)
             };
+            let todo_label = task
+                .session_todo_summary()
+                .map(|(completed, total)| format!("  todo {completed}/{total}"))
+                .unwrap_or_default();
 
             let line2 = Line::from(vec![
                 Span::raw("   "),
-                Span::styled(repo_label, Style::default().fg(theme.secondary)),
+                Span::styled(
+                    format!("{repo_label}{todo_label}"),
+                    Style::default().fg(theme.secondary),
+                ),
             ]);
 
             let task_area = Rect {
@@ -570,7 +577,14 @@ fn render_side_panel_task_list(frame: &mut Frame<'_>, area: Rect, app: &mut App)
         let line2 = Line::from(vec![
             Span::raw("   "),
             Span::styled(
-                format!("{}:{}", repo_name, task.branch),
+                format!(
+                    "{}:{}{}",
+                    repo_name,
+                    task.branch,
+                    task.session_todo_summary()
+                        .map(|(completed, total)| format!("  todo {completed}/{total}"))
+                        .unwrap_or_default()
+                ),
                 Style::default().fg(theme.secondary),
             ),
         ]);
@@ -648,8 +662,38 @@ fn render_side_panel_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Span::styled("Status: ", Style::default().fg(theme.secondary)),
                 Span::raw(&task.tmux_status),
             ]),
+            Line::from(vec![
+                Span::styled("Todos: ", Style::default().fg(theme.secondary)),
+                Span::raw(
+                    task.session_todo_summary()
+                        .map(|(completed, total)| format!("{completed}/{total} done"))
+                        .unwrap_or_else(|| "none".to_string()),
+                ),
+            ]),
             Line::from(vec![Span::raw("")]),
         ];
+
+        let todos = task.session_todos();
+        if !todos.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "Checklist:",
+                Style::default().fg(theme.focus).bold(),
+            )]));
+            for todo in todos.iter().take(8) {
+                let marker = if todo.completed { "[x]" } else { "[ ]" };
+                lines.push(Line::from(vec![Span::raw(format!(
+                    "  {marker} {}",
+                    todo.content
+                ))]));
+            }
+            if todos.len() > 8 {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  ... {} more", todos.len() - 8),
+                    Style::default().fg(theme.secondary),
+                )]));
+            }
+            lines.push(Line::from(vec![Span::raw("")]));
+        }
 
         if let Some(ref logs) = app.current_log_buffer {
             lines.push(Line::from(vec![Span::styled(

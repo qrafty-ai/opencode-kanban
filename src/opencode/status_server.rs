@@ -1,18 +1,34 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, SystemTime};
 
+use reqwest::StatusCode;
+use reqwest::blocking::Client;
 use serde_json::Value;
 use urlencoding::encode;
 
-use crate::types::{SessionState, SessionStatus, SessionStatusError, SessionStatusSource};
+use crate::types::{
+    SessionState, SessionStatus, SessionStatusError, SessionStatusSource, SessionTodoItem,
+};
 
 use super::StatusProvider;
 
 #[derive(Debug, Clone)]
 pub struct ServerStatusProvider {
     config: ServerStatusConfig,
+    client: Client,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SessionStatusMatch {
+    pub session_id: String,
+    pub parent_session_id: Option<String>,
+    pub status: SessionStatus,
+}
+
+impl SessionStatusMatch {
+    pub fn is_root_session(&self) -> bool {
+        self.parent_session_id.is_none()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -40,40 +56,56 @@ impl Default for ServerStatusProvider {
 
 impl ServerStatusProvider {
     pub fn new(config: ServerStatusConfig) -> Self {
-        Self { config }
+        let client = Client::builder()
+            .timeout(config.request_timeout)
+            .build()
+            .expect("failed to build status client");
+
+        Self { config, client }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}:{}", self.config.hostname, self.config.port)
+    }
+
+    fn session_url(&self) -> String {
+        format!("{}/session", self.base_url())
+    }
+
+    fn session_status_url(&self) -> String {
+        format!("{}/session/status", self.base_url())
+    }
+
+    fn session_todo_url(&self, session_id: &str) -> String {
+        format!("{}/session/{}/todo", self.base_url(), encode(session_id))
     }
 
     pub fn list_all_sessions(&self) -> Result<Vec<(String, String)>, SessionStatusError> {
-        let mut stream = self.connect()?;
+        let response = self
+            .client
+            .get(self.session_url())
+            .send()
+            .map_err(|err| map_reqwest_error(err, "SERVER_CONNECT_FAILED"))?;
 
-        let request = format!(
-            "GET /session HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
-            self.config.hostname, self.config.port
-        );
-        stream
-            .write_all(request.as_bytes())
-            .map_err(|err| map_io_error("SERVER_WRITE_FAILED", err))?;
-
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .map_err(|err| map_io_error("SERVER_READ_FAILED", err))?;
-
-        let (status_code, body) = parse_http_response(&response)?;
-        if status_code == 401 {
+        let status_code = response.status();
+        if status_code == StatusCode::UNAUTHORIZED {
             return Err(SessionStatusError {
                 code: "SERVER_AUTH_ERROR".to_string(),
                 message: "OpenCode server rejected session list with HTTP 401".to_string(),
             });
         }
-        if status_code != 200 {
+        if status_code != StatusCode::OK {
             return Err(SessionStatusError {
                 code: "SERVER_HTTP_ERROR".to_string(),
                 message: format!("OpenCode server returned HTTP {status_code} for /session"),
             });
         }
 
-        parse_sessions_body(body)
+        let body = response
+            .text()
+            .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
+
+        parse_sessions_body(&body)
     }
 
     pub fn fetch_all_statuses(
@@ -81,73 +113,88 @@ impl ServerStatusProvider {
         fetched_at: SystemTime,
         directory: Option<&str>,
     ) -> Result<HashMap<String, SessionStatus>, SessionStatusError> {
-        let mut stream = self.connect()?;
+        let status_matches = self.fetch_status_matches(fetched_at, directory)?;
+        Ok(status_matches
+            .into_iter()
+            .map(|status_match| (status_match.session_id, status_match.status))
+            .collect())
+    }
 
-        let directory_param = directory
-            .map(|d| format!("?directory={}", encode(d)))
-            .unwrap_or_default();
-        let request = format!(
-            "GET /session/status{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
-            directory_param, self.config.hostname, self.config.port
-        );
-        stream
-            .write_all(request.as_bytes())
-            .map_err(|err| map_io_error("SERVER_WRITE_FAILED", err))?;
+    pub fn fetch_status_matches(
+        &self,
+        fetched_at: SystemTime,
+        directory: Option<&str>,
+    ) -> Result<Vec<SessionStatusMatch>, SessionStatusError> {
+        let status_url = if let Some(directory) = directory {
+            format!(
+                "{}?directory={}",
+                self.session_status_url(),
+                encode(directory)
+            )
+        } else {
+            self.session_status_url()
+        };
 
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .map_err(|err| map_io_error("SERVER_READ_FAILED", err))?;
+        let response = self
+            .client
+            .get(status_url)
+            .send()
+            .map_err(|err| map_reqwest_error(err, "SERVER_CONNECT_FAILED"))?;
 
-        let (status_code, body) = parse_http_response(&response)?;
-        if status_code == 401 {
+        let status_code = response.status();
+        if status_code == StatusCode::UNAUTHORIZED {
             return Err(SessionStatusError {
                 code: "SERVER_AUTH_ERROR".to_string(),
                 message: "OpenCode server rejected status poll with HTTP 401".to_string(),
             });
         }
-        if status_code != 200 {
+        if status_code != StatusCode::OK {
             return Err(SessionStatusError {
                 code: "SERVER_HTTP_ERROR".to_string(),
                 message: format!("OpenCode server returned HTTP {status_code} for /session/status"),
             });
         }
 
-        parse_status_body(body, fetched_at)
+        let body = response
+            .text()
+            .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
+
+        parse_status_matches_body(&body, fetched_at)
     }
 
-    fn connect(&self) -> Result<TcpStream, SessionStatusError> {
-        let mut addrs = (self.config.hostname.as_str(), self.config.port)
-            .to_socket_addrs()
-            .map_err(|err| SessionStatusError {
-                code: "SERVER_ADDRESS_RESOLUTION_FAILED".to_string(),
-                message: format!(
-                    "failed to resolve OpenCode server {}:{}: {err}",
-                    self.config.hostname, self.config.port
-                ),
-            })?;
+    pub fn fetch_session_todo(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionTodoItem>, SessionStatusError> {
+        let response = self
+            .client
+            .get(self.session_todo_url(session_id))
+            .send()
+            .map_err(|err| map_reqwest_error(err, "SERVER_CONNECT_FAILED"))?;
 
-        let Some(addr) = addrs.next() else {
+        let status_code = response.status();
+        if status_code == StatusCode::UNAUTHORIZED {
             return Err(SessionStatusError {
-                code: "SERVER_ADDRESS_RESOLUTION_FAILED".to_string(),
+                code: "SERVER_AUTH_ERROR".to_string(),
                 message: format!(
-                    "failed to resolve OpenCode server {}:{}",
-                    self.config.hostname, self.config.port
+                    "OpenCode server rejected todo fetch for session {session_id} with HTTP 401"
                 ),
             });
-        };
+        }
+        if status_code != StatusCode::OK {
+            return Err(SessionStatusError {
+                code: "SERVER_HTTP_ERROR".to_string(),
+                message: format!(
+                    "OpenCode server returned HTTP {status_code} for /session/{session_id}/todo"
+                ),
+            });
+        }
 
-        let stream = TcpStream::connect_timeout(&addr, self.config.request_timeout)
-            .map_err(|err| map_io_error("SERVER_CONNECT_FAILED", err))?;
+        let body = response
+            .text()
+            .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
 
-        stream
-            .set_read_timeout(Some(self.config.request_timeout))
-            .map_err(|err| map_io_error("SERVER_TIMEOUT_CONFIG_FAILED", err))?;
-        stream
-            .set_write_timeout(Some(self.config.request_timeout))
-            .map_err(|err| map_io_error("SERVER_TIMEOUT_CONFIG_FAILED", err))?;
-
-        Ok(stream)
+        parse_session_todo_body(&body)
     }
 }
 
@@ -189,39 +236,10 @@ impl StatusProvider for ServerStatusProvider {
     }
 }
 
-fn parse_http_response(response: &str) -> Result<(u16, &str), SessionStatusError> {
-    let (head, body) = response
-        .split_once("\r\n\r\n")
-        .or_else(|| response.split_once("\n\n"))
-        .unwrap_or((response, ""));
-
-    let status_line = head.lines().next().ok_or_else(|| SessionStatusError {
-        code: "SERVER_PROTOCOL_ERROR".to_string(),
-        message: "OpenCode server response missing HTTP status line".to_string(),
-    })?;
-
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| SessionStatusError {
-            code: "SERVER_PROTOCOL_ERROR".to_string(),
-            message: format!(
-                "OpenCode server response has invalid HTTP status line: {status_line}"
-            ),
-        })?
-        .parse::<u16>()
-        .map_err(|err| SessionStatusError {
-            code: "SERVER_PROTOCOL_ERROR".to_string(),
-            message: format!("OpenCode server response has non-numeric HTTP status: {err}"),
-        })?;
-
-    Ok((status_code, body))
-}
-
-fn parse_status_body(
+fn parse_status_matches_body(
     body: &str,
     fetched_at: SystemTime,
-) -> Result<HashMap<String, SessionStatus>, SessionStatusError> {
+) -> Result<Vec<SessionStatusMatch>, SessionStatusError> {
     let payload: Value = serde_json::from_str(body).map_err(|err| SessionStatusError {
         code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
         message: format!("failed to parse /session/status response JSON: {err}"),
@@ -233,25 +251,50 @@ fn parse_status_body(
             .to_string(),
     })?;
 
-    let mut statuses = HashMap::new();
+    let mut statuses = Vec::with_capacity(object.len());
     for (session_id, value) in object {
         let state = parse_session_state(value).map_err(|err| SessionStatusError {
             code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
             message: format!("invalid /session/status entry for session {session_id}: {err}"),
         })?;
+        let parent_session_id = parse_parent_session_id(value);
 
-        statuses.insert(
-            session_id.clone(),
-            SessionStatus {
+        statuses.push(SessionStatusMatch {
+            session_id: session_id.clone(),
+            parent_session_id,
+            status: SessionStatus {
                 state,
                 source: SessionStatusSource::Server,
                 fetched_at,
                 error: None,
             },
-        );
+        });
     }
 
     Ok(statuses)
+}
+
+fn parse_parent_session_id(value: &Value) -> Option<String> {
+    const PARENT_SESSION_ID_KEYS: &[&str] = &[
+        "parentSessionId",
+        "parent_session_id",
+        "parentSessionID",
+        "parentId",
+        "parent_id",
+    ];
+
+    let obj = value.as_object()?;
+    for key in PARENT_SESSION_ID_KEYS {
+        if let Some(parent_session_id) = obj.get(*key).and_then(Value::as_str) {
+            let trimmed = parent_session_id.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
 }
 
 fn parse_sessions_body(body: &str) -> Result<Vec<(String, String)>, SessionStatusError> {
@@ -281,6 +324,78 @@ fn parse_sessions_body(body: &str) -> Result<Vec<(String, String)>, SessionStatu
     }
 
     Ok(sessions)
+}
+
+fn parse_session_todo_body(body: &str) -> Result<Vec<SessionTodoItem>, SessionStatusError> {
+    let payload: Value = serde_json::from_str(body).map_err(|err| SessionStatusError {
+        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+        message: format!("failed to parse /session/:id/todo response JSON: {err}"),
+    })?;
+
+    let array = payload.as_array().ok_or_else(|| SessionStatusError {
+        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+        message: "expected /session/:id/todo response to be a JSON array".to_string(),
+    })?;
+
+    let mut todos = Vec::with_capacity(array.len());
+    for (index, todo) in array.iter().enumerate() {
+        let parsed = parse_session_todo_item(todo).map_err(|err| SessionStatusError {
+            code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+            message: format!("invalid /session/:id/todo entry at index {index}: {err}"),
+        })?;
+        todos.push(parsed);
+    }
+
+    Ok(todos)
+}
+
+fn parse_session_todo_item(value: &Value) -> Result<SessionTodoItem, &'static str> {
+    if let Some(content) = value.as_str() {
+        return Ok(SessionTodoItem {
+            content: content.to_string(),
+            completed: false,
+        });
+    }
+
+    let obj = value
+        .as_object()
+        .ok_or("expected todo entry to be a string or object")?;
+
+    let content = obj
+        .get("content")
+        .and_then(Value::as_str)
+        .or_else(|| obj.get("text").and_then(Value::as_str))
+        .or_else(|| obj.get("title").and_then(Value::as_str))
+        .or_else(|| obj.get("label").and_then(Value::as_str))
+        .ok_or("expected todo object to contain `content`, `text`, `title`, or `label` string")?;
+
+    let completed = obj
+        .get("completed")
+        .and_then(Value::as_bool)
+        .or_else(|| obj.get("done").and_then(Value::as_bool))
+        .or_else(|| {
+            obj.get("status")
+                .and_then(Value::as_str)
+                .map(is_completed_status)
+        })
+        .or_else(|| {
+            obj.get("state")
+                .and_then(Value::as_str)
+                .map(is_completed_status)
+        })
+        .unwrap_or(false);
+
+    Ok(SessionTodoItem {
+        content: content.to_string(),
+        completed,
+    })
+}
+
+fn is_completed_status(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "done" | "completed" | "complete" | "closed"
+    )
 }
 
 fn parse_session_state(value: &Value) -> Result<SessionState, &'static str> {
@@ -339,11 +454,8 @@ fn missing_error(session_id: &str) -> SessionStatusError {
     }
 }
 
-fn map_io_error(default_code: &str, err: std::io::Error) -> SessionStatusError {
-    let code = if matches!(
-        err.kind(),
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-    ) {
+fn map_reqwest_error(err: reqwest::Error, default_code: &str) -> SessionStatusError {
+    let code = if err.is_timeout() {
         "SERVER_TIMEOUT"
     } else {
         default_code
@@ -357,7 +469,7 @@ fn map_io_error(default_code: &str, err: std::io::Error) -> SessionStatusError {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::io::{self, Read, Write};
     use std::net::TcpListener;
     use std::thread;
 
@@ -461,6 +573,56 @@ mod tests {
             results[0].1.error.as_ref().map(|err| err.code.as_str()),
             Some("SERVER_AUTH_ERROR")
         );
+    }
+
+    #[test]
+    fn fetch_status_matches_parses_parent_session_id() {
+        let port = spawn_single_response_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"root\":{\"state\":\"running\"},\"sub\":{\"state\":\"idle\",\"parentSessionId\":\"root\"}}".to_string(),
+        );
+        let provider = ServerStatusProvider::new(ServerStatusConfig {
+            port,
+            request_timeout: Duration::from_millis(500),
+            ..ServerStatusConfig::default()
+        });
+
+        let matches = provider
+            .fetch_status_matches(SystemTime::UNIX_EPOCH, None)
+            .expect("status matches should parse");
+
+        let root = matches
+            .iter()
+            .find(|status_match| status_match.session_id == "root")
+            .expect("root match should exist");
+        assert!(root.parent_session_id.is_none());
+
+        let sub = matches
+            .iter()
+            .find(|status_match| status_match.session_id == "sub")
+            .expect("sub match should exist");
+        assert_eq!(sub.parent_session_id.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn fetch_session_todo_parses_todo_array() {
+        let port = spawn_single_response_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[{\"content\":\"Write tests\",\"completed\":false},{\"title\":\"Ship release\",\"status\":\"done\"}]".to_string(),
+        );
+        let provider = ServerStatusProvider::new(ServerStatusConfig {
+            port,
+            request_timeout: Duration::from_millis(500),
+            ..ServerStatusConfig::default()
+        });
+
+        let todos = provider
+            .fetch_session_todo("sid-1")
+            .expect("todo response should parse");
+
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0].content, "Write tests");
+        assert!(!todos[0].completed);
+        assert_eq!(todos[1].content, "Ship release");
+        assert!(todos[1].completed);
     }
 
     fn spawn_single_response_server(response: String) -> u16 {
