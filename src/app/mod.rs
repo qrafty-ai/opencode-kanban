@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{KeyEvent, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use tracing::warn;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::widgets::{ListState, ScrollbarState};
@@ -27,8 +27,8 @@ pub use self::state::{
     ConfirmQuitDialogState, ContextMenuItem, ContextMenuState, DeleteCategoryDialogState,
     DeleteCategoryField, DeleteTaskDialogState, DeleteTaskField, ErrorDialogState,
     MoveTaskDialogState, NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
-    RepoUnavailableDialogState, STATUS_BROKEN, STATUS_REPO_UNAVAILABLE, View, ViewMode,
-    WorktreeNotFoundDialogState, WorktreeNotFoundField,
+    RepoUnavailableDialogState, STATUS_BROKEN, STATUS_REPO_UNAVAILABLE, SettingsSection,
+    SettingsViewState, View, ViewMode, WorktreeNotFoundDialogState, WorktreeNotFoundField,
 };
 
 use crate::command_palette::{CommandPaletteState, all_commands};
@@ -85,6 +85,8 @@ pub struct App {
     pub selected_task_index: usize,
     pub current_log_buffer: Option<String>,
     pub keybindings: Keybindings,
+    pub settings: crate::settings::Settings,
+    pub settings_view_state: Option<SettingsViewState>,
 }
 
 impl App {
@@ -96,23 +98,31 @@ impl App {
     }
 
     pub fn new(project_name: Option<&str>) -> Result<Self> {
-        let preset = std::env::var("OPENCODE_KANBAN_THEME")
-            .ok()
-            .and_then(|value| ThemePreset::from_str(&value).ok())
-            .unwrap_or_default();
-        Self::new_with_theme(project_name, preset)
+        Self::new_with_theme(project_name, None)
     }
 
-    pub fn new_with_theme(project_name: Option<&str>, preset: ThemePreset) -> Result<Self> {
+    pub fn new_with_theme(
+        project_name: Option<&str>,
+        cli_theme_override: Option<ThemePreset>,
+    ) -> Result<Self> {
         let db_path = default_db_path()?;
         let db = Database::open(&db_path)?;
         let server_manager = ensure_server_ready();
         let poller_stop = Arc::new(AtomicBool::new(false));
+        let settings = crate::settings::Settings::load();
+        let env_theme = std::env::var("OPENCODE_KANBAN_THEME")
+            .ok()
+            .and_then(|value| ThemePreset::from_str(&value).ok());
+        let settings_theme = ThemePreset::from_str(&settings.theme).ok();
+        let effective_theme = cli_theme_override
+            .or(env_theme)
+            .or(settings_theme)
+            .unwrap_or_default();
 
         let mut app = Self {
             should_quit: false,
             pulse_phase: 0,
-            theme: Theme::from_preset(preset),
+            theme: Theme::from_preset(effective_theme),
             layout_epoch: 0,
             viewport: (80, 24),
             last_mouse_event: None,
@@ -141,10 +151,12 @@ impl App {
             poller_stop,
             poller_thread: None,
             view_mode: ViewMode::SidePanel,
-            side_panel_width: 40,
+            side_panel_width: settings.side_panel_width,
             selected_task_index: 0,
             current_log_buffer: None,
             keybindings: Keybindings::load(),
+            settings,
+            settings_view_state: None,
         };
 
         app.refresh_data()?;
@@ -168,12 +180,40 @@ impl App {
         app.poller_thread = Some(polling::spawn_status_poller(
             db_path,
             Arc::clone(&app.poller_stop),
+            app.settings.poll_interval_ms,
         ));
         Ok(app)
     }
 
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    fn poller_db_path(&self) -> PathBuf {
+        self.current_project_path
+            .clone()
+            .unwrap_or_else(|| projects::get_project_path(projects::DEFAULT_PROJECT))
+    }
+
+    fn restart_status_poller(&mut self) {
+        self.poller_stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.poller_thread.take() {
+            let _ = handle.join();
+        }
+
+        self.poller_stop.store(false, Ordering::Relaxed);
+        self.poller_thread = Some(polling::spawn_status_poller(
+            self.poller_db_path(),
+            Arc::clone(&self.poller_stop),
+            self.settings.poll_interval_ms,
+        ));
+    }
+
+    fn save_settings_with_notice(&mut self) {
+        if let Err(err) = self.settings.save() {
+            warn!(error = %err, "failed to save settings");
+            self.footer_notice = Some(" Failed to save settings to disk ".to_string());
+        }
     }
 
     pub fn refresh_data(&mut self) -> Result<()> {
@@ -237,6 +277,7 @@ impl App {
         self.poller_thread = Some(polling::spawn_status_poller(
             path.clone(),
             Arc::clone(&self.poller_stop),
+            self.settings.poll_interval_ms,
         ));
 
         self.current_project_path = Some(path);
@@ -350,6 +391,94 @@ impl App {
                 self.current_view = View::ProjectList;
                 self.active_dialog = ActiveDialog::None;
             }
+            Message::OpenSettings => {
+                self.settings_view_state = Some(SettingsViewState {
+                    active_section: SettingsSection::Theme,
+                    general_selected_field: 0,
+                    previous_view: self.current_view,
+                });
+                self.current_view = View::Settings;
+                self.active_dialog = ActiveDialog::None;
+                self.context_menu = None;
+                self.hovered_message = None;
+            }
+            Message::CloseSettings => {
+                if let Some(state) = self.settings_view_state.take() {
+                    self.current_view = state.previous_view;
+                } else {
+                    self.current_view = View::Board;
+                }
+            }
+            Message::SettingsNextSection => {
+                if let Some(state) = &mut self.settings_view_state {
+                    state.active_section = match state.active_section {
+                        SettingsSection::Theme => SettingsSection::Keybindings,
+                        SettingsSection::Keybindings => SettingsSection::General,
+                        SettingsSection::General => SettingsSection::Theme,
+                    };
+                }
+            }
+            Message::SettingsPrevSection => {
+                if let Some(state) = &mut self.settings_view_state {
+                    state.active_section = match state.active_section {
+                        SettingsSection::Theme => SettingsSection::General,
+                        SettingsSection::Keybindings => SettingsSection::Theme,
+                        SettingsSection::General => SettingsSection::Keybindings,
+                    };
+                }
+            }
+            Message::SettingsNextItem => {
+                if let Some(state) = &mut self.settings_view_state
+                    && state.active_section == SettingsSection::General
+                {
+                    state.general_selected_field =
+                        state.general_selected_field.saturating_add(1).min(1);
+                }
+            }
+            Message::SettingsPrevItem => {
+                if let Some(state) = &mut self.settings_view_state
+                    && state.active_section == SettingsSection::General
+                {
+                    state.general_selected_field = state.general_selected_field.saturating_sub(1);
+                }
+            }
+            Message::SettingsToggle => {
+                if let Some(state) = &self.settings_view_state {
+                    match state.active_section {
+                        SettingsSection::Theme => {
+                            self.settings.theme = match self.settings.theme.as_str() {
+                                "default" => "high-contrast".to_string(),
+                                "high-contrast" => "mono".to_string(),
+                                _ => "default".to_string(),
+                            };
+
+                            let theme_preset = ThemePreset::from_str(&self.settings.theme)
+                                .unwrap_or(ThemePreset::Default);
+                            self.theme = Theme::from_preset(theme_preset);
+                            self.save_settings_with_notice();
+                        }
+                        SettingsSection::General => {
+                            match state.general_selected_field.min(1) {
+                                0 => {
+                                    let next = self.settings.poll_interval_ms.saturating_add(500);
+                                    self.settings.poll_interval_ms =
+                                        if next > 30_000 { 500 } else { next };
+                                    self.restart_status_poller();
+                                }
+                                1 => {
+                                    let next = self.settings.side_panel_width.saturating_add(5);
+                                    self.settings.side_panel_width =
+                                        if next > 80 { 20 } else { next };
+                                    self.side_panel_width = self.settings.side_panel_width;
+                                }
+                                _ => {}
+                            }
+                            self.save_settings_with_notice();
+                        }
+                        SettingsSection::Keybindings => {}
+                    }
+                }
+            }
             Message::FocusColumn(index) => {
                 if index < self.categories.len() {
                     self.focused_column = index;
@@ -403,6 +532,9 @@ impl App {
                 match command_id.as_str() {
                     "help" => self.active_dialog = ActiveDialog::Help,
                     "quit" => self.should_quit = true,
+                    "settings" => {
+                        self.update(Message::OpenSettings)?;
+                    }
                     _ => {
                         if let Some(message) = all_commands()
                             .into_iter()
@@ -643,6 +775,19 @@ impl App {
                     KeyAction::NewProject => self.update(Message::OpenNewProjectDialog)?,
                     _ => {}
                 }
+            }
+            return Ok(());
+        }
+
+        if self.current_view == View::Settings {
+            match key.code {
+                KeyCode::Left | KeyCode::Char('h') => self.update(Message::SettingsPrevSection)?,
+                KeyCode::Right | KeyCode::Char('l') => self.update(Message::SettingsNextSection)?,
+                KeyCode::Up | KeyCode::Char('k') => self.update(Message::SettingsPrevItem)?,
+                KeyCode::Down | KeyCode::Char('j') => self.update(Message::SettingsNextItem)?,
+                KeyCode::Enter | KeyCode::Char(' ') => self.update(Message::SettingsToggle)?,
+                KeyCode::Esc => self.update(Message::CloseSettings)?,
+                _ => {}
             }
             return Ok(());
         }

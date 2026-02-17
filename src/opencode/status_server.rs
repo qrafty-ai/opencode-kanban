@@ -40,9 +40,13 @@ pub struct ServerStatusConfig {
 
 impl Default for ServerStatusConfig {
     fn default() -> Self {
+        let port = std::env::var("OPENCODE_KANBAN_STATUS_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(4096);
         Self {
             hostname: "127.0.0.1".to_string(),
-            port: 4096,
+            port,
             request_timeout: Duration::from_millis(300),
         }
     }

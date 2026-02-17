@@ -123,7 +123,7 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
 
     cleanup_test_tmux_server();
 
-    let _mock_server = MockStatusServer::start(
+    let mock_server = MockStatusServer::start(
         vec![
             http_json_response(&format!(
                 "[{{\"id\":\"sid-server-first\",\"directory\":\"{}\"}}]",
@@ -146,6 +146,7 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
             http_json_response("{}"),
         ],
     )?;
+    let _port_guard = EnvVarGuard::set("OPENCODE_KANBAN_STATUS_PORT", mock_server.port.to_string());
 
     let db_path = kanban_db_path(&xdg_data_home);
     let db = Database::open(&db_path)?;
@@ -218,10 +219,11 @@ fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Re
 
     cleanup_test_tmux_server();
 
-    let _mock_server = MockStatusServer::start(
+    let mock_server = MockStatusServer::start(
         vec![http_json_response("[]")],
         vec![http_error_response(500)],
     )?;
+    let _port_guard = EnvVarGuard::set("OPENCODE_KANBAN_STATUS_PORT", mock_server.port.to_string());
 
     let db_path = kanban_db_path(&xdg_data_home);
     let db = Database::open(&db_path)?;
@@ -467,6 +469,7 @@ struct MockStatusServer {
     handle: Option<std::thread::JoinHandle<()>>,
     session_responses: Arc<Mutex<VecDeque<String>>>,
     session_status_responses: Arc<Mutex<VecDeque<String>>>,
+    pub port: u16,
 }
 
 impl MockStatusServer {
@@ -474,8 +477,14 @@ impl MockStatusServer {
         session_responses: Vec<String>,
         session_status_responses: Vec<String>,
     ) -> Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 4096))
-            .context("failed to bind mock status server on 127.0.0.1:4096")?;
+        // Bind to port 0 to get an OS-assigned available port.
+        // This avoids conflicts with local OpenCode processes on port 4096.
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .context("failed to bind mock status server on random available port")?;
+        let port = listener
+            .local_addr()
+            .context("failed to get mock server port")?
+            .port();
         listener
             .set_nonblocking(true)
             .context("failed to make mock status server non-blocking")?;
@@ -543,6 +552,7 @@ impl MockStatusServer {
             handle: Some(handle),
             session_responses,
             session_status_responses,
+            port,
         })
     }
 }

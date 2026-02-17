@@ -29,21 +29,21 @@ pub fn classify_binding_state(
     opencode_session_id: Option<&str>,
     status: Option<&SessionStatus>,
 ) -> OpenCodeBindingState {
+    // Check for definitive missing-session errors first, regardless of session id.
+    if let Some(code) = status
+        .and_then(|s| s.error.as_ref())
+        .map(|e| e.code.as_str())
+        && (code == "SERVER_STATUS_MISSING" || code == "SESSION_NOT_FOUND")
+    {
+        return OpenCodeBindingState::Stale;
+    }
+
     let Some(_) = opencode_session_id else {
         return OpenCodeBindingState::Unbound;
     };
 
-    let Some(status) = status else {
+    if status.is_none() {
         return OpenCodeBindingState::Bound;
-    };
-
-    if status
-        .error
-        .as_ref()
-        .map(|error| error.code.as_str())
-        .is_some_and(|code| code == "SERVER_STATUS_MISSING")
-    {
-        return OpenCodeBindingState::Stale;
     }
 
     OpenCodeBindingState::Bound
@@ -384,6 +384,60 @@ mod tests {
         assert_eq!(
             classify_binding_state(Some("sid-1"), Some(&status)),
             OpenCodeBindingState::Bound
+        );
+    }
+
+    #[test]
+    fn test_classify_binding_state_stale_when_missing_status_and_no_session_id() {
+        let status = SessionStatus {
+            state: Status::Idle,
+            source: SessionStatusSource::None,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            error: Some(SessionStatusError {
+                code: "SERVER_STATUS_MISSING".to_string(),
+                message: "missing".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            classify_binding_state(None, Some(&status)),
+            OpenCodeBindingState::Stale
+        );
+    }
+
+    #[test]
+    fn test_classify_binding_state_stale_on_session_not_found_no_session_id() {
+        let status = SessionStatus {
+            state: Status::Idle,
+            source: SessionStatusSource::None,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            error: Some(SessionStatusError {
+                code: "SESSION_NOT_FOUND".to_string(),
+                message: "not found".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            classify_binding_state(None, Some(&status)),
+            OpenCodeBindingState::Stale
+        );
+    }
+
+    #[test]
+    fn test_classify_binding_state_stale_on_session_not_found_with_session_id() {
+        let status = SessionStatus {
+            state: Status::Idle,
+            source: SessionStatusSource::None,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            error: Some(SessionStatusError {
+                code: "SESSION_NOT_FOUND".to_string(),
+                message: "not found".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            classify_binding_state(Some("sid-1"), Some(&status)),
+            OpenCodeBindingState::Stale
         );
     }
 

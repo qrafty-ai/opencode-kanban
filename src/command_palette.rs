@@ -157,6 +157,12 @@ pub fn all_commands() -> Vec<CommandDef> {
             message: Some(Message::OpenProjectList),
         },
         CommandDef {
+            id: "settings",
+            display_name: "Open Settings",
+            keybinding: "-",
+            message: Some(Message::ExecuteCommand("settings".to_string())),
+        },
+        CommandDef {
             id: "new_task",
             display_name: "New Task",
             keybinding: "n",
@@ -302,8 +308,8 @@ mod tests {
         let commands = all_commands();
         assert_eq!(
             commands.len(),
-            17,
-            "Expected 17 commands, found {}",
+            18,
+            "Expected 18 commands, found {}",
             commands.len()
         );
     }

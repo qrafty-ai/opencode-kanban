@@ -97,6 +97,21 @@ pub enum CategoryInputMode {
 pub enum View {
     ProjectList,
     Board,
+    Settings,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SettingsSection {
+    Theme,
+    Keybindings,
+    General,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SettingsViewState {
+    pub active_section: SettingsSection,
+    pub general_selected_field: usize,
+    pub previous_view: View,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

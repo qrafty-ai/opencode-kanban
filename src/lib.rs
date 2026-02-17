@@ -8,6 +8,7 @@ pub mod logging;
 pub mod opencode;
 pub mod projects;
 pub mod realm;
+pub mod settings;
 pub mod theme;
 pub mod tmux;
 pub mod types;
