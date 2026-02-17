@@ -41,7 +41,7 @@ pub fn classify_binding_state(
         .error
         .as_ref()
         .map(|error| error.code.as_str())
-        .is_some_and(|code| code == "SERVER_STATUS_MISSING")
+        .is_some_and(|code| code == "SERVER_STATUS_MISSING" || code == "SESSION_NOT_FOUND")
     {
         return OpenCodeBindingState::Stale;
     }
@@ -324,6 +324,24 @@ mod tests {
             error: Some(SessionStatusError {
                 code: "SERVER_STATUS_MISSING".to_string(),
                 message: "missing".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            classify_binding_state(Some("sid-1"), Some(&status)),
+            OpenCodeBindingState::Stale
+        );
+    }
+
+    #[test]
+    fn test_classify_binding_state_stale_when_session_missing() {
+        let status = SessionStatus {
+            state: Status::Idle,
+            source: SessionStatusSource::None,
+            fetched_at: SystemTime::UNIX_EPOCH,
+            error: Some(SessionStatusError {
+                code: "SESSION_NOT_FOUND".to_string(),
+                message: "missing session".to_string(),
             }),
         };
 

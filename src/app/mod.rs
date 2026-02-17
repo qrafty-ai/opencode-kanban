@@ -913,9 +913,12 @@ impl App {
             return Ok(());
         }
         tasks.swap(selected - 1, selected);
-        for (idx, task) in tasks.iter().enumerate() {
-            self.db.update_task_position(task.id, idx as i64)?;
-        }
+        let positions: Vec<(Uuid, i64)> = tasks
+            .iter()
+            .enumerate()
+            .map(|(idx, task)| (task.id, idx as i64))
+            .collect();
+        self.db.reorder_task_positions(&positions)?;
         self.selected_task_per_column
             .insert(column_index, selected - 1);
         self.refresh_data()
@@ -946,9 +949,12 @@ impl App {
             return Ok(());
         }
         tasks.swap(selected, selected + 1);
-        for (idx, task) in tasks.iter().enumerate() {
-            self.db.update_task_position(task.id, idx as i64)?;
-        }
+        let positions: Vec<(Uuid, i64)> = tasks
+            .iter()
+            .enumerate()
+            .map(|(idx, task)| (task.id, idx as i64))
+            .collect();
+        self.db.reorder_task_positions(&positions)?;
         self.selected_task_per_column
             .insert(column_index, selected + 1);
         self.refresh_data()

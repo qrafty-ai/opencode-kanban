@@ -99,13 +99,23 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
                                     "No active session for task {} - setting status to idle",
                                     task.id
                                 );
-                                let _ = db.update_task_status(task.id, Status::Idle.as_str());
-                                let _ = db.update_task_status_metadata(
-                                    task.id,
-                                    SessionStatusSource::Server.as_str(),
-                                    Some(to_iso8601(fetched_at)),
-                                    None,
-                                );
+                                if let Some(bound_session_id) = bound_session_id.as_deref() {
+                                    let _ = db.update_task_status(task.id, Status::Dead.as_str());
+                                    let _ = db.update_task_status_metadata(
+                                        task.id,
+                                        SessionStatusSource::None.as_str(),
+                                        Some(to_iso8601(fetched_at)),
+                                        Some(format!("SESSION_NOT_FOUND:{bound_session_id}")),
+                                    );
+                                } else {
+                                    let _ = db.update_task_status(task.id, Status::Idle.as_str());
+                                    let _ = db.update_task_status_metadata(
+                                        task.id,
+                                        SessionStatusSource::Server.as_str(),
+                                        Some(to_iso8601(fetched_at)),
+                                        None,
+                                    );
+                                }
                             }
 
                             update_task_todos(
@@ -120,6 +130,13 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
                                 "Failed to fetch status for task {} - skipping status update: {:?}",
                                 task.id,
                                 err
+                            );
+                            let _ = db.update_task_status(task.id, Status::Dead.as_str());
+                            let _ = db.update_task_status_metadata(
+                                task.id,
+                                SessionStatusSource::None.as_str(),
+                                Some(to_iso8601(fetched_at)),
+                                Some(format!("{}:{}", err.code, err.message)),
                             );
                         }
                     }

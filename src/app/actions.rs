@@ -94,9 +94,12 @@ pub fn move_task_up(
         return Ok(());
     }
     column_tasks.swap(selected - 1, selected);
-    for (idx, task) in column_tasks.iter().enumerate() {
-        db.update_task_position(task.id, idx as i64)?;
-    }
+    let positions: Vec<(Uuid, i64)> = column_tasks
+        .iter()
+        .enumerate()
+        .map(|(idx, task)| (task.id, idx as i64))
+        .collect();
+    db.reorder_task_positions(&positions)?;
     selected_task_per_column.insert(focused_column, selected - 1);
     Ok(())
 }
@@ -130,9 +133,12 @@ pub fn move_task_down(
         return Ok(());
     }
     column_tasks.swap(selected, selected + 1);
-    for (idx, task) in column_tasks.iter().enumerate() {
-        db.update_task_position(task.id, idx as i64)?;
-    }
+    let positions: Vec<(Uuid, i64)> = column_tasks
+        .iter()
+        .enumerate()
+        .map(|(idx, task)| (task.id, idx as i64))
+        .collect();
+    db.reorder_task_positions(&positions)?;
     selected_task_per_column.insert(focused_column, selected + 1);
     Ok(())
 }
