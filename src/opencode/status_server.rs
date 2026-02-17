@@ -25,6 +25,13 @@ pub struct SessionStatusMatch {
     pub status: SessionStatus,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SessionRecord {
+    pub session_id: String,
+    pub directory: String,
+    pub parent_session_id: Option<String>,
+}
+
 impl SessionStatusMatch {
     pub fn is_root_session(&self) -> bool {
         self.parent_session_id.is_none()
@@ -85,6 +92,14 @@ impl ServerStatusProvider {
     }
 
     pub fn list_all_sessions(&self) -> Result<Vec<(String, String)>, SessionStatusError> {
+        let records = self.list_all_session_records()?;
+        Ok(records
+            .into_iter()
+            .map(|record| (record.session_id, record.directory))
+            .collect())
+    }
+
+    pub fn list_all_session_records(&self) -> Result<Vec<SessionRecord>, SessionStatusError> {
         let response = self
             .client
             .get(self.session_url())
@@ -109,7 +124,17 @@ impl ServerStatusProvider {
             .text()
             .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
 
-        parse_sessions_body(&body)
+        parse_session_records_body(&body)
+    }
+
+    pub fn fetch_session_parent_map(
+        &self,
+    ) -> Result<HashMap<String, Option<String>>, SessionStatusError> {
+        let records = self.list_all_session_records()?;
+        Ok(records
+            .into_iter()
+            .map(|record| (record.session_id, record.parent_session_id))
+            .collect())
     }
 
     pub fn fetch_all_statuses(
@@ -301,7 +326,7 @@ fn parse_parent_session_id(value: &Value) -> Option<String> {
     None
 }
 
-fn parse_sessions_body(body: &str) -> Result<Vec<(String, String)>, SessionStatusError> {
+fn parse_session_records_body(body: &str) -> Result<Vec<SessionRecord>, SessionStatusError> {
     let payload: Value = serde_json::from_str(body).map_err(|err| SessionStatusError {
         code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
         message: format!("failed to parse /session response JSON: {err}"),
@@ -323,8 +348,13 @@ fn parse_sessions_body(body: &str) -> Result<Vec<(String, String)>, SessionStatu
             continue;
         };
         let directory = obj.get("directory").and_then(|v| v.as_str()).unwrap_or("");
+        let parent_session_id = parse_parent_session_id(item);
 
-        sessions.push((session_id.to_string(), directory.to_string()));
+        sessions.push(SessionRecord {
+            session_id: session_id.to_string(),
+            directory: directory.to_string(),
+            parent_session_id,
+        });
     }
 
     Ok(sessions)
@@ -604,6 +634,34 @@ mod tests {
             .iter()
             .find(|status_match| status_match.session_id == "sub")
             .expect("sub match should exist");
+        assert_eq!(sub.parent_session_id.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn list_all_session_records_parses_parent_session_id() {
+        let port = spawn_single_response_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[{\"id\":\"root\",\"directory\":\"/repo\"},{\"id\":\"sub\",\"directory\":\"/repo\",\"parentSessionId\":\"root\"}]".to_string(),
+        );
+        let provider = ServerStatusProvider::new(ServerStatusConfig {
+            port,
+            request_timeout: Duration::from_millis(500),
+            ..ServerStatusConfig::default()
+        });
+
+        let records = provider
+            .list_all_session_records()
+            .expect("session records should parse");
+
+        let root = records
+            .iter()
+            .find(|record| record.session_id == "root")
+            .expect("root record should exist");
+        assert!(root.parent_session_id.is_none());
+
+        let sub = records
+            .iter()
+            .find(|record| record.session_id == "sub")
+            .expect("sub record should exist");
         assert_eq!(sub.parent_session_id.as_deref(), Some("root"));
     }
 
