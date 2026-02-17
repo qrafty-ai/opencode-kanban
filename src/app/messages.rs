@@ -24,6 +24,7 @@ pub enum Message {
     FocusColumn(usize),
     SelectTask(usize, usize),
     SelectTaskInSidePanel(usize),
+    ToggleSidePanelCategoryCollapse,
     OpenAddCategoryDialog,
     OpenRenameCategoryDialog,
     OpenDeleteCategoryDialog,

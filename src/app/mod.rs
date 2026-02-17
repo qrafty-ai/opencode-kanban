@@ -5,7 +5,7 @@ pub mod polling;
 pub mod runtime;
 pub mod state;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{KeyEvent, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tracing::warn;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::widgets::{ListState, ScrollbarState};
@@ -48,6 +48,25 @@ use self::runtime::{
     next_available_session_name, next_available_session_name_by, worktrees_root_for_repo,
 };
 use self::state::{AttachTaskResult, CreateTaskOutcome, DesiredTaskState, ObservedTaskState};
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum SidePanelRow {
+    CategoryHeader {
+        column_index: usize,
+        category_id: Uuid,
+        category_name: String,
+        category_color: Option<String>,
+        total_tasks: usize,
+        visible_tasks: usize,
+        collapsed: bool,
+    },
+    Task {
+        column_index: usize,
+        index_in_column: usize,
+        category_id: Uuid,
+        task: Box<Task>,
+    },
+}
 
 pub struct App {
     pub should_quit: bool,
@@ -82,7 +101,8 @@ pub struct App {
     poller_thread: Option<thread::JoinHandle<()>>,
     pub view_mode: ViewMode,
     pub side_panel_width: u16,
-    pub selected_task_index: usize,
+    pub side_panel_selected_row: usize,
+    pub collapsed_categories: HashSet<Uuid>,
     pub current_log_buffer: Option<String>,
     pub keybindings: Keybindings,
 }
@@ -142,7 +162,8 @@ impl App {
             poller_thread: None,
             view_mode: ViewMode::SidePanel,
             side_panel_width: 40,
-            selected_task_index: 0,
+            side_panel_selected_row: 0,
+            collapsed_categories: HashSet::new(),
             current_log_buffer: None,
             keybindings: Keybindings::load(),
         };
@@ -184,6 +205,12 @@ impl App {
             .context("failed to load categories")?;
         self.repos = self.db.list_repos().context("failed to load repos")?;
 
+        self.collapsed_categories.retain(|category_id| {
+            self.categories
+                .iter()
+                .any(|category| category.id == *category_id)
+        });
+
         if !self.categories.is_empty() {
             self.focused_column = self.focused_column.min(self.categories.len() - 1);
             self.selected_task_per_column
@@ -204,6 +231,15 @@ impl App {
                     ScrollbarState::new(task_count.saturating_sub(1))
                 })
                 .collect();
+        } else {
+            self.column_scroll_states.clear();
+            self.focused_column = 0;
+            self.side_panel_selected_row = 0;
+        }
+
+        if self.view_mode == ViewMode::SidePanel {
+            let rows = self.side_panel_rows();
+            self.sync_side_panel_selection(&rows, rows.is_empty());
         }
 
         Ok(())
@@ -363,8 +399,10 @@ impl App {
                 }
             }
             Message::SelectTaskInSidePanel(index) => {
-                self.selected_task_index = index;
+                let rows = self.side_panel_rows();
+                self.sync_side_panel_selection_at(&rows, index, true);
             }
+            Message::ToggleSidePanelCategoryCollapse => self.toggle_side_panel_category_collapse(),
             Message::OpenAddCategoryDialog => {
                 self.active_dialog = ActiveDialog::CategoryInput(CategoryInputDialogState {
                     mode: CategoryInputMode::Add,
@@ -600,20 +638,23 @@ impl App {
                         ViewMode::Kanban => {
                             self.view_mode = ViewMode::SidePanel;
 
-                            let entries = self.linear_task_entries();
-                            if entries.is_empty() {
-                                self.selected_task_index = 0;
-                            } else {
-                                let current_id = self
-                                    .selected_task_in_column(self.focused_column)
-                                    .map(|task| task.id);
-                                let index = current_id
-                                    .and_then(|id| {
-                                        entries.iter().position(|(_, _, task)| task.id == id)
+                            let rows = self.side_panel_rows();
+                            let current_id = self
+                                .selected_task_in_column(self.focused_column)
+                                .map(|task| task.id);
+                            let index = current_id
+                                .and_then(|id| {
+                                    rows.iter().position(|row| {
+                                        matches!(row, SidePanelRow::Task { task, .. } if task.id == id)
                                     })
-                                    .unwrap_or(0);
-                                self.apply_linear_task_selection(&entries, index);
-                            }
+                                })
+                                .or_else(|| {
+                                    rows.iter().position(|row| {
+                                        matches!(row, SidePanelRow::CategoryHeader { .. })
+                                    })
+                                })
+                                .unwrap_or(0);
+                            self.sync_side_panel_selection_at(&rows, index, false);
                         }
                         ViewMode::SidePanel => {
                             self.view_mode = ViewMode::Kanban;
@@ -628,6 +669,15 @@ impl App {
                 }
                 _ => {}
             }
+            return Ok(());
+        }
+
+        if self.current_view == View::Board
+            && self.view_mode == ViewMode::SidePanel
+            && key.code == KeyCode::Char(' ')
+            && key.modifiers == KeyModifiers::empty()
+        {
+            self.update(Message::ToggleSidePanelCategoryCollapse)?;
             return Ok(());
         }
 
@@ -657,14 +707,14 @@ impl App {
                 }
                 KeyAction::SelectDown => {
                     if self.view_mode == ViewMode::SidePanel {
-                        let entries = self.linear_task_entries();
-                        if entries.is_empty() {
-                            self.selected_task_index = 0;
+                        let rows = self.side_panel_rows();
+                        if rows.is_empty() {
+                            self.side_panel_selected_row = 0;
                             self.current_log_buffer = None;
                         } else {
-                            let current = self.selected_task_index.min(entries.len() - 1);
-                            let next = (current + 1) % entries.len();
-                            self.apply_linear_task_selection(&entries, next);
+                            let current = self.side_panel_selected_row.min(rows.len() - 1);
+                            let next = (current + 1) % rows.len();
+                            self.sync_side_panel_selection_at(&rows, next, true);
                         }
                     } else {
                         self.update(Message::SelectDown)?;
@@ -672,18 +722,18 @@ impl App {
                 }
                 KeyAction::SelectUp => {
                     if self.view_mode == ViewMode::SidePanel {
-                        let entries = self.linear_task_entries();
-                        if entries.is_empty() {
-                            self.selected_task_index = 0;
+                        let rows = self.side_panel_rows();
+                        if rows.is_empty() {
+                            self.side_panel_selected_row = 0;
                             self.current_log_buffer = None;
                         } else {
-                            let current = self.selected_task_index.min(entries.len() - 1);
+                            let current = self.side_panel_selected_row.min(rows.len() - 1);
                             let prev = if current == 0 {
-                                entries.len() - 1
+                                rows.len() - 1
                             } else {
                                 current - 1
                             };
-                            self.apply_linear_task_selection(&entries, prev);
+                            self.sync_side_panel_selection_at(&rows, prev, true);
                         }
                     } else {
                         self.update(Message::SelectUp)?;
@@ -778,7 +828,7 @@ impl App {
     pub fn selected_task(&self) -> Option<Task> {
         match self.view_mode {
             ViewMode::Kanban => self.selected_task_in_column(self.focused_column),
-            ViewMode::SidePanel => self.selected_task_in_linear_list(),
+            ViewMode::SidePanel => self.selected_task_in_side_panel(),
         }
     }
 
@@ -800,53 +850,88 @@ impl App {
         tasks.get(selected).cloned()
     }
 
-    fn selected_task_in_linear_list(&self) -> Option<Task> {
-        let entries = self.linear_task_entries();
-        if entries.is_empty() {
-            return None;
-        }
-        let index = self.selected_task_index.min(entries.len() - 1);
-        entries.into_iter().nth(index).map(|(_, _, task)| task)
+    fn selected_task_in_side_panel(&self) -> Option<Task> {
+        let rows = self.side_panel_rows();
+        selected_task_from_side_panel_rows(&rows, self.side_panel_selected_row)
     }
 
-    fn linear_task_entries(&self) -> Vec<(usize, usize, Task)> {
-        let mut category_order: Vec<(usize, &Category)> =
-            self.categories.iter().enumerate().collect();
-        category_order.sort_by_key(|(_, category)| category.position);
+    pub fn side_panel_rows(&self) -> Vec<SidePanelRow> {
+        side_panel_rows_from(&self.categories, &self.tasks, &self.collapsed_categories)
+    }
 
-        let mut entries: Vec<(usize, usize, Task)> = Vec::new();
-        for (column_index, category) in category_order {
-            let mut tasks: Vec<Task> = self
-                .tasks
-                .iter()
-                .filter(|task| task.category_id == category.id)
-                .cloned()
-                .collect();
-            tasks.sort_by_key(|task| task.position);
+    fn sync_side_panel_selection(&mut self, rows: &[SidePanelRow], clear_log: bool) {
+        self.sync_side_panel_selection_at(rows, self.side_panel_selected_row, clear_log);
+    }
 
-            for (index_in_column, task) in tasks.into_iter().enumerate() {
-                entries.push((column_index, index_in_column, task));
+    fn sync_side_panel_selection_at(
+        &mut self,
+        rows: &[SidePanelRow],
+        index: usize,
+        clear_log: bool,
+    ) {
+        if rows.is_empty() {
+            self.side_panel_selected_row = 0;
+            if clear_log {
+                self.current_log_buffer = None;
+            }
+            return;
+        }
+
+        let index = index.min(rows.len() - 1);
+        self.side_panel_selected_row = index;
+
+        match &rows[index] {
+            SidePanelRow::CategoryHeader { column_index, .. } => {
+                self.focused_column = (*column_index).min(self.categories.len().saturating_sub(1));
+                self.selected_task_per_column
+                    .entry(self.focused_column)
+                    .or_insert(0);
+            }
+            SidePanelRow::Task {
+                column_index,
+                index_in_column,
+                ..
+            } => {
+                self.focused_column = (*column_index).min(self.categories.len().saturating_sub(1));
+                self.selected_task_per_column
+                    .insert(*column_index, *index_in_column);
             }
         }
 
-        entries
+        if clear_log {
+            self.current_log_buffer = None;
+        }
     }
 
-    fn apply_linear_task_selection(&mut self, entries: &[(usize, usize, Task)], index: usize) {
-        if entries.is_empty() {
-            self.selected_task_index = 0;
+    fn toggle_side_panel_category_collapse(&mut self) {
+        let rows = self.side_panel_rows();
+        if rows.is_empty() {
+            self.side_panel_selected_row = 0;
             self.current_log_buffer = None;
             return;
         }
 
-        let index = index.min(entries.len() - 1);
-        self.selected_task_index = index;
+        let selected = self.side_panel_selected_row.min(rows.len() - 1);
+        let category_id = match &rows[selected] {
+            SidePanelRow::CategoryHeader { category_id, .. } => *category_id,
+            SidePanelRow::Task { .. } => return,
+        };
 
-        let (column_index, index_in_column, _) = &entries[index];
-        self.focused_column = (*column_index).min(self.categories.len().saturating_sub(1));
-        self.selected_task_per_column
-            .insert(*column_index, *index_in_column);
-        self.current_log_buffer = None;
+        if !self.collapsed_categories.insert(category_id) {
+            self.collapsed_categories.remove(&category_id);
+        }
+
+        let updated_rows = self.side_panel_rows();
+        let next_index = updated_rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidePanelRow::CategoryHeader { category_id: id, .. } if *id == category_id
+                )
+            })
+            .unwrap_or(0);
+        self.sync_side_panel_selection_at(&updated_rows, next_index, true);
     }
 
     fn repo_for_task(&self, task: &Task) -> Option<Repo> {
@@ -1255,6 +1340,196 @@ impl Drop for App {
             if handle.is_finished() {
                 let _ = handle.join();
             }
+        }
+    }
+}
+
+fn sorted_categories_with_indexes(categories: &[Category]) -> Vec<(usize, &Category)> {
+    let mut out: Vec<(usize, &Category)> = categories.iter().enumerate().collect();
+    out.sort_by_key(|(_, category)| category.position);
+    out
+}
+
+fn side_panel_rows_from(
+    categories: &[Category],
+    tasks: &[Task],
+    collapsed_categories: &HashSet<Uuid>,
+) -> Vec<SidePanelRow> {
+    let mut rows: Vec<SidePanelRow> = Vec::new();
+    for (column_index, category) in sorted_categories_with_indexes(categories) {
+        let mut category_tasks: Vec<Task> = tasks
+            .iter()
+            .filter(|task| task.category_id == category.id)
+            .cloned()
+            .collect();
+        category_tasks.sort_by_key(|task| task.position);
+
+        let collapsed = collapsed_categories.contains(&category.id);
+        let total_tasks = category_tasks.len();
+        let visible_tasks = if collapsed { 0 } else { total_tasks };
+
+        rows.push(SidePanelRow::CategoryHeader {
+            column_index,
+            category_id: category.id,
+            category_name: category.name.clone(),
+            category_color: category.color.clone(),
+            total_tasks,
+            visible_tasks,
+            collapsed,
+        });
+
+        if collapsed {
+            continue;
+        }
+
+        for (index_in_column, task) in category_tasks.into_iter().enumerate() {
+            rows.push(SidePanelRow::Task {
+                column_index,
+                index_in_column,
+                category_id: category.id,
+                task: Box::new(task),
+            });
+        }
+    }
+    rows
+}
+
+fn selected_task_from_side_panel_rows(rows: &[SidePanelRow], selected_row: usize) -> Option<Task> {
+    if rows.is_empty() {
+        return None;
+    }
+    let selected_row = selected_row.min(rows.len().saturating_sub(1));
+    match rows.get(selected_row) {
+        Some(SidePanelRow::Task { task, .. }) => Some(task.as_ref().clone()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn side_panel_rows_are_grouped_by_sorted_category_position() {
+        let todo_id = Uuid::new_v4();
+        let doing_id = Uuid::new_v4();
+        let categories = vec![
+            test_category(todo_id, "TODO", 10),
+            test_category(doing_id, "DOING", 5),
+        ];
+        let tasks = vec![
+            test_task(todo_id, 0, "todo-1"),
+            test_task(doing_id, 0, "doing-1"),
+            test_task(todo_id, 1, "todo-2"),
+        ];
+
+        let rows = side_panel_rows_from(&categories, &tasks, &HashSet::new());
+
+        assert!(matches!(
+            &rows[0],
+            SidePanelRow::CategoryHeader { category_id, .. } if *category_id == doing_id
+        ));
+        assert!(matches!(
+            &rows[1],
+            SidePanelRow::Task { category_id, .. } if *category_id == doing_id
+        ));
+        assert!(matches!(
+            &rows[2],
+            SidePanelRow::CategoryHeader { category_id, .. } if *category_id == todo_id
+        ));
+        assert!(matches!(
+            &rows[3],
+            SidePanelRow::Task { category_id, index_in_column, .. }
+            if *category_id == todo_id && *index_in_column == 0
+        ));
+        assert!(matches!(
+            &rows[4],
+            SidePanelRow::Task { category_id, index_in_column, .. }
+            if *category_id == todo_id && *index_in_column == 1
+        ));
+    }
+
+    #[test]
+    fn side_panel_rows_hide_tasks_for_collapsed_categories() {
+        let todo_id = Uuid::new_v4();
+        let categories = vec![test_category(todo_id, "TODO", 0)];
+        let tasks = vec![
+            test_task(todo_id, 0, "todo-1"),
+            test_task(todo_id, 1, "todo-2"),
+        ];
+        let collapsed = HashSet::from([todo_id]);
+
+        let rows = side_panel_rows_from(&categories, &tasks, &collapsed);
+
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            &rows[0],
+            SidePanelRow::CategoryHeader {
+                category_id,
+                total_tasks,
+                visible_tasks,
+                collapsed,
+                ..
+            } if *category_id == todo_id && *total_tasks == 2 && *visible_tasks == 0 && *collapsed
+        ));
+    }
+
+    #[test]
+    fn selected_task_from_side_panel_rows_returns_none_for_header() {
+        let todo_id = Uuid::new_v4();
+        let rows = vec![
+            SidePanelRow::CategoryHeader {
+                column_index: 0,
+                category_id: todo_id,
+                category_name: "TODO".to_string(),
+                category_color: None,
+                total_tasks: 1,
+                visible_tasks: 1,
+                collapsed: false,
+            },
+            SidePanelRow::Task {
+                column_index: 0,
+                index_in_column: 0,
+                category_id: todo_id,
+                task: Box::new(test_task(todo_id, 0, "todo-1")),
+            },
+        ];
+
+        assert!(selected_task_from_side_panel_rows(&rows, 0).is_none());
+        assert!(
+            selected_task_from_side_panel_rows(&rows, 1).is_some(),
+            "task row should resolve to selected task"
+        );
+    }
+
+    fn test_category(id: Uuid, name: &str, position: i64) -> Category {
+        Category {
+            id,
+            name: name.to_string(),
+            position,
+            color: None,
+            created_at: "now".to_string(),
+        }
+    }
+
+    fn test_task(category_id: Uuid, position: i64, title: &str) -> Task {
+        Task {
+            id: Uuid::new_v4(),
+            title: title.to_string(),
+            repo_id: Uuid::new_v4(),
+            branch: "feature/test".to_string(),
+            category_id,
+            position,
+            tmux_session_name: None,
+            worktree_path: None,
+            tmux_status: "idle".to_string(),
+            status_source: "none".to_string(),
+            status_fetched_at: None,
+            status_error: None,
+            opencode_session_id: None,
+            session_todo_json: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
         }
     }
 }
