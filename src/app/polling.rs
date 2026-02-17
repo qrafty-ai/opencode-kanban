@@ -63,6 +63,8 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
 
                 if let Some(worktree_path) = task.worktree_path.as_deref() {
                     debug!("Fetching status for task {} at {}", task.id, worktree_path);
+                    let mut bound_session_id = task.opencode_session_id.clone();
+
                     match server_provider.fetch_status_matches(fetched_at, Some(worktree_path)) {
                         Ok(statuses) => {
                             debug!("Got {} statuses for task {}", statuses.len(), task.id);
@@ -82,7 +84,16 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
                                     Some(to_iso8601(fetched_at)),
                                     None,
                                 );
-                                update_task_todos(&db, &server_provider, task.id, &status_match);
+
+                                if bound_session_id.as_deref()
+                                    != Some(status_match.session_id.as_str())
+                                {
+                                    let _ = db.update_task_session_binding(
+                                        task.id,
+                                        Some(status_match.session_id.clone()),
+                                    );
+                                }
+                                bound_session_id = Some(status_match.session_id);
                             } else {
                                 debug!(
                                     "No active session for task {} - setting status to idle",
@@ -95,8 +106,14 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
                                     Some(to_iso8601(fetched_at)),
                                     None,
                                 );
-                                let _ = db.update_task_todo(task.id, None);
                             }
+
+                            update_task_todos(
+                                &db,
+                                &server_provider,
+                                task.id,
+                                bound_session_id.as_deref(),
+                            );
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -118,9 +135,17 @@ fn update_task_todos(
     db: &Database,
     server_provider: &ServerStatusProvider,
     task_id: Uuid,
-    status_match: &SessionStatusMatch,
+    session_id: Option<&str>,
 ) {
-    match server_provider.fetch_session_todo(&status_match.session_id) {
+    let Some(session_id) = session_id else {
+        debug!(
+            "Skipping todo sync for task {} because no OpenCode session is bound",
+            task_id
+        );
+        return;
+    };
+
+    match server_provider.fetch_session_todo(session_id) {
         Ok(todos) => match serde_json::to_string(&todos) {
             Ok(raw) => {
                 let _ = db.update_task_todo(task_id, Some(raw));
@@ -129,7 +154,7 @@ fn update_task_todos(
                 tracing::warn!(
                     "Failed to serialize todo payload for task {} session {}: {}",
                     task_id,
-                    status_match.session_id,
+                    session_id,
                     err
                 );
                 let _ = db.update_task_todo(task_id, None);
@@ -139,7 +164,7 @@ fn update_task_todos(
             tracing::warn!(
                 "Failed to fetch todo list for task {} session {}: {:?}",
                 task_id,
-                status_match.session_id,
+                session_id,
                 err
             );
             let _ = db.update_task_todo(task_id, None);

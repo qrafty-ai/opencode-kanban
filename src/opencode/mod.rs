@@ -190,13 +190,13 @@ fn ensure_opencode_available(binary: &str) -> Result<()> {
 }
 
 pub fn opencode_attach_command(session_id: Option<&str>, worktree_dir: Option<&str>) -> String {
-    let url = DEFAULT_SERVER_URL;
     let dir_arg = worktree_dir
         .map(|d| format!(" --dir {}", d))
         .unwrap_or_default();
+
     match session_id {
-        Some(id) => format!("opencode attach {url} --session {id}{dir_arg}"),
-        None => format!("opencode attach {url}{dir_arg}"),
+        Some(id) => format!("opencode --session {id}{dir_arg}"),
+        None => format!("opencode{dir_arg}"),
     }
 }
 
