@@ -169,6 +169,12 @@ pub fn all_commands() -> Vec<CommandDef> {
             message: Some(Message::AttachSelectedTask),
         },
         CommandDef {
+            id: "cycle_todo_visualization",
+            display_name: "Cycle Todo Visualization",
+            keybinding: "t",
+            message: Some(Message::CycleTodoVisualization),
+        },
+        CommandDef {
             id: "add_category",
             display_name: "Add Category",
             keybinding: "c",
@@ -302,8 +308,8 @@ mod tests {
         let commands = all_commands();
         assert_eq!(
             commands.len(),
-            17,
-            "Expected 17 commands, found {}",
+            18,
+            "Expected 18 commands, found {}",
             commands.len()
         );
     }
