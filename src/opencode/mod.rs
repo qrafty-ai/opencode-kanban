@@ -190,15 +190,16 @@ fn ensure_opencode_available(binary: &str) -> Result<()> {
 }
 
 pub fn opencode_attach_command(session_id: Option<&str>, worktree_dir: Option<&str>) -> String {
-    let base = format!("opencode attach {DEFAULT_SERVER_URL}");
+    let mut parts = vec![format!("opencode attach {DEFAULT_SERVER_URL}")];
 
-    match session_id {
-        Some(id) => format!("{base} --session {id}"),
-        None => match worktree_dir {
-            Some(dir) => format!("{base} --dir {dir}"),
-            None => base,
-        },
+    if let Some(dir) = worktree_dir {
+        parts.push(format!("--dir {dir}"));
     }
+    if let Some(id) = session_id {
+        parts.push(format!("--session {id}"));
+    }
+
+    parts.join(" ")
 }
 
 pub fn opencode_query_session_by_dir(working_dir: &Path) -> Result<Option<String>> {
@@ -452,8 +453,17 @@ mod tests {
     }
 
     #[test]
-    fn test_attach_command_with_session_omits_dir() {
+    fn test_attach_command_with_session_includes_dir() {
         let command = opencode_attach_command(Some("sid-123"), Some("/tmp/worktree"));
+        assert_eq!(
+            command,
+            "opencode attach http://127.0.0.1:4096 --dir /tmp/worktree --session sid-123"
+        );
+    }
+
+    #[test]
+    fn test_attach_command_with_session_no_dir() {
+        let command = opencode_attach_command(Some("sid-123"), None);
         assert_eq!(
             command,
             "opencode attach http://127.0.0.1:4096 --session sid-123"
