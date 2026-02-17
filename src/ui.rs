@@ -16,7 +16,7 @@ use tuirealm::{
 use crate::app::{
     ActiveDialog, App, CATEGORY_COLOR_PALETTE, CategoryColorField, CategoryInputField,
     CategoryInputMode, DeleteCategoryField, DeleteTaskField, NewTaskField, STATUS_BROKEN,
-    STATUS_REPO_UNAVAILABLE, SidePanelRow, TodoVisualizationMode, View, ViewMode,
+    STATUS_REPO_UNAVAILABLE, SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode,
     category_color_label,
 };
 use crate::command_palette::all_commands;
@@ -35,6 +35,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     match app.current_view {
         View::ProjectList => render_project_list(frame, app),
         View::Board => render_board(frame, app),
+        View::Settings => render_settings(frame, app),
     }
 
     if app.active_dialog != ActiveDialog::None {
@@ -1672,6 +1673,215 @@ fn inset_rect(area: Rect, horizontal: u16, vertical: u16) -> Rect {
     let width = area.width.saturating_sub(horizontal.saturating_mul(2));
     let height = area.height.saturating_sub(vertical.saturating_mul(2));
     Rect::new(x, y, width, height)
+}
+
+fn render_settings(frame: &mut Frame<'_>, app: &App) {
+    let theme = app.theme;
+    let mut canvas = Paragraph::default()
+        .background(theme.base.surface)
+        .text([TextSpan::from("")]);
+    canvas.view(frame, frame.area());
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    render_header(frame, chunks[0], app);
+    render_settings_content(frame, chunks[1], app);
+    render_settings_footer(frame, chunks[2], app);
+}
+
+fn render_settings_content(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let sections = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+        .split(area);
+
+    render_settings_sidebar(frame, sections[0], app);
+    render_settings_active_section(frame, sections[1], app);
+}
+
+fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let active_section = app
+        .settings_view_state
+        .as_ref()
+        .map(|s| s.active_section)
+        .unwrap_or(SettingsSection::Theme);
+
+    let mut rows = TableBuilder::default();
+    for section in [
+        SettingsSection::Theme,
+        SettingsSection::Keybindings,
+        SettingsSection::General,
+    ] {
+        let label = match section {
+            SettingsSection::Theme => "Theme",
+            SettingsSection::Keybindings => "Keybindings",
+            SettingsSection::General => "General",
+        };
+        let prefix = if section == active_section {
+            "> "
+        } else {
+            "  "
+        };
+        rows.add_col(TextSpan::from(format!("{}{}", prefix, label)))
+            .add_row();
+    }
+
+    let selected_idx = match active_section {
+        SettingsSection::Theme => 0,
+        SettingsSection::Keybindings => 1,
+        SettingsSection::General => 2,
+    };
+
+    let mut list = List::default()
+        .title("Settings", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
+        .highlighted_str("> ")
+        .scroll(false)
+        .rows(rows.build())
+        .selected_line(selected_idx);
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, area);
+}
+
+fn render_settings_active_section(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let active_section = app
+        .settings_view_state
+        .as_ref()
+        .map(|s| s.active_section)
+        .unwrap_or(SettingsSection::Theme);
+    match active_section {
+        SettingsSection::Theme => render_settings_theme(frame, area, app),
+        SettingsSection::Keybindings => render_settings_keybindings(frame, area, app),
+        SettingsSection::General => render_settings_general(frame, area, app),
+    }
+}
+
+fn render_settings_theme(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let current_theme = &app.settings.theme;
+
+    let mut rows = TableBuilder::default();
+    for preset in ["default", "high-contrast", "mono"] {
+        let is_selected = current_theme == preset;
+        let prefix = if is_selected { " [x] " } else { " [ ] " };
+        rows.add_col(TextSpan::from(format!("{}{}", prefix, preset)))
+            .add_row();
+    }
+
+    let selected_idx = match current_theme.as_str() {
+        "default" => 0,
+        "high-contrast" => 1,
+        "mono" => 2,
+        _ => 0,
+    };
+
+    let mut list = List::default()
+        .title("Theme", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
+        .highlighted_str("> ")
+        .scroll(false)
+        .rows(rows.build())
+        .selected_line(selected_idx);
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, area);
+}
+
+fn render_settings_keybindings(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let lines = app.keybindings.help_lines();
+
+    let mut rows = TableBuilder::default();
+    for line in lines {
+        if line.trim().is_empty() {
+            rows.add_col(TextSpan::from(" ")).add_row();
+        } else if !line.starts_with(' ') {
+            rows.add_col(TextSpan::new(line).fg(theme.base.header).bold())
+                .add_row();
+        } else {
+            rows.add_col(TextSpan::new(line).fg(theme.base.text))
+                .add_row();
+        }
+    }
+
+    let mut list = List::default()
+        .title("Keybindings (View Only)", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .scroll(true)
+        .rows(rows.build());
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, area);
+}
+
+fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let selected_field = app
+        .settings_view_state
+        .as_ref()
+        .map(|s| s.general_selected_field)
+        .unwrap_or(0);
+
+    let mut rows = TableBuilder::default();
+
+    let poll_prefix = if selected_field == 0 { "> " } else { "  " };
+    rows.add_col(TextSpan::from(format!(
+        "{}Poll Interval: {} ms",
+        poll_prefix, app.settings.poll_interval_ms
+    )))
+    .add_row();
+
+    let width_prefix = if selected_field == 1 { "> " } else { "  " };
+    rows.add_col(TextSpan::from(format!(
+        "{}Side Panel Width: {}%",
+        width_prefix, app.settings.side_panel_width
+    )))
+    .add_row();
+
+    let mut list = List::default()
+        .title("General", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
+        .highlighted_str("> ")
+        .scroll(false)
+        .rows(rows.build())
+        .selected_line(selected_field);
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, area);
+}
+
+fn render_settings_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let active_section = app
+        .settings_view_state
+        .as_ref()
+        .map(|s| s.active_section)
+        .unwrap_or(SettingsSection::Theme);
+
+    let help_text = match active_section {
+        SettingsSection::Theme => "Space/Enter: cycle theme  h/l: section  Esc: close",
+        SettingsSection::Keybindings => "h/l: section  Esc: close",
+        SettingsSection::General => "j/k: select  h/l: section  Esc: close",
+    };
+
+    let mut footer = Label::default()
+        .text(help_text)
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(theme.base.surface);
+    footer.view(frame, area);
 }
 
 #[cfg(test)]

@@ -20,7 +20,11 @@ use crate::types::SessionStatusSource;
 use super::state::STATUS_REPO_UNAVAILABLE;
 
 /// Spawn a background thread that polls task status from the OpenCode server
-pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+pub fn spawn_status_poller(
+    db_path: PathBuf,
+    stop: Arc<AtomicBool>,
+    poll_interval_ms: u64,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let server_provider = ServerStatusProvider::default();
 
@@ -28,14 +32,14 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
             let db = match Database::open(&db_path) {
                 Ok(db) => db,
                 Err(_) => {
-                    interruptible_sleep(Duration::from_secs(1), &stop);
+                    interruptible_sleep(Duration::from_millis(poll_interval_ms), &stop);
                     continue;
                 }
             };
 
             let tasks = db.list_tasks().unwrap_or_default();
             if tasks.is_empty() {
-                interruptible_sleep(Duration::from_secs(1), &stop);
+                interruptible_sleep(Duration::from_millis(poll_interval_ms), &stop);
                 continue;
             }
 
@@ -57,7 +61,7 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
                 if !repo_available {
                     let _ = db.update_task_status(task.id, STATUS_REPO_UNAVAILABLE);
                     let _ = db.update_task_todo(task.id, None);
-                    interruptible_sleep(staggered_poll_delay(index), &stop);
+                    interruptible_sleep(staggered_poll_delay(index, poll_interval_ms), &stop);
                     continue;
                 }
 
@@ -96,15 +100,19 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
                                 bound_session_id = Some(status_match.session_id);
                             } else {
                                 debug!(
-                                    "No active session for task {} - setting status to idle",
+                                    "No active session for task {} - setting status to dead",
                                     task.id
                                 );
-                                let _ = db.update_task_status(task.id, Status::Idle.as_str());
+                                let _ = db.update_task_status(task.id, Status::Dead.as_str());
+                                let missing_id = task
+                                    .tmux_session_name
+                                    .clone()
+                                    .unwrap_or_else(|| task.id.to_string());
                                 let _ = db.update_task_status_metadata(
                                     task.id,
-                                    SessionStatusSource::Server.as_str(),
+                                    SessionStatusSource::None.as_str(),
                                     Some(to_iso8601(fetched_at)),
-                                    None,
+                                    Some(format!("SESSION_NOT_FOUND:{missing_id}")),
                                 );
                             }
 
@@ -117,15 +125,23 @@ pub fn spawn_status_poller(db_path: PathBuf, stop: Arc<AtomicBool>) -> thread::J
                         }
                         Err(err) => {
                             tracing::warn!(
-                                "Failed to fetch status for task {} - skipping status update: {:?}",
+                                "Failed to fetch status for task {} - marking status dead: {:?}",
                                 task.id,
                                 err
                             );
+                            let _ = db.update_task_status(task.id, Status::Dead.as_str());
+                            let _ = db.update_task_status_metadata(
+                                task.id,
+                                SessionStatusSource::None.as_str(),
+                                Some(to_iso8601(fetched_at)),
+                                Some(format!("{}:{}", err.code, err.message)),
+                            );
+                            let _ = db.update_task_todo(task.id, None);
                         }
                     }
                 }
 
-                interruptible_sleep(staggered_poll_delay(index), &stop);
+                interruptible_sleep(staggered_poll_delay(index, poll_interval_ms), &stop);
             }
         }
     })
@@ -178,10 +194,10 @@ fn to_iso8601(time: SystemTime) -> String {
 }
 
 /// Calculate staggered poll delay to avoid thundering herd
-pub fn staggered_poll_delay(task_index: usize) -> Duration {
-    let base_seconds = 1 + task_index as u64;
+pub fn staggered_poll_delay(task_index: usize, base_poll_interval_ms: u64) -> Duration {
+    let base_ms = base_poll_interval_ms.saturating_mul(1 + task_index as u64);
     let jitter_ms = current_jitter_ms(task_index);
-    Duration::from_secs(base_seconds) + Duration::from_millis(jitter_ms)
+    Duration::from_millis(base_ms) + Duration::from_millis(jitter_ms)
 }
 
 /// Generate jitter based on current time and task index

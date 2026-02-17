@@ -61,12 +61,14 @@ fn run_app() -> Result<()> {
     let _guard = TerminalGuard;
 
     let project_name = cli.project.as_deref();
-    let preset = cli
+    let cli_theme_override = cli
         .theme
         .as_deref()
-        .and_then(|value| ThemePreset::from_str(value).ok())
-        .unwrap_or_default();
-    let app = Arc::new(Mutex::new(App::new_with_theme(project_name, preset)?));
+        .and_then(|value| ThemePreset::from_str(value).ok());
+    let app = Arc::new(Mutex::new(App::new_with_theme(
+        project_name,
+        cli_theme_override,
+    )?));
     let mut realm = init_application(Arc::clone(&app))?;
 
     let mut redraw = true;

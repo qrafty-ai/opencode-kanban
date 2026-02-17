@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
@@ -130,6 +130,12 @@ struct KeybindingsFile {
     project_list: HashMap<String, Vec<String>>,
     #[serde(default)]
     board: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SettingsFile {
+    #[serde(default)]
+    keybindings: Option<KeybindingsFile>,
 }
 
 struct ActionDef {
@@ -582,15 +588,79 @@ fn build_section(
 }
 
 fn load_file() -> KeybindingsFile {
-    let Some(path) = config_path() else {
+    let Some(config_dir) = config_dir() else {
         return KeybindingsFile::default();
     };
 
+    let settings_path = settings_config_path(&config_dir);
+    if let Some(file) = load_settings_keybindings(&settings_path) {
+        return file;
+    }
+
+    let legacy_path = legacy_keybindings_path(&config_dir);
+    load_legacy_keybindings(&legacy_path, &settings_path)
+}
+
+fn config_dir() -> Option<PathBuf> {
+    let mut path = dirs::config_dir()?;
+    path.push("opencode-kanban");
+    Some(path)
+}
+
+fn settings_config_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("settings.toml")
+}
+
+fn legacy_keybindings_path(config_dir: &Path) -> PathBuf {
+    let mut path = config_dir.to_path_buf();
+    path.push("keybindings.toml");
+    path
+}
+
+fn load_settings_keybindings(path: &Path) -> Option<KeybindingsFile> {
+    if !path.exists() {
+        return None;
+    }
+
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            warn!(
+                "failed to read settings config '{}': {}; falling back to legacy keybindings.toml",
+                path.display(),
+                error
+            );
+            return None;
+        }
+    };
+
+    let file = match toml::from_str::<SettingsFile>(&contents) {
+        Ok(file) => file,
+        Err(error) => {
+            warn!(
+                "failed to parse settings config '{}': {}; falling back to legacy keybindings.toml",
+                path.display(),
+                error
+            );
+            return None;
+        }
+    };
+
+    file.keybindings
+}
+
+fn load_legacy_keybindings(path: &Path, preferred_settings_path: &Path) -> KeybindingsFile {
     if !path.exists() {
         return KeybindingsFile::default();
     }
 
-    match fs::read_to_string(&path) {
+    warn!(
+        "legacy keybindings config '{}' is deprecated; move bindings to '{}' under [keybindings]",
+        path.display(),
+        preferred_settings_path.display()
+    );
+
+    match fs::read_to_string(path) {
         Ok(contents) => match toml::from_str::<KeybindingsFile>(&contents) {
             Ok(file) => file,
             Err(error) => {
@@ -611,13 +681,6 @@ fn load_file() -> KeybindingsFile {
             KeybindingsFile::default()
         }
     }
-}
-
-fn config_path() -> Option<PathBuf> {
-    let mut path = dirs::config_dir()?;
-    path.push("opencode-kanban");
-    path.push("keybindings.toml");
-    Some(path)
 }
 
 fn normalize_modifiers(mut modifiers: KeyModifiers) -> KeyModifiers {

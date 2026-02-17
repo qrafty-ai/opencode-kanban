@@ -60,6 +60,7 @@ Rust TUI kanban board for managing git worktrees and OpenCode sessions, orchestr
 - **Hardcoded "TODO"**: category name hardcoded in db init (src/db/mod.rs)
 - **Process killing**: NEVER kill `opencode` processes broadly - this will kill the agent itself. Use specific PIDs or port-based targeting only when necessary.
 - **Expect/unwrap**: used liberally in tmux/git modules - can panic
+- **Port 4096 in tests**: integration tests must NOT hardcode port 4096 for mock status servers - use port 0 to bind to an OS-assigned available port. Local OpenCode processes use 4096, causing test failures.
 
 ## COMMANDS
 ```bash
