@@ -1,11 +1,14 @@
+use std::collections::HashMap;
+
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::event::{Key, KeyEvent};
 use tuirealm::props::{AttrValue, Attribute, Props};
 use tuirealm::tui::layout::{Alignment, Rect};
 use tuirealm::tui::style::{Color, Style};
 use tuirealm::tui::text::{Line, Span};
-use tuirealm::tui::widgets::{Block, Borders, Paragraph};
+use tuirealm::tui::widgets::{Block, BorderType, Borders, Paragraph};
 use tuirealm::{Component, Event, Frame, MockComponent, NoUserEvent, State, StateValue};
+use uuid::Uuid;
 
 use crate::types::{Category, Task};
 use crate::ui_realm::messages::Msg;
@@ -15,22 +18,29 @@ pub struct KanbanColumn {
     column_index: usize,
     category: Category,
     tasks: Vec<Task>,
+    repo_name_by_id: HashMap<Uuid, String>,
     selected_index: usize,
     scroll_offset: usize,
-    viewport_rows: usize,
+    viewport_tasks: usize,
 }
 
 impl KanbanColumn {
-    pub fn new(column_index: usize, category: Category, mut tasks: Vec<Task>) -> Self {
+    pub fn new(
+        column_index: usize,
+        category: Category,
+        mut tasks: Vec<Task>,
+        repo_name_by_id: HashMap<Uuid, String>,
+    ) -> Self {
         tasks.sort_by_key(|task| task.position);
         let mut component = Self {
             props: Props::default(),
             column_index,
             category,
             tasks,
+            repo_name_by_id,
             selected_index: 0,
             scroll_offset: 0,
-            viewport_rows: 1,
+            viewport_tasks: 1,
         };
         component.clamp_selection();
         component.clamp_scroll_offset();
@@ -62,8 +72,8 @@ impl KanbanColumn {
         }
     }
 
-    fn set_viewport_rows(&mut self, rows: usize) {
-        self.viewport_rows = rows.max(1);
+    fn set_viewport_tasks(&mut self, tasks: usize) {
+        self.viewport_tasks = tasks.max(1);
         self.clamp_scroll_offset();
         self.ensure_selected_visible();
     }
@@ -77,7 +87,7 @@ impl KanbanColumn {
     }
 
     fn max_scroll_offset(&self) -> usize {
-        self.tasks.len().saturating_sub(self.viewport_rows)
+        self.tasks.len().saturating_sub(self.viewport_tasks)
     }
 
     fn clamp_scroll_offset(&mut self) {
@@ -93,9 +103,9 @@ impl KanbanColumn {
         if self.selected_index < self.scroll_offset {
             self.scroll_offset = self.selected_index;
         } else {
-            let visible_end = self.scroll_offset + self.viewport_rows;
+            let visible_end = self.scroll_offset + self.viewport_tasks;
             if self.selected_index >= visible_end {
-                self.scroll_offset = self.selected_index + 1 - self.viewport_rows;
+                self.scroll_offset = self.selected_index + 1 - self.viewport_tasks;
             }
         }
         self.clamp_scroll_offset();
@@ -119,11 +129,11 @@ impl KanbanColumn {
     }
 
     fn page_down(&mut self) -> bool {
-        self.move_selection_by(self.viewport_rows as isize)
+        self.move_selection_by(self.viewport_tasks as isize)
     }
 
     fn page_up(&mut self) -> bool {
-        self.move_selection_by(-(self.viewport_rows as isize))
+        self.move_selection_by(-(self.viewport_tasks as isize))
     }
 
     fn emit_selection_msg(&self) -> Option<Msg> {
@@ -136,12 +146,57 @@ impl KanbanColumn {
             })
         }
     }
+
+    fn is_focused(&self) -> bool {
+        self.props
+            .get(Attribute::Focus)
+            .and_then(|value| match value {
+                AttrValue::Flag(flag) => Some(flag),
+                _ => None,
+            })
+            .unwrap_or(false)
+    }
+
+    fn repo_branch_label(&self, task: &Task) -> String {
+        let repo = self
+            .repo_name_by_id
+            .get(&task.repo_id)
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        let branch = task.branch.trim();
+        if branch.is_empty() {
+            repo.to_string()
+        } else {
+            format!("{repo}:{branch}")
+        }
+    }
+
+    fn task_primary_text(&self, task: &Task) -> String {
+        let title = task.title.trim();
+        if title.is_empty() {
+            self.repo_branch_label(task)
+        } else {
+            title.to_string()
+        }
+    }
 }
 
 impl MockComponent for KanbanColumn {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
+        let is_focused = self.is_focused();
+        let border_type = if is_focused {
+            BorderType::Double
+        } else {
+            BorderType::Plain
+        };
+        let border_color = if is_focused { Color::Cyan } else { Color::Gray };
         let title = format!(" {} ({}) ", self.category.name, self.tasks.len());
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(border_type)
+            .border_style(Style::default().fg(border_color))
+            .title(Span::styled(title, Style::default().fg(border_color)))
+            .title_alignment(Alignment::Center);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -149,41 +204,56 @@ impl MockComponent for KanbanColumn {
             return;
         }
 
-        self.set_viewport_rows(inner.height as usize);
+        self.set_viewport_tasks((inner.height as usize / 3).max(1));
 
         if self.tasks.is_empty() {
             frame.render_widget(
-                Paragraph::new("No tasks in this category").alignment(Alignment::Center),
+                Paragraph::new("No tasks in this category")
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(Color::Gray)),
                 inner,
             );
             return;
         }
 
-        let lines = self
+        let visible_tasks = self
             .tasks
             .iter()
             .enumerate()
             .skip(self.scroll_offset)
-            .take(self.viewport_rows)
-            .map(|(index, task)| {
-                let is_selected = index == self.selected_index;
-                let prefix = if is_selected { "▸" } else { " " };
-                let icon = Self::status_icon(task.tmux_status.as_str());
-                let icon_color = Self::status_color(task.tmux_status.as_str());
-                let task_color = if is_selected {
-                    Color::Yellow
-                } else {
-                    Color::White
-                };
-
-                Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(Color::Yellow)),
-                    Span::styled(icon, Style::default().fg(icon_color)),
-                    Span::raw(" "),
-                    Span::styled(task.title.as_str(), Style::default().fg(task_color)),
-                ])
-            })
+            .take(self.viewport_tasks)
             .collect::<Vec<_>>();
+        let mut lines = Vec::with_capacity(visible_tasks.len() * 3);
+        for (line_index, (index, task)) in visible_tasks.into_iter().enumerate() {
+            let is_selected = is_focused && index == self.selected_index;
+            let prefix = if is_selected { "▸" } else { " " };
+            let icon = Self::status_icon(task.tmux_status.as_str());
+            let icon_color = Self::status_color(task.tmux_status.as_str());
+            let title_color = if is_selected {
+                Color::Yellow
+            } else {
+                Color::White
+            };
+            let detail = self.repo_branch_label(task);
+
+            lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(Color::Yellow)),
+                Span::styled(icon, Style::default().fg(icon_color)),
+                Span::raw(" "),
+                Span::styled(
+                    self.task_primary_text(task),
+                    Style::default().fg(title_color),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(detail, Style::default().fg(Color::Gray)),
+            ]));
+
+            if line_index + 1 < self.viewport_tasks && index + 1 < self.tasks.len() {
+                lines.push(Line::raw(""));
+            }
+        }
 
         frame.render_widget(Paragraph::new(lines), inner);
     }
@@ -209,6 +279,20 @@ impl Component<Msg, NoUserEvent> for KanbanColumn {
     fn on(&mut self, ev: Event<NoUserEvent>) -> Option<Msg> {
         match ev {
             Event::Keyboard(KeyEvent {
+                code: Key::Left, ..
+            })
+            | Event::Keyboard(KeyEvent {
+                code: Key::Char('h'),
+                ..
+            }) => Some(Msg::FocusColumn(self.column_index.saturating_sub(1))),
+            Event::Keyboard(KeyEvent {
+                code: Key::Right, ..
+            })
+            | Event::Keyboard(KeyEvent {
+                code: Key::Char('l'),
+                ..
+            }) => Some(Msg::FocusColumn(self.column_index.saturating_add(1))),
+            Event::Keyboard(KeyEvent {
                 code: Key::Down, ..
             }) => {
                 if self.move_selection_by(1) {
@@ -217,7 +301,27 @@ impl Component<Msg, NoUserEvent> for KanbanColumn {
                     None
                 }
             }
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('j'),
+                ..
+            }) => {
+                if self.move_selection_by(1) {
+                    self.emit_selection_msg()
+                } else {
+                    None
+                }
+            }
             Event::Keyboard(KeyEvent { code: Key::Up, .. }) => {
+                if self.move_selection_by(-1) {
+                    self.emit_selection_msg()
+                } else {
+                    None
+                }
+            }
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('k'),
+                ..
+            }) => {
                 if self.move_selection_by(-1) {
                     self.emit_selection_msg()
                 } else {
@@ -252,6 +356,68 @@ impl Component<Msg, NoUserEvent> for KanbanColumn {
                     Some(Msg::AttachTask)
                 }
             }
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('e'),
+                modifiers,
+            }) if modifiers.contains(tuirealm::event::KeyModifiers::CONTROL) => {
+                if self.tasks.is_empty() {
+                    None
+                } else {
+                    Some(Msg::AttachTask)
+                }
+            }
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('n'),
+                ..
+            }) => Some(Msg::OpenNewTaskDialog),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('d'),
+                ..
+            }) => Some(Msg::OpenDeleteTaskDialog),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('c'),
+                ..
+            }) => Some(Msg::OpenAddCategoryDialog),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('r'),
+                ..
+            }) => Some(Msg::OpenRenameCategoryDialog),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('x'),
+                ..
+            }) => Some(Msg::OpenDeleteCategoryDialog),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('H'),
+                ..
+            }) => Some(Msg::MoveTaskLeft),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('L'),
+                ..
+            }) => Some(Msg::MoveTaskRight),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('J'),
+                ..
+            }) => Some(Msg::MoveTaskDown),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('K'),
+                ..
+            }) => Some(Msg::MoveTaskUp),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('p'),
+                modifiers,
+            }) if modifiers.contains(tuirealm::event::KeyModifiers::CONTROL) => {
+                Some(Msg::OpenCommandPalette)
+            }
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('o'),
+                modifiers,
+            }) if modifiers.contains(tuirealm::event::KeyModifiers::CONTROL) => {
+                Some(Msg::OpenProjectList)
+            }
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('?'),
+                ..
+            }) => Some(Msg::ExecuteCommand("help".to_string())),
             _ => None,
         }
     }
@@ -259,8 +425,6 @@ impl Component<Msg, NoUserEvent> for KanbanColumn {
 
 #[cfg(test)]
 use crossterm::event::KeyCode;
-#[cfg(test)]
-use uuid::Uuid;
 
 #[cfg(test)]
 use crate::ui_realm::ComponentId;
@@ -277,7 +441,7 @@ fn renders_header() {
     let driver = EventDriver::default();
     let category = sample_category("TODO");
     let tasks = vec![sample_task("Task A", "idle", 0)];
-    let component = Box::new(KanbanColumn::new(0, category, tasks));
+    let component = Box::new(KanbanColumn::new(0, category, tasks, HashMap::new()));
 
     let mut app = mount_component_for_test(&driver, ComponentId::KanbanColumn(0), component);
     let mut terminal = MockTerminal::new(40, 10);
@@ -303,10 +467,10 @@ fn renders_tasks_with_icons() {
         sample_task("Broken", "broken", 5),
         sample_task("Unknown", "mystery", 6),
     ];
-    let component = Box::new(KanbanColumn::new(0, category, tasks));
+    let component = Box::new(KanbanColumn::new(0, category, tasks, HashMap::new()));
 
     let mut app = mount_component_for_test(&driver, ComponentId::KanbanColumn(0), component);
-    let mut terminal = MockTerminal::new(60, 20);
+    let mut terminal = MockTerminal::new(60, 24);
     let rendered = render_component(&mut app, ComponentId::KanbanColumn(0), &mut terminal);
 
     assert!(rendered.contains("●"), "running icon should be rendered");
@@ -331,7 +495,7 @@ fn scrolling() {
     let tasks = (0..20)
         .map(|index| sample_task(&format!("task-{index:02}"), "idle", index as i64))
         .collect::<Vec<_>>();
-    let component = Box::new(KanbanColumn::new(0, category, tasks));
+    let component = Box::new(KanbanColumn::new(0, category, tasks, HashMap::new()));
 
     let mut app = mount_component_for_test(&driver, ComponentId::KanbanColumn(0), component);
     let mut terminal = MockTerminal::new(36, 8);
@@ -344,13 +508,13 @@ fn scrolling() {
     let messages = send_key_to_component(&driver, &mut app, &[KeyCode::PageDown], 1);
     assert_eq!(
         messages,
-        vec![Msg::SelectTask { column: 0, task: 6 }],
+        vec![Msg::SelectTask { column: 0, task: 2 }],
         "paged navigation should emit semantic selection msg"
     );
 
     let after = render_component(&mut app, ComponentId::KanbanColumn(0), &mut terminal);
     assert!(
-        after.contains("task-06"),
+        after.contains("task-02"),
         "page down should move visible window"
     );
     assert!(
@@ -369,7 +533,7 @@ fn selection_emits_msg() {
         sample_task("task-1", "running", 1),
         sample_task("task-2", "waiting", 2),
     ];
-    let component = Box::new(KanbanColumn::new(2, category, tasks));
+    let component = Box::new(KanbanColumn::new(2, category, tasks, HashMap::new()));
 
     let mut app = mount_component_for_test(&driver, ComponentId::KanbanColumn(2), component);
     let messages = send_key_to_component(&driver, &mut app, &[KeyCode::Down], 1);

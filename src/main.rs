@@ -9,7 +9,12 @@ use tuirealm::{
     command::{Cmd, CmdResult},
     event::{Key, KeyEvent, KeyModifiers},
     listener::EventListenerCfg,
-    tui::layout::Rect,
+    tui::{
+        layout::{Alignment, Constraint, Direction, Layout, Rect},
+        style::{Color, Style},
+        text::Span,
+        widgets::{Block, Borders},
+    },
 };
 
 use opencode_kanban::{
@@ -18,9 +23,18 @@ use opencode_kanban::{
     projects,
     tmux::{ensure_tmux_installed, tmux_session_exists},
     ui_realm::{
-        ComponentId, application::TuiApplication, components::Footer, messages::Msg, model::Model,
+        ComponentId,
+        application::TuiApplication,
+        components::{ErrorDialog, ErrorDialogVariant, Footer},
+        messages::Msg,
+        model::Model,
     },
 };
+
+const BOARD_MOUSE_HINT: &str =
+    " tmux mouse hint: run `tmux set -g mouse on` for click+scroll support ";
+const BOARD_AUTO_REFRESH: &str = "auto-refresh: 0.5s";
+const BOARD_TITLE: &str = " opencode-kanban ";
 
 struct GlobalHotkeysFooter {
     inner: Footer,
@@ -186,7 +200,16 @@ fn run_app() -> Result<()> {
         .context("failed to register global hotkeys")?;
     tui_app
         .app_mut()
-        .active(&ComponentId::ProjectList)
+        .attr(
+            &ComponentId::Footer,
+            Attribute::Text,
+            AttrValue::String(BOARD_MOUSE_HINT.to_string()),
+        )
+        .context("failed to set footer hint")?;
+    let initial_focus = board_focus_component(&model);
+    tui_app
+        .app_mut()
+        .active(&initial_focus)
         .context("failed to set initial active component")?;
 
     let mut should_quit = false;
@@ -197,19 +220,13 @@ fn run_app() -> Result<()> {
         should_quit =
             should_quit || update_model_from_messages(&mut model, &mut tui_app, messages)?;
 
-        let active_component = tui_app
-            .app()
-            .focus()
-            .copied()
-            .unwrap_or(ComponentId::ProjectList);
-
         let bridge = guard
             .bridge
             .as_mut()
             .context("TerminalGuard already taken")?;
         bridge
             .raw_mut()
-            .draw(|frame| tui_app.view(&active_component, frame, frame.size()))
+            .draw(|frame| render_ui(frame, &mut tui_app, &model))
             .context("failed to render frame")?;
     }
 
@@ -248,26 +265,209 @@ fn update_model_from_messages(
     messages: Vec<Msg>,
 ) -> Result<bool> {
     for message in messages {
-        if matches!(&message, Msg::SelectProject(_)) {
-            tui_app
-                .app_mut()
-                .active(&ComponentId::KanbanColumn(0))
-                .context("failed to focus board after project selection")?;
-        }
+        let mut pending = std::collections::VecDeque::from([message]);
+        while let Some(current) = pending.pop_front() {
+            let _ = tui_app
+                .handle_resize(model, &current)
+                .context("failed to handle resize event")?;
 
-        if matches!(&message, Msg::ConfirmQuit)
-            || matches!(&message, Msg::ExecuteCommand(command) if command == "quit")
-        {
-            return Ok(true);
-        }
+            if matches!(&current, Msg::ConfirmQuit)
+                || matches!(&current, Msg::ExecuteCommand(command) if command == "quit")
+            {
+                return Ok(true);
+            }
 
-        let mut next = Some(message);
-        while next.is_some() {
-            next = model.update(next);
+            if let Some(follow_up) = model.update(Some(current.clone())) {
+                pending.push_back(follow_up);
+            }
+
+            if let Msg::ShowError(detail) = &current {
+                tui_app
+                    .app_mut()
+                    .remount(
+                        ComponentId::Error,
+                        Box::new(ErrorDialog::new(ErrorDialogVariant::Generic {
+                            title: "Error".to_string(),
+                            detail: detail.clone(),
+                        })),
+                        vec![],
+                    )
+                    .context("failed to update error dialog content")?;
+            }
+
+            if matches!(
+                &current,
+                Msg::CreateTask
+                    | Msg::ConfirmDeleteTask
+                    | Msg::MoveTaskLeft
+                    | Msg::MoveTaskRight
+                    | Msg::MoveTaskUp
+                    | Msg::MoveTaskDown
+                    | Msg::AttachTask
+            ) {
+                tui_app
+                    .wire_components(model)
+                    .context("failed to refresh components after model update")?;
+                let focus_target = board_focus_component(model);
+                if tui_app.app().mounted(&focus_target) {
+                    tui_app
+                        .app_mut()
+                        .active(&focus_target)
+                        .context("failed to restore board focus after model update")?;
+                }
+            }
+
+            if matches!(&current, Msg::OpenProjectList) {
+                tui_app
+                    .app_mut()
+                    .active(&ComponentId::ProjectList)
+                    .context("failed to focus project list")?;
+            }
+
+            if matches!(&current, Msg::SelectProject(_)) {
+                let focus_target = board_focus_component(model);
+                tui_app
+                    .app_mut()
+                    .active(&focus_target)
+                    .context("failed to focus board after project selection")?;
+            }
+
+            if let Msg::FocusColumn(index) = &current {
+                let focus_target = ComponentId::KanbanColumn(*index);
+                if tui_app.app().mounted(&focus_target) {
+                    tui_app
+                        .app_mut()
+                        .active(&focus_target)
+                        .context("failed to focus selected board column")?;
+                }
+            }
+
+            let _ = tui_app
+                .route_modal_focus(model, &current)
+                .context("failed to route modal focus")?;
         }
     }
 
     Ok(false)
+}
+
+fn render_ui(frame: &mut Frame<'_>, tui_app: &mut TuiApplication, model: &Model) {
+    let active_component = tui_app
+        .app()
+        .focus()
+        .copied()
+        .unwrap_or_else(|| board_focus_component(model));
+
+    if active_component == ComponentId::ProjectList {
+        tui_app.view(&ComponentId::ProjectList, frame, frame.size());
+        return;
+    }
+
+    let area = frame.size();
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    render_board_header(frame, sections[0], model.tasks.len());
+    render_board_columns(frame, tui_app, model, sections[1]);
+    tui_app.view(&ComponentId::Footer, frame, sections[2]);
+
+    if is_modal_component(active_component) {
+        let popup = centered_rect(70, 70, area);
+        tui_app.view(&active_component, frame, popup);
+    }
+}
+
+fn render_board_header(frame: &mut Frame<'_>, area: Rect, task_count: usize) {
+    let style = Style::default().fg(Color::Blue);
+    let header = Block::default()
+        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+        .border_style(style)
+        .title(Span::styled(BOARD_TITLE, style))
+        .title_alignment(Alignment::Left);
+    let right_title = Block::default()
+        .title(Span::styled(
+            format!(" {task_count} tasks - {BOARD_AUTO_REFRESH} "),
+            style,
+        ))
+        .title_alignment(Alignment::Right);
+
+    frame.render_widget(header, area);
+    frame.render_widget(right_title, area);
+}
+
+fn render_board_columns(
+    frame: &mut Frame<'_>,
+    tui_app: &mut TuiApplication,
+    model: &Model,
+    area: Rect,
+) {
+    let column_count = model.categories.len().max(1);
+    let constraints = vec![Constraint::Ratio(1, column_count as u32); column_count];
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(area);
+
+    if model.categories.is_empty() {
+        tui_app.view(&ComponentId::KanbanColumn(0), frame, columns[0]);
+        return;
+    }
+
+    for (index, chunk) in columns.iter().enumerate().take(model.categories.len()) {
+        tui_app.view(&ComponentId::KanbanColumn(index), frame, *chunk);
+    }
+}
+
+fn board_focus_component(model: &Model) -> ComponentId {
+    if model.categories.is_empty() {
+        ComponentId::KanbanColumn(0)
+    } else {
+        ComponentId::KanbanColumn(model.focused_category.min(model.categories.len() - 1))
+    }
+}
+
+fn centered_rect(width_percent: u16, height_percent: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - height_percent) / 2),
+            Constraint::Percentage(height_percent),
+            Constraint::Percentage((100 - height_percent) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - width_percent) / 2),
+            Constraint::Percentage(width_percent),
+            Constraint::Percentage((100 - width_percent) / 2),
+        ])
+        .split(vertical[1])[1]
+}
+
+fn is_modal_component(component_id: ComponentId) -> bool {
+    matches!(
+        component_id,
+        ComponentId::CommandPalette
+            | ComponentId::NewTask
+            | ComponentId::DeleteTask
+            | ComponentId::CategoryInput
+            | ComponentId::DeleteCategory
+            | ComponentId::NewProject
+            | ComponentId::ConfirmQuit
+            | ComponentId::Help
+            | ComponentId::WorktreeNotFound
+            | ComponentId::RepoUnavailable
+            | ComponentId::Error
+            | ComponentId::MoveTask
+    )
 }
 
 fn validate_runtime_environment() -> Result<()> {

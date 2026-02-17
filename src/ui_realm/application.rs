@@ -79,6 +79,10 @@ impl TuiApplication {
         let repos = vec![repo.clone()];
         let tasks = vec![task.clone()];
         let repo_lookup: HashMap<Uuid, Repo> = vec![(repo.id, repo.clone())].into_iter().collect();
+        let repo_name_by_id: HashMap<Uuid, String> = repos
+            .iter()
+            .map(|repo| (repo.id, repo.name.clone()))
+            .collect();
 
         self.app.remount(
             ComponentId::ProjectList,
@@ -87,7 +91,12 @@ impl TuiApplication {
         )?;
         self.app.remount(
             ComponentId::KanbanColumn(0),
-            Box::new(KanbanColumn::new(0, category, vec![task.clone()])),
+            Box::new(KanbanColumn::new(
+                0,
+                category,
+                vec![task.clone()],
+                repo_name_by_id.clone(),
+            )),
             vec![],
         )?;
         self.app.remount(
@@ -294,6 +303,10 @@ impl TuiApplication {
         let ordered_tasks = sorted_tasks_for_mount(&model.tasks, &categories);
         let repo_lookup: HashMap<Uuid, Repo> =
             repos.iter().cloned().map(|repo| (repo.id, repo)).collect();
+        let repo_name_by_id: HashMap<Uuid, String> = repos
+            .iter()
+            .map(|repo| (repo.id, repo.name.clone()))
+            .collect();
 
         self.app.remount(
             ComponentId::ProjectList,
@@ -306,7 +319,12 @@ impl TuiApplication {
         if categories.is_empty() {
             self.app.remount(
                 ComponentId::KanbanColumn(0),
-                Box::new(KanbanColumn::new(0, placeholder_category(), Vec::new())),
+                Box::new(KanbanColumn::new(
+                    0,
+                    placeholder_category(),
+                    Vec::new(),
+                    repo_name_by_id.clone(),
+                )),
                 vec![],
             )?;
         } else {
@@ -314,7 +332,12 @@ impl TuiApplication {
                 let column_tasks = sorted_tasks_for_category(category.id, &model.tasks);
                 self.app.remount(
                     ComponentId::KanbanColumn(column_index),
-                    Box::new(KanbanColumn::new(column_index, category, column_tasks)),
+                    Box::new(KanbanColumn::new(
+                        column_index,
+                        category,
+                        column_tasks,
+                        repo_name_by_id.clone(),
+                    )),
                     vec![],
                 )?;
             }
@@ -667,7 +690,8 @@ mod application {
     use super::super::model::Model;
     use super::TuiApplication;
     use crate::db::Database;
-    use crate::types::Category;
+    use crate::types::{Category, Repo, Task};
+    use crate::ui_realm::tests::harness::MockTerminal;
     use tuirealm::command::{Cmd, CmdResult};
     use tuirealm::listener::{EventListenerCfg, ListenerResult, Poll};
     use tuirealm::{
@@ -913,6 +937,55 @@ mod application {
     }
 
     #[test]
+    fn resize_storm_does_not_panic() {
+        let poll = MessagePoll::default();
+        let mut app = TuiApplication::with_listener(poll.listener_cfg());
+        let mut model = model_for_resize_tests();
+
+        model.categories.push(test_category("Doing", 1));
+        model.categories.push(test_category("Done", 2));
+
+        app.wire_components(&model)
+            .expect("initial wiring should succeed");
+        app.app_mut()
+            .active(&ComponentId::KanbanColumn(2))
+            .expect("third kanban column should become active before resize storm");
+
+        let resize_storm = [
+            (120, 40),
+            (120, 40),
+            (40, 20),
+            (160, 48),
+            (200, 60),
+            (80, 24),
+            (1, 1),
+            (220, 70),
+            (95, 28),
+            (95, 28),
+            (140, 42),
+            (72, 18),
+            (180, 54),
+            (100, 30),
+            (132, 38),
+        ];
+
+        for (index, (width, height)) in resize_storm.into_iter().enumerate() {
+            if index == 5 {
+                model.categories.truncate(1);
+            }
+            if index == 10 {
+                model.categories.push(test_category("Doing", 1));
+                model.categories.push(test_category("Done", 2));
+            }
+
+            app.handle_resize(&model, &Msg::Resize { width, height })
+                .expect("resize storm event should not panic");
+
+            assert_focus_is_valid(&app, &model);
+        }
+    }
+
+    #[test]
     fn modal_focus_opens_dialog() {
         let poll = MessagePoll::default();
         let mut app = TuiApplication::with_listener(poll.listener_cfg());
@@ -1015,6 +1088,195 @@ mod application {
         assert_eq!(app.app().focus(), Some(&ComponentId::ProjectList));
     }
 
+    #[test]
+    fn modal_focus_under_event_storm() {
+        let poll = MessagePoll::default();
+        let mut app = TuiApplication::with_listener(poll.listener_cfg());
+        let mut model = model_for_resize_tests();
+
+        model.categories.push(test_category("Doing", 1));
+        model.categories.push(test_category("Done", 2));
+
+        app.wire_components(&model)
+            .expect("initial wiring should succeed");
+        app.app_mut()
+            .active(&ComponentId::KanbanColumn(1))
+            .expect("second kanban column should become active before opening dialog");
+
+        let opened = app
+            .route_modal_focus(&model, &Msg::OpenDeleteTaskDialog)
+            .expect("modal open should route focus");
+        assert!(opened, "opening a modal should route focus");
+        assert_eq!(app.app().focus(), Some(&ComponentId::DeleteTask));
+
+        let storm_resizes = [
+            (120, 40),
+            (96, 28),
+            (140, 42),
+            (80, 24),
+            (1, 1),
+            (132, 38),
+            (160, 48),
+            (100, 30),
+        ];
+
+        for (index, (width, height)) in storm_resizes.into_iter().enumerate() {
+            let background_focus = if index % 2 == 0 {
+                ComponentId::Footer
+            } else {
+                ComponentId::ProjectList
+            };
+
+            app.app_mut()
+                .active(&background_focus)
+                .expect("test setup should be able to steal focus");
+
+            let rerouted = app
+                .route_modal_focus(&model, &Msg::Tick)
+                .expect("modal should reclaim focus during event storm");
+            assert!(rerouted, "modal should reclaim focus from background");
+            assert_eq!(app.app().focus(), Some(&ComponentId::DeleteTask));
+
+            app.handle_resize(&model, &Msg::Resize { width, height })
+                .expect("resize handling should not panic while modal is open");
+            assert_eq!(app.app().focus(), Some(&ComponentId::DeleteTask));
+        }
+
+        let restored = app
+            .route_modal_focus(&model, &Msg::DismissDialog)
+            .expect("modal dismiss should restore previous focus");
+        assert!(restored, "dismissing modal should route focus");
+        assert_eq!(app.app().focus(), Some(&ComponentId::KanbanColumn(1)));
+
+        app.route_modal_focus(&model, &Msg::OpenCommandPalette)
+            .expect("command palette open should route focus");
+        assert_eq!(app.app().focus(), Some(&ComponentId::CommandPalette));
+
+        model.categories.truncate(1);
+
+        let fallback = app
+            .route_modal_focus(&model, &Msg::DismissDialog)
+            .expect("modal dismiss should fallback when previous focus is invalid");
+        assert!(fallback, "closing modal should restore or fallback focus");
+        assert_eq!(app.app().focus(), Some(&ComponentId::ProjectList));
+    }
+
+    #[test]
+    fn long_content_renders_safely_and_is_clipped() {
+        let poll = MessagePoll::default();
+        let mut app = TuiApplication::with_listener(poll.listener_cfg());
+        let mut model = model_for_resize_tests();
+
+        let category_id = Uuid::from_u128(0xCA7E_0000_0000_0000_0000_0000_0000_2000);
+        let repo_id = Uuid::from_u128(0xCA7E_0000_0000_0000_0000_0000_0000_3000);
+        let long_category = format!("TODO-{}", "category".repeat(32));
+        let long_title = format!("task-{}", "x".repeat(320));
+        let long_repo_name = format!("repo-{}", "r".repeat(256));
+        let long_branch = format!("branch-{}", "b".repeat(320));
+
+        model.categories = vec![Category {
+            id: category_id,
+            name: long_category,
+            position: 0,
+            color: None,
+            created_at: "1970-01-01T00:00:00Z".to_string(),
+        }];
+        model.repos = vec![Repo {
+            id: repo_id,
+            path: "/tmp/very/long/path/for/repo".to_string(),
+            name: long_repo_name,
+            default_base: Some("main".to_string()),
+            remote_url: None,
+            created_at: "1970-01-01T00:00:00Z".to_string(),
+            updated_at: "1970-01-01T00:00:00Z".to_string(),
+        }];
+        model.tasks = vec![Task {
+            id: Uuid::from_u128(0xCA7E_0000_0000_0000_0000_0000_0000_4000),
+            title: long_title.clone(),
+            repo_id,
+            branch: long_branch.clone(),
+            category_id,
+            position: 0,
+            tmux_session_name: None,
+            worktree_path: None,
+            tmux_status: "running".to_string(),
+            status_source: "manual".to_string(),
+            status_fetched_at: None,
+            status_error: None,
+            created_at: "1970-01-01T00:00:00Z".to_string(),
+            updated_at: "1970-01-01T00:00:00Z".to_string(),
+        }];
+
+        app.wire_components(&model)
+            .expect("wiring should succeed with long content");
+
+        let rendered_column = render_component(&mut app, ComponentId::KanbanColumn(0), 24, 6);
+        assert!(
+            rendered_column.contains("task-"),
+            "visible prefix of long task title should render"
+        );
+        assert!(
+            !rendered_column.contains(&long_title),
+            "kanban column should clip long title to viewport"
+        );
+
+        let rendered_card = render_component(&mut app, ComponentId::TaskCard(0), 28, 6);
+        assert!(
+            rendered_card.contains("task-"),
+            "task card should render a visible title prefix"
+        );
+        assert!(
+            !rendered_card.contains(&long_title),
+            "task card should clip long title to viewport"
+        );
+        assert!(
+            !rendered_card.contains(&long_branch),
+            "task card should clip long repo context to viewport"
+        );
+    }
+
+    #[test]
+    fn empty_states_for_major_views_render_safely() {
+        let poll = MessagePoll::default();
+        let mut app = TuiApplication::with_listener(poll.listener_cfg());
+        let mut model = model_for_resize_tests();
+
+        model.categories.clear();
+        model.repos.clear();
+        model.tasks.clear();
+
+        app.wire_components(&model)
+            .expect("wiring should succeed for empty model");
+
+        let project_list = render_component(&mut app, ComponentId::ProjectList, 42, 8);
+        assert!(
+            project_list.contains("No projects available"),
+            "project list should render empty-state text"
+        );
+
+        let kanban_column = render_component(&mut app, ComponentId::KanbanColumn(0), 42, 8);
+        assert!(
+            kanban_column.contains("No tasks in this category"),
+            "kanban column should render empty-state text"
+        );
+
+        let task_card = render_component(&mut app, ComponentId::TaskCard(0), 42, 8);
+        assert!(
+            task_card.contains("No task data"),
+            "task card should render empty-state text"
+        );
+
+        let side_panel = render_component(&mut app, ComponentId::SidePanel, 84, 16);
+        assert!(
+            side_panel.contains("No tasks available"),
+            "side panel list should render empty-state text"
+        );
+        assert!(
+            side_panel.contains("No task selected"),
+            "side panel details should render empty-state text"
+        );
+    }
+
     fn model_for_resize_tests() -> Model {
         let db = Database::open(":memory:").expect("in-memory database should open");
         Model::new(db).expect("model should initialize from in-memory database")
@@ -1028,6 +1290,36 @@ mod application {
             color: None,
             created_at: "1970-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    fn assert_focus_is_valid(app: &TuiApplication, model: &Model) {
+        let focus = app
+            .app()
+            .focus()
+            .copied()
+            .expect("application should always have focus during resize storm");
+
+        assert!(
+            app.app().mounted(&focus),
+            "focused component {focus:?} should remain mounted"
+        );
+        assert!(
+            super::component_exists_in_layout(focus, model),
+            "focused component {focus:?} should remain valid in current layout"
+        );
+    }
+
+    fn render_component(
+        app: &mut TuiApplication,
+        id: ComponentId,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let mut terminal = MockTerminal::new(width, height);
+        terminal.draw(|frame| {
+            app.view(&id, frame, frame.size());
+        });
+        terminal.buffer_as_string()
     }
 
     fn all_component_ids() -> [ComponentId; 18] {
