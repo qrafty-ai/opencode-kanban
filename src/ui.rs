@@ -786,8 +786,12 @@ fn render_command_palette_dialog(
     let commands = all_commands();
     for ranked in &state.filtered {
         if let Some(command) = commands.get(ranked.command_idx) {
+            let keybinding = app
+                .keybindings
+                .command_palette_keybinding(command.id)
+                .unwrap_or_else(|| command.keybinding.to_string());
             rows.add_col(TextSpan::from(command.display_name.to_string()))
-                .add_col(TextSpan::from(command.keybinding.to_string()))
+                .add_col(TextSpan::from(keybinding))
                 .add_row();
         }
     }
@@ -819,30 +823,31 @@ fn render_command_palette_dialog(
 
 fn render_help_overlay(frame: &mut Frame<'_>, app: &App) {
     let area = centered_rect(84, 84, frame.area());
-    let lines = [
-        "Keyboard shortcuts",
-        "",
-        "Global",
-        "  Ctrl+P: open command palette",
-        "  q: quit",
-        "  ?: toggle help",
-        "",
-        "Board",
-        "  h/l or Left/Right: move focus between columns",
-        "  j/k or Up/Down: move selection",
-        "  Enter: attach selected task",
-        "  n: new task",
-        "  c/r/x: add/rename/delete category",
-        "  d: delete task",
-        "  H/L: move task left/right",
-        "  J/K: move task down/up",
-        "  v: toggle side panel",
-        "",
-        "Dialogs",
-        "  Enter: confirm",
-        "  Esc: cancel",
-    ];
-    render_message_dialog(frame, area, app, "Help", &lines.join("\n"));
+    frame.render_widget(Clear, area);
+    let theme = app.theme;
+    let lines = app
+        .keybindings
+        .help_lines()
+        .into_iter()
+        .map(|line| {
+            if line.is_empty() {
+                TextSpan::new(line)
+            } else if !line.starts_with(' ') {
+                TextSpan::new(line).fg(theme.base.header).bold()
+            } else {
+                TextSpan::new(line).fg(theme.base.text)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut paragraph = Paragraph::default()
+        .title("Help", Alignment::Center)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.dialog_surface())
+        .wrap(true)
+        .text(lines);
+    paragraph.view(frame, area);
 }
 
 fn render_empty_state(frame: &mut Frame<'_>, area: Rect, message: &str, app: &App) {

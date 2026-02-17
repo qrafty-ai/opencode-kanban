@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{KeyEvent, MouseEvent};
 use tracing::warn;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::widgets::{ListState, ScrollbarState};
@@ -34,6 +34,7 @@ pub use self::state::{
 use crate::command_palette::{CommandPaletteState, all_commands};
 use crate::db::Database;
 use crate::git::{derive_worktree_path, git_delete_branch, git_remove_worktree};
+use crate::keybindings::{KeyAction, KeyContext, Keybindings};
 use crate::opencode::{
     OpenCodeServerManager, Status, ensure_server_ready, opencode_attach_command,
 };
@@ -83,6 +84,7 @@ pub struct App {
     pub side_panel_width: u16,
     pub selected_task_index: usize,
     pub current_log_buffer: Option<String>,
+    pub keybindings: Keybindings,
 }
 
 impl App {
@@ -142,6 +144,7 @@ impl App {
             side_panel_width: 40,
             selected_task_index: 0,
             current_log_buffer: None,
+            keybindings: Keybindings::load(),
         };
 
         app.refresh_data()?;
@@ -574,7 +577,8 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         if self.active_dialog != ActiveDialog::None {
             if let ActiveDialog::Help = self.active_dialog
-                && key.code == KeyCode::Char('?')
+                && self.keybindings.action_for_key(KeyContext::Global, key)
+                    == Some(KeyAction::ToggleHelp)
             {
                 self.active_dialog = ActiveDialog::None;
                 return Ok(());
@@ -582,139 +586,147 @@ impl App {
             return self.handle_dialog_key(key);
         }
 
-        match key.code {
-            KeyCode::Char('?') => self.active_dialog = ActiveDialog::Help,
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.update(Message::OpenCommandPalette)?;
-            }
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('v') => {
-                self.current_log_buffer = None;
+        if let Some(action) = self.keybindings.action_for_key(KeyContext::Global, key) {
+            match action {
+                KeyAction::ToggleHelp => self.active_dialog = ActiveDialog::Help,
+                KeyAction::OpenPalette => {
+                    self.update(Message::OpenCommandPalette)?;
+                }
+                KeyAction::Quit => self.should_quit = true,
+                KeyAction::ToggleView => {
+                    self.current_log_buffer = None;
 
-                match self.view_mode {
-                    ViewMode::Kanban => {
-                        self.view_mode = ViewMode::SidePanel;
+                    match self.view_mode {
+                        ViewMode::Kanban => {
+                            self.view_mode = ViewMode::SidePanel;
 
-                        let entries = self.linear_task_entries();
-                        if entries.is_empty() {
-                            self.selected_task_index = 0;
-                        } else {
-                            let current_id = self
-                                .selected_task_in_column(self.focused_column)
-                                .map(|task| task.id);
-                            let index = current_id
-                                .and_then(|id| {
-                                    entries.iter().position(|(_, _, task)| task.id == id)
-                                })
-                                .unwrap_or(0);
-                            self.apply_linear_task_selection(&entries, index);
+                            let entries = self.linear_task_entries();
+                            if entries.is_empty() {
+                                self.selected_task_index = 0;
+                            } else {
+                                let current_id = self
+                                    .selected_task_in_column(self.focused_column)
+                                    .map(|task| task.id);
+                                let index = current_id
+                                    .and_then(|id| {
+                                        entries.iter().position(|(_, _, task)| task.id == id)
+                                    })
+                                    .unwrap_or(0);
+                                self.apply_linear_task_selection(&entries, index);
+                            }
+                        }
+                        ViewMode::SidePanel => {
+                            self.view_mode = ViewMode::Kanban;
                         }
                     }
-                    ViewMode::SidePanel => {
-                        self.view_mode = ViewMode::Kanban;
-                    }
                 }
-            }
-            KeyCode::Char('<') => {
-                self.side_panel_width = self.side_panel_width.saturating_sub(5).max(20);
-            }
-            KeyCode::Char('>') => {
-                self.side_panel_width = self.side_panel_width.saturating_add(5).min(80);
-            }
-            _ => {}
-        }
-
-        if self.current_view == View::ProjectList {
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => self.update(Message::ProjectListSelectUp)?,
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.update(Message::ProjectListSelectDown)?
+                KeyAction::ShrinkPanel => {
+                    self.side_panel_width = self.side_panel_width.saturating_sub(5).max(20);
                 }
-                KeyCode::Enter => self.update(Message::ProjectListConfirm)?,
-                KeyCode::Char('n') => self.update(Message::OpenNewProjectDialog)?,
+                KeyAction::ExpandPanel => {
+                    self.side_panel_width = self.side_panel_width.saturating_add(5).min(80);
+                }
                 _ => {}
             }
             return Ok(());
         }
 
-        match key.code {
-            KeyCode::Char('h') | KeyCode::Left => {
-                self.update(Message::NavigateLeft)?;
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                self.update(Message::NavigateRight)?;
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.view_mode == ViewMode::SidePanel {
-                    let entries = self.linear_task_entries();
-                    if entries.is_empty() {
-                        self.selected_task_index = 0;
-                        self.current_log_buffer = None;
-                    } else {
-                        let current = self.selected_task_index.min(entries.len() - 1);
-                        let next = (current + 1) % entries.len();
-                        self.apply_linear_task_selection(&entries, next);
-                    }
-                } else {
-                    self.update(Message::SelectDown)?;
+        if self.current_view == View::ProjectList {
+            if let Some(action) = self
+                .keybindings
+                .action_for_key(KeyContext::ProjectList, key)
+            {
+                match action {
+                    KeyAction::ProjectUp => self.update(Message::ProjectListSelectUp)?,
+                    KeyAction::ProjectDown => self.update(Message::ProjectListSelectDown)?,
+                    KeyAction::ProjectConfirm => self.update(Message::ProjectListConfirm)?,
+                    KeyAction::NewProject => self.update(Message::OpenNewProjectDialog)?,
+                    _ => {}
                 }
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.view_mode == ViewMode::SidePanel {
-                    let entries = self.linear_task_entries();
-                    if entries.is_empty() {
-                        self.selected_task_index = 0;
-                        self.current_log_buffer = None;
-                    } else {
-                        let current = self.selected_task_index.min(entries.len() - 1);
-                        let prev = if current == 0 {
-                            entries.len() - 1
+            return Ok(());
+        }
+
+        if let Some(action) = self.keybindings.action_for_key(KeyContext::Board, key) {
+            match action {
+                KeyAction::NavigateLeft => {
+                    self.update(Message::NavigateLeft)?;
+                }
+                KeyAction::NavigateRight => {
+                    self.update(Message::NavigateRight)?;
+                }
+                KeyAction::SelectDown => {
+                    if self.view_mode == ViewMode::SidePanel {
+                        let entries = self.linear_task_entries();
+                        if entries.is_empty() {
+                            self.selected_task_index = 0;
+                            self.current_log_buffer = None;
                         } else {
-                            current - 1
-                        };
-                        self.apply_linear_task_selection(&entries, prev);
+                            let current = self.selected_task_index.min(entries.len() - 1);
+                            let next = (current + 1) % entries.len();
+                            self.apply_linear_task_selection(&entries, next);
+                        }
+                    } else {
+                        self.update(Message::SelectDown)?;
                     }
-                } else {
-                    self.update(Message::SelectUp)?;
                 }
+                KeyAction::SelectUp => {
+                    if self.view_mode == ViewMode::SidePanel {
+                        let entries = self.linear_task_entries();
+                        if entries.is_empty() {
+                            self.selected_task_index = 0;
+                            self.current_log_buffer = None;
+                        } else {
+                            let current = self.selected_task_index.min(entries.len() - 1);
+                            let prev = if current == 0 {
+                                entries.len() - 1
+                            } else {
+                                current - 1
+                            };
+                            self.apply_linear_task_selection(&entries, prev);
+                        }
+                    } else {
+                        self.update(Message::SelectUp)?;
+                    }
+                }
+                KeyAction::NewTask => {
+                    self.update(Message::OpenNewTaskDialog)?;
+                }
+                KeyAction::AddCategory => {
+                    self.update(Message::OpenAddCategoryDialog)?;
+                }
+                KeyAction::CycleCategoryColor => {
+                    self.update(Message::CycleCategoryColor(self.focused_column))?;
+                }
+                KeyAction::RenameCategory => {
+                    self.update(Message::OpenRenameCategoryDialog)?;
+                }
+                KeyAction::DeleteCategory => {
+                    self.update(Message::OpenDeleteCategoryDialog)?;
+                }
+                KeyAction::DeleteTask => {
+                    self.update(Message::OpenDeleteTaskDialog)?;
+                }
+                KeyAction::MoveTaskLeft => {
+                    self.update(Message::MoveTaskLeft)?;
+                }
+                KeyAction::MoveTaskRight => {
+                    self.update(Message::MoveTaskRight)?;
+                }
+                KeyAction::MoveTaskDown => {
+                    self.update(Message::MoveTaskDown)?;
+                }
+                KeyAction::MoveTaskUp => {
+                    self.update(Message::MoveTaskUp)?;
+                }
+                KeyAction::AttachTask => {
+                    self.update(Message::AttachSelectedTask)?;
+                }
+                KeyAction::Dismiss => {
+                    self.update(Message::DismissDialog)?;
+                }
+                _ => {}
             }
-            KeyCode::Char('n') => {
-                self.update(Message::OpenNewTaskDialog)?;
-            }
-            KeyCode::Char('c') => {
-                self.update(Message::OpenAddCategoryDialog)?;
-            }
-            KeyCode::Char('p') => {
-                self.update(Message::CycleCategoryColor(self.focused_column))?;
-            }
-            KeyCode::Char('r') => {
-                self.update(Message::OpenRenameCategoryDialog)?;
-            }
-            KeyCode::Char('x') => {
-                self.update(Message::OpenDeleteCategoryDialog)?;
-            }
-            KeyCode::Char('d') => {
-                self.update(Message::OpenDeleteTaskDialog)?;
-            }
-            KeyCode::Char('H') => {
-                self.update(Message::MoveTaskLeft)?;
-            }
-            KeyCode::Char('L') => {
-                self.update(Message::MoveTaskRight)?;
-            }
-            KeyCode::Char('J') => {
-                self.update(Message::MoveTaskDown)?;
-            }
-            KeyCode::Char('K') => {
-                self.update(Message::MoveTaskUp)?;
-            }
-            KeyCode::Enter => {
-                self.update(Message::AttachSelectedTask)?;
-            }
-            KeyCode::Esc => {
-                self.update(Message::DismissDialog)?;
-            }
-            _ => {}
         }
 
         Ok(())
