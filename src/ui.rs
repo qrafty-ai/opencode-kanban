@@ -8,7 +8,8 @@ use tuirealm::{
     ratatui::{
         Frame,
         layout::{Constraint, Direction, Layout, Rect},
-        widgets::Clear,
+        style::Style as RatatuiStyle,
+        widgets::{Clear, Scrollbar, ScrollbarOrientation, ScrollbarState},
     },
 };
 
@@ -208,6 +209,8 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
         } else {
             tasks.iter().map(task_tile_lines).sum()
         };
+        let viewport_lines = list_inner_height(columns[slot]);
+        let show_scrollbar = viewport_lines > 0 && row_count > viewport_lines;
 
         let selected_task = app
             .selected_task_per_column
@@ -217,7 +220,8 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .min(tasks.len().saturating_sub(1));
         let is_focused_column = column_idx == app.focused_column;
 
-        let tile_width = list_inner_width(columns[slot]);
+        let tile_width =
+            list_inner_width(columns[slot]).saturating_sub(usize::from(show_scrollbar));
         for (task_index, task) in tasks.iter().enumerate() {
             append_task_tile_rows(
                 &mut rows,
@@ -233,12 +237,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             rows.add_col(TextSpan::from("No tasks")).add_row();
         }
 
-        let selected_line = tasks
-            .iter()
-            .take(selected_task)
-            .map(task_tile_lines)
-            .sum::<usize>()
-            .min(row_count.saturating_sub(1));
+        let selected_line = column_selected_line(tasks.as_slice(), selected_task);
 
         let mut list = List::default()
             .title(
@@ -257,6 +256,33 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             AttrValue::Flag(column_idx == app.focused_column),
         );
         list.view(frame, columns[slot]);
+
+        if show_scrollbar {
+            let scroll_offset = column_scroll_offset(selected_line, row_count, viewport_lines);
+            let mut state = ScrollbarState::new(row_count)
+                .position(scrollbar_position_for_offset(
+                    scroll_offset,
+                    row_count,
+                    viewport_lines,
+                ))
+                .viewport_content_length(viewport_lines);
+            let thumb_color = if is_focused_column {
+                accent
+            } else {
+                theme.base.text_muted
+            };
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .track_style(RatatuiStyle::default().fg(theme.base.text_muted))
+                .thumb_style(RatatuiStyle::default().fg(thumb_color))
+                .thumb_symbol("█");
+            let scrollbar_area = inset_rect(columns[slot], 1, 1);
+            if scrollbar_area.width > 0 && scrollbar_area.height > 0 {
+                frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
+            }
+        }
     }
 }
 
@@ -298,7 +324,10 @@ fn render_side_panel_list(
     let selected_row = app
         .side_panel_selected_row
         .min(rows_data.len().saturating_sub(1));
-    let tile_width = list_inner_width(area);
+    let row_count = rows_data.iter().map(side_panel_row_lines).sum::<usize>();
+    let viewport_lines = list_inner_height(area);
+    let show_scrollbar = viewport_lines > 0 && row_count > viewport_lines;
+    let tile_width = list_inner_width(area).saturating_sub(usize::from(show_scrollbar));
     let mut rows = TableBuilder::default();
     for (row_index, row) in rows_data.iter().enumerate() {
         match row {
@@ -347,6 +376,28 @@ fn render_side_panel_list(
         .inactive(Style::default().fg(theme.base.text_muted));
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, area);
+
+    if show_scrollbar {
+        let scroll_offset = column_scroll_offset(selected_line, row_count, viewport_lines);
+        let mut state = ScrollbarState::new(row_count)
+            .position(scrollbar_position_for_offset(
+                scroll_offset,
+                row_count,
+                viewport_lines,
+            ))
+            .viewport_content_length(viewport_lines);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .track_style(RatatuiStyle::default().fg(theme.base.text_muted))
+            .thumb_style(RatatuiStyle::default().fg(theme.interactive.focus))
+            .thumb_symbol("█");
+        let scrollbar_area = inset_rect(area, 1, 1);
+        if scrollbar_area.width > 0 && scrollbar_area.height > 0 {
+            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
+        }
+    }
 }
 
 fn render_side_panel_details(
@@ -1219,14 +1270,61 @@ fn side_panel_row_lines(row: &SidePanelRow) -> usize {
 }
 
 fn side_panel_selected_line(rows: &[SidePanelRow], selected_row: usize) -> usize {
-    if rows.is_empty() {
+    selected_line_for_row_heights(
+        &rows.iter().map(side_panel_row_lines).collect::<Vec<_>>(),
+        selected_row,
+    )
+}
+
+fn column_selected_line(tasks: &[Task], selected_task: usize) -> usize {
+    selected_line_for_row_heights(
+        &tasks.iter().map(task_tile_lines).collect::<Vec<_>>(),
+        selected_task,
+    )
+}
+
+fn column_scroll_offset(selected_line: usize, row_count: usize, viewport_lines: usize) -> usize {
+    if viewport_lines == 0 {
         return 0;
     }
-    let selected_row = selected_row.min(rows.len().saturating_sub(1));
-    rows.iter()
-        .take(selected_row)
-        .map(side_panel_row_lines)
-        .sum::<usize>()
+    let max_offset = row_count.saturating_sub(viewport_lines);
+    selected_line
+        .saturating_sub(viewport_lines.saturating_sub(1))
+        .min(max_offset)
+}
+
+fn selected_line_for_row_heights(row_heights: &[usize], selected_index: usize) -> usize {
+    if row_heights.is_empty() {
+        return 0;
+    }
+
+    let selected_index = selected_index.min(row_heights.len() - 1);
+    let selected_start = row_heights.iter().take(selected_index).sum::<usize>();
+    let selected_height = row_heights.get(selected_index).copied().unwrap_or(1);
+    let row_count = row_heights.iter().sum::<usize>();
+
+    selected_start
+        .saturating_add(selected_height.saturating_sub(1))
+        .min(row_count.saturating_sub(1))
+}
+
+fn scrollbar_position_for_offset(
+    scroll_offset: usize,
+    row_count: usize,
+    viewport_lines: usize,
+) -> usize {
+    if row_count == 0 || viewport_lines == 0 {
+        return 0;
+    }
+
+    let max_offset = row_count.saturating_sub(viewport_lines);
+    if max_offset == 0 {
+        return 0;
+    }
+
+    let max_position = row_count.saturating_sub(1);
+    let clamped_offset = scroll_offset.min(max_offset);
+    ((clamped_offset as u128) * (max_position as u128) / (max_offset as u128)) as usize
 }
 
 fn category_status_counts(
@@ -1401,6 +1499,10 @@ fn task_tile_branch(task: &Task) -> String {
 
 fn list_inner_width(area: Rect) -> usize {
     area.width.saturating_sub(2) as usize
+}
+
+fn list_inner_height(area: Rect) -> usize {
+    area.height.saturating_sub(2) as usize
 }
 
 fn count_chars(value: &str) -> usize {
@@ -1632,8 +1734,44 @@ mod tests {
         ];
 
         assert_eq!(side_panel_selected_line(&rows, 0), 0);
-        assert_eq!(side_panel_selected_line(&rows, 1), 1);
-        assert_eq!(side_panel_selected_line(&rows, 2), 6);
+        assert_eq!(side_panel_selected_line(&rows, 1), 5);
+        assert_eq!(side_panel_selected_line(&rows, 2), 10);
+    }
+
+    #[test]
+    fn test_column_selected_line_tracks_bottom_of_selected_tile() {
+        let category_id = Uuid::new_v4();
+        let tasks = vec![
+            test_task(category_id, 0),
+            test_task(category_id, 1),
+            test_task(category_id, 2),
+        ];
+
+        assert_eq!(column_selected_line(&tasks, 0), 4);
+        assert_eq!(column_selected_line(&tasks, 1), 9);
+        assert_eq!(column_selected_line(&tasks, 2), 14);
+        assert_eq!(column_selected_line(&tasks, 99), 14);
+    }
+
+    #[test]
+    fn test_column_selected_line_returns_zero_when_no_tasks() {
+        assert_eq!(column_selected_line(&[], 0), 0);
+    }
+
+    #[test]
+    fn test_column_scroll_offset_when_selection_fits_viewport() {
+        assert_eq!(column_scroll_offset(2, 15, 10), 0);
+    }
+
+    #[test]
+    fn test_column_scroll_offset_clamps_to_max_offset() {
+        assert_eq!(column_scroll_offset(14, 15, 5), 10);
+    }
+
+    #[test]
+    fn test_scrollbar_position_for_offset_maps_to_full_range() {
+        assert_eq!(scrollbar_position_for_offset(0, 60, 48), 0);
+        assert_eq!(scrollbar_position_for_offset(12, 60, 48), 59);
     }
 
     #[test]
