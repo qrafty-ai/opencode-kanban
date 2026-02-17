@@ -1399,7 +1399,10 @@ fn attach_task_with_runtime(
         runtime,
     );
 
-    let command = opencode_attach_command(None, task.worktree_path.as_deref());
+    let command = opencode_attach_command(
+        task.opencode_session_id.as_deref(),
+        task.worktree_path.as_deref(),
+    );
 
     runtime.create_session(&session_name, worktree_path, &command)?;
     db.update_task_tmux(

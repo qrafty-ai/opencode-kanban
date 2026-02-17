@@ -37,6 +37,7 @@ pub struct Task {
     pub status_source: String,
     pub status_fetched_at: Option<String>,
     pub status_error: Option<String>,
+    pub opencode_session_id: Option<String>,
     pub session_todo_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,
