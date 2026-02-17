@@ -15,7 +15,8 @@ use tuirealm::{
 use crate::app::{
     ActiveDialog, App, CATEGORY_COLOR_PALETTE, CategoryColorField, CategoryInputField,
     CategoryInputMode, DeleteCategoryField, DeleteTaskField, NewTaskField, STATUS_BROKEN,
-    STATUS_REPO_UNAVAILABLE, View, ViewMode, category_color_label,
+    STATUS_REPO_UNAVAILABLE, SidePanelRow, TodoVisualizationMode, View, ViewMode,
+    category_color_label,
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
@@ -161,7 +162,14 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else if app.category_edit_mode {
         "EDIT MODE  h/l:nav  H/L:reorder  p:color  r:rename  x:delete  g:exit"
     } else {
-        "n:new  Enter:attach  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view"
+        match app.view_mode {
+            ViewMode::Kanban => {
+                "n:new  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view"
+            }
+            ViewMode::SidePanel => {
+                "j/k:select  Space:collapse  Enter:attach task  t:todo view  c/r/x:category  H/L/J/K:move  v:view"
+            }
+        }
     };
 
     let mut footer = Label::default()
@@ -253,8 +261,12 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let entries = linear_entries(app);
-    if entries.is_empty() {
+    if app.categories.is_empty() {
+        render_empty_state(frame, area, "No categories yet. Press c to add one.", app);
+        return;
+    }
+    let rows = app.side_panel_rows();
+    if rows.is_empty() {
         render_empty_state(frame, area, "No tasks available.", app);
         return;
     }
@@ -268,44 +280,64 @@ fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ])
         .split(area);
 
-    render_side_panel_list(frame, sections[0], app, &entries);
-    render_side_panel_details(frame, sections[1], app, &entries);
+    render_side_panel_list(frame, sections[0], app, &rows);
+    render_side_panel_details(frame, sections[1], app, &rows);
 }
 
 fn render_side_panel_list(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
-    entries: &[(String, Task)],
+    rows_data: &[SidePanelRow],
 ) {
     let theme = app.theme;
-    let mut rows = TableBuilder::default();
-    let row_count = if entries.is_empty() {
-        1
-    } else {
-        entries.iter().map(|(_, task)| task_tile_lines(task)).sum()
-    };
-    let selected_task = app.selected_task_index.min(entries.len().saturating_sub(1));
-    let tile_width = list_inner_width(area);
-    for (task_index, (_, task)) in entries.iter().enumerate() {
-        append_task_tile_rows(
-            &mut rows,
-            app,
-            task,
-            task_index == selected_task,
-            tile_width,
-            theme.interactive.selected_border,
-        );
+    if rows_data.is_empty() {
+        return;
     }
 
-    let selected_line = entries
-        .iter()
-        .take(selected_task)
-        .map(|(_, task)| task_tile_lines(task))
-        .sum::<usize>()
-        .min(row_count.saturating_sub(1));
+    let selected_row = app
+        .side_panel_selected_row
+        .min(rows_data.len().saturating_sub(1));
+    let tile_width = list_inner_width(area);
+    let mut rows = TableBuilder::default();
+    for (row_index, row) in rows_data.iter().enumerate() {
+        match row {
+            SidePanelRow::CategoryHeader {
+                category_name,
+                category_color,
+                visible_tasks,
+                total_tasks,
+                collapsed,
+                ..
+            } => {
+                let accent = theme.category_accent(category_color.as_deref());
+                let marker = if *collapsed { ">" } else { "v" };
+                let text = format!("{marker} {category_name} ({visible_tasks}/{total_tasks})");
+                let line = pad_to_width(&format!(" {text}"), tile_width);
+                let style = if row_index == selected_row {
+                    theme.tile_colors(true)
+                } else {
+                    theme.tile_colors(false)
+                };
+                rows.add_col(TextSpan::new(line).fg(accent).bg(style.background).bold())
+                    .add_row();
+            }
+            SidePanelRow::Task { task, .. } => {
+                append_task_tile_rows(
+                    &mut rows,
+                    app,
+                    task,
+                    row_index == selected_row,
+                    tile_width,
+                    theme.interactive.selected_border,
+                );
+            }
+        }
+    }
+
+    let selected_line = side_panel_selected_line(rows_data, selected_row);
     let mut list = List::default()
-        .title("Tasks", Alignment::Left)
+        .title("Tasks by Category", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
         .background(theme.base.surface)
@@ -321,11 +353,24 @@ fn render_side_panel_details(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
-    entries: &[(String, Task)],
+    rows_data: &[SidePanelRow],
 ) {
+    if rows_data.is_empty() {
+        return;
+    }
+    let selected_row = app
+        .side_panel_selected_row
+        .min(rows_data.len().saturating_sub(1));
+    match &rows_data[selected_row] {
+        SidePanelRow::Task { task, .. } => render_side_panel_task_details(frame, area, app, task),
+        SidePanelRow::CategoryHeader { .. } => {
+            render_side_panel_category_details(frame, area, app, &rows_data[selected_row])
+        }
+    }
+}
+
+fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, task: &Task) {
     let theme = app.theme;
-    let selected = app.selected_task_index.min(entries.len().saturating_sub(1));
-    let (_, task) = &entries[selected];
 
     let repo_name = app
         .repos
@@ -335,10 +380,11 @@ fn render_side_panel_details(
         .unwrap_or_else(|| "unknown".to_string());
 
     let spinner = status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase);
-    let todos = task
+    let todo_summary = task
         .session_todo_summary()
         .map(|(done, total)| format!("{done}/{total}"))
         .unwrap_or_else(|| "--".to_string());
+    let todo_view = app.todo_visualization_mode.as_str();
     let session = task.tmux_session_name.as_deref().unwrap_or("n/a");
 
     let worktree_full = task.worktree_path.as_deref().unwrap_or("n/a");
@@ -353,12 +399,24 @@ fn render_side_panel_details(
         TextSpan::new("RUNTIME").fg(theme.base.header).bold(),
         TextSpan::new(detail_kv("Status", spinner))
             .fg(theme.status_color(task.tmux_status.as_str())),
-        TextSpan::new(detail_kv("Todos", &todos)).fg(theme.tile.todo),
+        TextSpan::new(detail_kv("Todos", &todo_summary)).fg(theme.tile.todo),
+        TextSpan::new(detail_kv("TodoView", todo_view)).fg(theme.base.text_muted),
         TextSpan::new(detail_kv("Session", session)).fg(theme.base.text),
         TextSpan::new(""),
         TextSpan::new("WORKSPACE").fg(theme.base.header).bold(),
         TextSpan::new(detail_kv("Path", &worktree_short)).fg(theme.base.text),
     ];
+
+    if app.todo_visualization_mode == TodoVisualizationMode::Checklist {
+        let checklist_lines = todo_checklist_lines(task);
+        if !checklist_lines.is_empty() {
+            lines.push(TextSpan::new(""));
+            lines.push(TextSpan::new("WORK PLAN").fg(theme.base.header).bold());
+            for (line, state) in checklist_lines {
+                lines.push(TextSpan::new(line).fg(todo_state_color(theme, state)));
+            }
+        }
+    }
 
     if worktree_full != worktree_short {
         lines.push(TextSpan::new(detail_kv("Full", worktree_full)).fg(theme.base.text_muted));
@@ -379,6 +437,70 @@ fn render_side_panel_details(
     let mut paragraph = Paragraph::default()
         .title("Details", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
+        .wrap(true)
+        .text(lines);
+    paragraph.view(frame, area);
+}
+
+fn render_side_panel_category_details(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    row: &SidePanelRow,
+) {
+    let SidePanelRow::CategoryHeader {
+        category_name,
+        category_id,
+        category_color,
+        total_tasks,
+        visible_tasks,
+        collapsed,
+        ..
+    } = row
+    else {
+        return;
+    };
+
+    let theme = app.theme;
+    let accent = theme.category_accent(category_color.as_deref());
+    let (running, idle, broken, unavailable, waiting, dead, other) =
+        category_status_counts(app, *category_id);
+
+    let mut lines = vec![
+        TextSpan::new("CATEGORY").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Name", category_name.as_str())).fg(theme.base.text),
+        TextSpan::new(detail_kv(
+            "State",
+            if *collapsed { "collapsed" } else { "expanded" },
+        ))
+        .fg(theme.base.text),
+        TextSpan::new(detail_kv("Visible", &visible_tasks.to_string())).fg(theme.base.text),
+        TextSpan::new(detail_kv("Tasks", &total_tasks.to_string())).fg(theme.base.text),
+        TextSpan::new(""),
+        TextSpan::new("STATUS").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Running", &running.to_string())).fg(theme.status_color("running")),
+        TextSpan::new(detail_kv("Idle", &idle.to_string())).fg(theme.status_color("idle")),
+        TextSpan::new(detail_kv("Broken", &broken.to_string()))
+            .fg(theme.status_color(STATUS_BROKEN)),
+        TextSpan::new(detail_kv("Unavailable", &unavailable.to_string()))
+            .fg(theme.status_color(STATUS_REPO_UNAVAILABLE)),
+        TextSpan::new(detail_kv("Waiting", &waiting.to_string())).fg(theme.status_color("waiting")),
+        TextSpan::new(detail_kv("Dead", &dead.to_string())).fg(theme.status_color("dead")),
+    ];
+
+    if other > 0 {
+        lines.push(TextSpan::new(detail_kv("Other", &other.to_string())).fg(theme.base.text));
+    }
+
+    lines.push(TextSpan::new(""));
+    lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
+    lines.push(TextSpan::new("Space toggle  j/k navigate  Enter attach on task").fg(accent));
+
+    let mut paragraph = Paragraph::default()
+        .title("Category Summary", Alignment::Left)
+        .borders(rounded_borders(accent))
         .foreground(theme.base.text)
         .background(theme.base.surface)
         .wrap(true)
@@ -1072,18 +1194,6 @@ fn render_input_component(
     input.view(frame, area);
 }
 
-fn linear_entries(app: &App) -> Vec<(String, Task)> {
-    let mut out = Vec::new();
-    for (_, category) in sorted_categories(app) {
-        let mut tasks = tasks_for_category(app, category.id);
-        tasks.sort_by_key(|task| task.position);
-        for task in tasks {
-            out.push((category.name.clone(), task));
-        }
-    }
-    out
-}
-
 fn tasks_for_category(app: &App, category_id: uuid::Uuid) -> Vec<Task> {
     let mut tasks: Vec<Task> = app
         .tasks
@@ -1099,6 +1209,55 @@ fn sorted_categories(app: &App) -> Vec<(usize, &Category)> {
     let mut categories: Vec<(usize, &Category)> = app.categories.iter().enumerate().collect();
     categories.sort_by_key(|(_, category)| category.position);
     categories
+}
+
+fn side_panel_row_lines(row: &SidePanelRow) -> usize {
+    match row {
+        SidePanelRow::CategoryHeader { .. } => 1,
+        SidePanelRow::Task { task, .. } => task_tile_lines(task),
+    }
+}
+
+fn side_panel_selected_line(rows: &[SidePanelRow], selected_row: usize) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    let selected_row = selected_row.min(rows.len().saturating_sub(1));
+    rows.iter()
+        .take(selected_row)
+        .map(side_panel_row_lines)
+        .sum::<usize>()
+}
+
+fn category_status_counts(
+    app: &App,
+    category_id: uuid::Uuid,
+) -> (usize, usize, usize, usize, usize, usize, usize) {
+    let mut running = 0;
+    let mut idle = 0;
+    let mut broken = 0;
+    let mut unavailable = 0;
+    let mut waiting = 0;
+    let mut dead = 0;
+    let mut other = 0;
+
+    for task in app
+        .tasks
+        .iter()
+        .filter(|task| task.category_id == category_id)
+    {
+        match task.tmux_status.as_str() {
+            "running" => running += 1,
+            "idle" => idle += 1,
+            STATUS_BROKEN => broken += 1,
+            STATUS_REPO_UNAVAILABLE => unavailable += 1,
+            "waiting" => waiting += 1,
+            "dead" => dead += 1,
+            _ => other += 1,
+        }
+    }
+
+    (running, idle, broken, unavailable, waiting, dead, other)
 }
 
 const TASK_TITLE_MAX: usize = 34;
@@ -1174,6 +1333,51 @@ fn task_tile_status_line(app: &App, task: &Task) -> String {
     match task.session_todo_summary() {
         Some((done, total)) => format!("{spinner}  todo {done}/{total}"),
         None => spinner.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TodoLineState {
+    Completed,
+    Active,
+    Pending,
+}
+
+fn todo_checklist_lines(task: &Task) -> Vec<(String, TodoLineState)> {
+    let todos = task.session_todos();
+    let active_index = todos.iter().position(|todo| !todo.completed);
+
+    todos
+        .iter()
+        .enumerate()
+        .map(|(index, todo)| {
+            let state = if todo.completed {
+                TodoLineState::Completed
+            } else if Some(index) == active_index {
+                TodoLineState::Active
+            } else {
+                TodoLineState::Pending
+            };
+            let marker = todo_line_marker(state);
+            let content = clamp_text(todo.content.as_str(), 72);
+            (format!("┃  [{marker}] {content}"), state)
+        })
+        .collect()
+}
+
+fn todo_line_marker(state: TodoLineState) -> &'static str {
+    match state {
+        TodoLineState::Completed => "✓",
+        TodoLineState::Active => "•",
+        TodoLineState::Pending => " ",
+    }
+}
+
+fn todo_state_color(theme: Theme, state: TodoLineState) -> Color {
+    match state {
+        TodoLineState::Completed => theme.status.running,
+        TodoLineState::Active => theme.status.waiting,
+        TodoLineState::Pending => theme.base.text_muted,
     }
 }
 
@@ -1371,6 +1575,8 @@ fn inset_rect(area: Rect, horizontal: u16, vertical: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::SessionTodoItem;
+    use uuid::Uuid;
 
     #[test]
     fn test_calculate_overlay_area_center() {
@@ -1396,5 +1602,113 @@ mod tests {
     fn test_command_palette_hides_results_on_short_terminal() {
         assert!(!should_render_command_palette_results((120, 9)));
         assert!(should_render_command_palette_results((120, 10)));
+    }
+
+    #[test]
+    fn test_side_panel_selected_line_accounts_for_header_and_tile_rows() {
+        let category_id = Uuid::new_v4();
+        let rows = vec![
+            SidePanelRow::CategoryHeader {
+                column_index: 0,
+                category_id,
+                category_name: "TODO".to_string(),
+                category_color: None,
+                total_tasks: 2,
+                visible_tasks: 2,
+                collapsed: false,
+            },
+            SidePanelRow::Task {
+                column_index: 0,
+                index_in_column: 0,
+                category_id,
+                task: Box::new(test_task(category_id, 0)),
+            },
+            SidePanelRow::Task {
+                column_index: 0,
+                index_in_column: 1,
+                category_id,
+                task: Box::new(test_task(category_id, 1)),
+            },
+        ];
+
+        assert_eq!(side_panel_selected_line(&rows, 0), 0);
+        assert_eq!(side_panel_selected_line(&rows, 1), 1);
+        assert_eq!(side_panel_selected_line(&rows, 2), 6);
+    }
+
+    #[test]
+    fn test_todo_checklist_lines_use_expected_markers() {
+        let category_id = Uuid::new_v4();
+        let mut task = test_task(category_id, 0);
+        task.session_todo_json = Some(
+            serde_json::to_string(&vec![
+                SessionTodoItem {
+                    content: "done".to_string(),
+                    completed: true,
+                },
+                SessionTodoItem {
+                    content: "active".to_string(),
+                    completed: false,
+                },
+                SessionTodoItem {
+                    content: "pending".to_string(),
+                    completed: false,
+                },
+            ])
+            .expect("todo json"),
+        );
+
+        let lines = todo_checklist_lines(&task);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].0.contains("[✓] done"));
+        assert_eq!(lines[0].1, TodoLineState::Completed);
+        assert!(lines[1].0.contains("[•] active"));
+        assert_eq!(lines[1].1, TodoLineState::Active);
+        assert!(lines[2].0.contains("[ ] pending"));
+        assert_eq!(lines[2].1, TodoLineState::Pending);
+    }
+
+    #[test]
+    fn test_todo_checklist_lines_show_pending_when_all_incomplete() {
+        let category_id = Uuid::new_v4();
+        let mut task = test_task(category_id, 0);
+        task.session_todo_json = Some(
+            serde_json::to_string(&vec![
+                SessionTodoItem {
+                    content: "first".to_string(),
+                    completed: false,
+                },
+                SessionTodoItem {
+                    content: "second".to_string(),
+                    completed: false,
+                },
+            ])
+            .expect("todo json"),
+        );
+
+        let lines = todo_checklist_lines(&task);
+        assert!(lines[0].0.contains("[•] first"));
+        assert!(lines[1].0.contains("[ ] second"));
+    }
+
+    fn test_task(category_id: Uuid, position: i64) -> Task {
+        Task {
+            id: Uuid::new_v4(),
+            title: "Task".to_string(),
+            repo_id: Uuid::new_v4(),
+            branch: "feature/test".to_string(),
+            category_id,
+            position,
+            tmux_session_name: None,
+            worktree_path: None,
+            tmux_status: "idle".to_string(),
+            status_source: "none".to_string(),
+            status_fetched_at: None,
+            status_error: None,
+            opencode_session_id: None,
+            session_todo_json: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
     }
 }

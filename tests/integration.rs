@@ -459,7 +459,7 @@ fn binding_state_from_task(task: &Task) -> OpenCodeBindingState {
         }),
     };
 
-    classify_binding_state(None, Some(&status))
+    classify_binding_state(task.opencode_session_id.as_deref(), Some(&status))
 }
 
 fn http_json_response(body: &str) -> String {

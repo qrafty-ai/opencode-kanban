@@ -1,5 +1,7 @@
 //! Application state types for dialogs and UI components
 
+use std::str::FromStr;
+
 use uuid::Uuid;
 
 use crate::command_palette::CommandPaletteState;
@@ -201,6 +203,40 @@ pub enum ViewMode {
     SidePanel,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TodoVisualizationMode {
+    Summary,
+    Checklist,
+}
+
+impl TodoVisualizationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TodoVisualizationMode::Summary => "summary",
+            TodoVisualizationMode::Checklist => "checklist",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            TodoVisualizationMode::Summary => TodoVisualizationMode::Checklist,
+            TodoVisualizationMode::Checklist => TodoVisualizationMode::Summary,
+        }
+    }
+}
+
+impl FromStr for TodoVisualizationMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "summary" => Ok(Self::Summary),
+            "checklist" | "plan" => Ok(Self::Checklist),
+            _ => Err(()),
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActiveDialog {
@@ -243,4 +279,38 @@ pub enum AttachTaskResult {
 #[derive(Debug, Clone)]
 pub struct CreateTaskOutcome {
     pub warning: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TodoVisualizationMode;
+    use std::str::FromStr;
+
+    #[test]
+    fn todo_visualization_mode_cycles_between_values() {
+        assert_eq!(
+            TodoVisualizationMode::Summary.cycle(),
+            TodoVisualizationMode::Checklist
+        );
+        assert_eq!(
+            TodoVisualizationMode::Checklist.cycle(),
+            TodoVisualizationMode::Summary
+        );
+    }
+
+    #[test]
+    fn todo_visualization_mode_parses_supported_values() {
+        assert_eq!(
+            TodoVisualizationMode::from_str("summary"),
+            Ok(TodoVisualizationMode::Summary)
+        );
+        assert_eq!(
+            TodoVisualizationMode::from_str("checklist"),
+            Ok(TodoVisualizationMode::Checklist)
+        );
+        assert_eq!(
+            TodoVisualizationMode::from_str("plan"),
+            Ok(TodoVisualizationMode::Checklist)
+        );
+    }
 }
