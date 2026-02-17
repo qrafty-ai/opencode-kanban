@@ -17,7 +17,7 @@ use crate::app::{
     STATUS_REPO_UNAVAILABLE, View, ViewMode,
 };
 use crate::command_palette::all_commands;
-use crate::theme::{Theme, parse_color};
+use crate::theme::Theme;
 use crate::types::{Category, Task};
 
 #[derive(Clone, Copy)]
@@ -40,7 +40,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 }
 
 fn render_project_list(frame: &mut Frame<'_>, app: &App) {
-    let theme = Theme::default();
+    let theme = app.theme;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -53,8 +53,8 @@ fn render_project_list(frame: &mut Frame<'_>, app: &App) {
     let mut header = Label::default()
         .text("Select Project")
         .alignment(Alignment::Center)
-        .foreground(theme.header)
-        .background(Color::Black);
+        .foreground(theme.base.header)
+        .background(theme.base.canvas);
     header.view(frame, chunks[0]);
 
     let mut rows = TableBuilder::default();
@@ -79,9 +79,9 @@ fn render_project_list(frame: &mut Frame<'_>, app: &App) {
         .min(app.project_list.len().saturating_sub(1));
     let mut list = List::default()
         .title("Projects", Alignment::Left)
-        .borders(rounded_borders(theme.focus))
-        .foreground(theme.task)
-        .highlighted_color(theme.focus)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
         .scroll(true)
         .rows(rows.build())
@@ -92,12 +92,18 @@ fn render_project_list(frame: &mut Frame<'_>, app: &App) {
     let mut footer = Label::default()
         .text("n: new project  Enter: select  q: quit")
         .alignment(Alignment::Center)
-        .foreground(theme.secondary)
-        .background(Color::Black);
+        .foreground(theme.base.text_muted)
+        .background(theme.base.canvas);
     footer.view(frame, chunks[2]);
 }
 
 fn render_board(frame: &mut Frame<'_>, app: &App) {
+    let theme = app.theme;
+    let mut canvas = Paragraph::default()
+        .background(theme.base.surface)
+        .text([TextSpan::from("")]);
+    canvas.view(frame, frame.area());
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -116,7 +122,7 @@ fn render_board(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let theme = Theme::default();
+    let theme = app.theme;
     let sections = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
@@ -125,21 +131,21 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut left = Label::default()
         .text("opencode-kanban")
         .alignment(Alignment::Left)
-        .foreground(theme.header)
-        .background(Color::Black);
+        .foreground(theme.base.header)
+        .background(theme.base.surface);
     left.view(frame, sections[0]);
 
     let right_text = format!("tasks: {}  refresh: 0.5s", app.tasks.len());
     let mut right = Label::default()
         .text(right_text)
         .alignment(Alignment::Right)
-        .foreground(theme.secondary)
-        .background(Color::Black);
+        .foreground(theme.base.text_muted)
+        .background(theme.base.surface);
     right.view(frame, sections[1]);
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let theme = Theme::default();
+    let theme = app.theme;
     let notice = app.footer_notice.as_deref().unwrap_or(
         "n:new  Enter:attach  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view",
     );
@@ -147,15 +153,15 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut footer = Label::default()
         .text(notice)
         .alignment(Alignment::Center)
-        .foreground(theme.secondary)
-        .background(Color::Black);
+        .foreground(theme.base.text_muted)
+        .background(theme.base.surface);
     footer.view(frame, area);
 }
 
 fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let theme = Theme::default();
+    let theme = app.theme;
     if app.categories.is_empty() {
-        render_empty_state(frame, area, "No categories yet. Press c to add one.");
+        render_empty_state(frame, area, "No categories yet. Press c to add one.", app);
         return;
     }
 
@@ -170,6 +176,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
     for (slot, (column_idx, category)) in sorted_categories(app).into_iter().enumerate() {
         let mut rows = TableBuilder::default();
         let tasks = tasks_for_category(app, category.id);
+        let accent = theme.category_accent(category.color.as_deref());
         let row_count = if tasks.is_empty() {
             1
         } else {
@@ -182,6 +189,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .copied()
             .unwrap_or(0)
             .min(tasks.len().saturating_sub(1));
+        let is_focused_column = column_idx == app.focused_column;
 
         let tile_width = list_inner_width(columns[slot]);
         for (task_index, task) in tasks.iter().enumerate() {
@@ -189,8 +197,9 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 &mut rows,
                 app,
                 task,
-                task_index == selected_task,
+                is_focused_column && task_index == selected_task,
                 tile_width,
+                accent,
             );
         }
 
@@ -205,23 +214,18 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .sum::<usize>()
             .min(row_count.saturating_sub(1));
 
-        let accent = category
-            .color
-            .as_deref()
-            .and_then(parse_color)
-            .unwrap_or(theme.column);
-
         let mut list = List::default()
             .title(
                 format!("{} ({})", category.name, tasks.len()),
                 Alignment::Left,
             )
             .borders(rounded_borders(accent))
-            .foreground(theme.task)
+            .foreground(theme.base.text)
+            .background(theme.base.surface)
             .scroll(true)
             .rows(rows.build())
             .selected_line(selected_line)
-            .inactive(Style::default().fg(theme.secondary));
+            .inactive(Style::default().fg(theme.base.text_muted));
         list.attr(
             Attribute::Focus,
             AttrValue::Flag(column_idx == app.focused_column),
@@ -233,7 +237,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let entries = linear_entries(app);
     if entries.is_empty() {
-        render_empty_state(frame, area, "No tasks available.");
+        render_empty_state(frame, area, "No tasks available.", app);
         return;
     }
 
@@ -256,7 +260,7 @@ fn render_side_panel_list(
     app: &App,
     entries: &[(String, Task)],
 ) {
-    let theme = Theme::default();
+    let theme = app.theme;
     let mut rows = TableBuilder::default();
     let row_count = if entries.is_empty() {
         1
@@ -272,6 +276,7 @@ fn render_side_panel_list(
             task,
             task_index == selected_task,
             tile_width,
+            theme.interactive.selected_border,
         );
     }
 
@@ -283,12 +288,13 @@ fn render_side_panel_list(
         .min(row_count.saturating_sub(1));
     let mut list = List::default()
         .title("Tasks", Alignment::Left)
-        .borders(rounded_borders(theme.focus))
-        .foreground(theme.task)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
         .scroll(true)
         .rows(rows.build())
         .selected_line(selected_line)
-        .inactive(Style::default().fg(theme.secondary));
+        .inactive(Style::default().fg(theme.base.text_muted));
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, area);
 }
@@ -299,7 +305,7 @@ fn render_side_panel_details(
     app: &App,
     entries: &[(String, Task)],
 ) {
-    let theme = Theme::default();
+    let theme = app.theme;
     let selected = app.selected_task_index.min(entries.len().saturating_sub(1));
     let (_, task) = &entries[selected];
 
@@ -338,8 +344,8 @@ fn render_side_panel_details(
 
     let mut paragraph = Paragraph::default()
         .title("Details", Alignment::Left)
-        .borders(rounded_borders(theme.focus))
-        .foreground(theme.task)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
         .wrap(true)
         .text(lines);
     paragraph.view(frame, area);
@@ -347,7 +353,7 @@ fn render_side_panel_details(
 
 fn render_dialog(frame: &mut Frame<'_>, app: &App) {
     if matches!(app.active_dialog, ActiveDialog::Help) {
-        render_help_overlay(frame);
+        render_help_overlay(frame, app);
         return;
     }
 
@@ -371,7 +377,9 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
 
     match &app.active_dialog {
         ActiveDialog::NewTask(state) => render_new_task_dialog(frame, dialog_area, app, state),
-        ActiveDialog::DeleteTask(state) => render_delete_task_dialog(frame, dialog_area, state),
+        ActiveDialog::DeleteTask(state) => {
+            render_delete_task_dialog(frame, dialog_area, app, state)
+        }
         ActiveDialog::CategoryInput(state) => {
             render_category_dialog(frame, dialog_area, app, state.mode, &state.name_input)
         }
@@ -380,37 +388,39 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
                 "Delete category '{}' and {} tasks?\n\nPress Enter to confirm or Esc to cancel.",
                 state.category_name, state.task_count
             );
-            render_message_dialog(frame, dialog_area, "Delete Category", &text);
+            render_message_dialog(frame, dialog_area, app, "Delete Category", &text);
         }
         ActiveDialog::Error(state) => {
             let text = format!("{}\n\n{}", state.title, state.detail);
-            render_message_dialog(frame, dialog_area, "Error", &text);
+            render_message_dialog(frame, dialog_area, app, "Error", &text);
         }
         ActiveDialog::WorktreeNotFound(state) => {
             let text = format!(
                 "Worktree missing for task '{}'.\n\nEnter: recreate  m: mark broken  Esc: cancel",
                 state.task_title
             );
-            render_message_dialog(frame, dialog_area, "Worktree Not Found", &text);
+            render_message_dialog(frame, dialog_area, app, "Worktree Not Found", &text);
         }
         ActiveDialog::RepoUnavailable(state) => {
             let text = format!(
                 "Repository unavailable for '{}'.\nPath: {}\n\nPress Enter or Esc.",
                 state.task_title, state.repo_path
             );
-            render_message_dialog(frame, dialog_area, "Repository Unavailable", &text);
+            render_message_dialog(frame, dialog_area, app, "Repository Unavailable", &text);
         }
         ActiveDialog::ConfirmQuit(state) => {
             let text = format!(
                 "{} active sessions detected.\n\nPress Enter to quit or Esc to cancel.",
                 state.active_session_count
             );
-            render_message_dialog(frame, dialog_area, "Confirm Quit", &text);
+            render_message_dialog(frame, dialog_area, app, "Confirm Quit", &text);
         }
         ActiveDialog::CommandPalette(state) => {
             render_command_palette_dialog(frame, dialog_area, app, state)
         }
-        ActiveDialog::NewProject(state) => render_new_project_dialog(frame, dialog_area, state),
+        ActiveDialog::NewProject(state) => {
+            render_new_project_dialog(frame, dialog_area, app, state)
+        }
         ActiveDialog::MoveTask(_) | ActiveDialog::None | ActiveDialog::Help => {}
     }
 }
@@ -421,13 +431,13 @@ fn render_new_task_dialog(
     app: &App,
     state: &crate::app::NewTaskDialogState,
 ) {
-    let theme = Theme::default();
-    let surface = overlay_surface_color();
+    let theme = app.theme;
+    let surface = theme.dialog_surface();
 
     let mut panel = Paragraph::default()
         .title("New Task", Alignment::Center)
-        .borders(rounded_borders(theme.focus))
-        .foreground(theme.task)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
         .background(surface)
         .text([TextSpan::from("")]);
     panel.view(frame, area);
@@ -461,6 +471,7 @@ fn render_new_task_dialog(
         },
         state.focused_field == NewTaskField::Repo,
         surface,
+        theme,
     );
     render_input_component(
         frame,
@@ -469,6 +480,7 @@ fn render_new_task_dialog(
         &state.branch_input,
         state.focused_field == NewTaskField::Branch,
         surface,
+        theme,
     );
     render_input_component(
         frame,
@@ -477,6 +489,7 @@ fn render_new_task_dialog(
         &state.base_input,
         state.focused_field == NewTaskField::Base,
         surface,
+        theme,
     );
     render_input_component(
         frame,
@@ -485,6 +498,7 @@ fn render_new_task_dialog(
         &state.title_input,
         state.focused_field == NewTaskField::Title,
         surface,
+        theme,
     );
 
     let selected = if state.ensure_base_up_to_date {
@@ -494,13 +508,13 @@ fn render_new_task_dialog(
     };
     let mut checkbox = Checkbox::default()
         .title("Options", Alignment::Left)
-        .borders(rounded_borders(theme.focus))
-        .foreground(theme.task)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
         .background(surface)
         .choices(["Ensure base is up to date"])
         .values(&selected)
         .rewind(false)
-        .inactive(Style::default().fg(theme.secondary));
+        .inactive(Style::default().fg(theme.base.text_muted));
     checkbox.attr(
         Attribute::Focus,
         AttrValue::Flag(state.focused_field == NewTaskField::EnsureBaseUpToDate),
@@ -518,6 +532,7 @@ fn render_new_task_dialog(
         "Create",
         matches!(state.focused_field, NewTaskField::Create),
         false,
+        app,
     );
     render_action_button(
         frame,
@@ -525,12 +540,13 @@ fn render_new_task_dialog(
         "Cancel",
         matches!(state.focused_field, NewTaskField::Cancel),
         false,
+        app,
     );
 
     let mut hint = Label::default()
         .text("Tab/Up/Down: move focus  Enter: confirm  Esc: cancel")
         .alignment(Alignment::Center)
-        .foreground(theme.secondary)
+        .foreground(theme.base.text_muted)
         .background(surface);
     hint.view(frame, layout[6]);
 }
@@ -538,9 +554,10 @@ fn render_new_task_dialog(
 fn render_delete_task_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
+    app: &App,
     state: &crate::app::DeleteTaskDialogState,
 ) {
-    let theme = Theme::default();
+    let theme = app.theme;
     let panel_inner = inset_rect(area, 1, 1);
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -554,15 +571,15 @@ fn render_delete_task_dialog(
 
     let mut panel = Paragraph::default()
         .title("Delete Task", Alignment::Center)
-        .borders(rounded_borders(theme.focus))
-        .foreground(theme.task)
-        .background(Color::Black)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.canvas)
         .text([TextSpan::from("")]);
     panel.view(frame, area);
 
     let mut summary = Paragraph::default()
-        .foreground(theme.task)
-        .background(Color::Black)
+        .foreground(theme.base.text)
+        .background(theme.base.canvas)
         .wrap(true)
         .text([
             TextSpan::from(format!(
@@ -584,13 +601,13 @@ fn render_delete_task_dialog(
 
     let mut checkbox = Checkbox::default()
         .title("Delete Options", Alignment::Left)
-        .borders(rounded_borders(theme.focus))
-        .foreground(theme.task)
-        .background(overlay_surface_color())
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.dialog_surface())
         .choices(["Kill tmux", "Remove worktree", "Delete branch"])
         .values(&selected)
         .rewind(false)
-        .inactive(Style::default().fg(theme.secondary));
+        .inactive(Style::default().fg(theme.base.text_muted));
     checkbox.attr(
         Attribute::Focus,
         AttrValue::Flag(matches!(
@@ -613,6 +630,7 @@ fn render_delete_task_dialog(
         "Delete",
         matches!(state.focused_field, DeleteTaskField::Delete),
         true,
+        app,
     );
     render_action_button(
         frame,
@@ -620,13 +638,14 @@ fn render_delete_task_dialog(
         "Cancel",
         matches!(state.focused_field, DeleteTaskField::Cancel),
         false,
+        app,
     );
 }
 
 fn render_category_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    _app: &App,
+    app: &App,
     mode: CategoryInputMode,
     name: &str,
 ) {
@@ -635,12 +654,21 @@ fn render_category_dialog(
         CategoryInputMode::Rename => "Rename Category",
     };
     let header = centered_rect(100, 35, area);
-    render_input_component(frame, header, title, name, true, overlay_surface_color());
+    render_input_component(
+        frame,
+        header,
+        title,
+        name,
+        true,
+        app.theme.dialog_surface(),
+        app.theme,
+    );
 }
 
 fn render_new_project_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
+    app: &App,
     state: &crate::app::NewProjectDialogState,
 ) {
     render_input_component(
@@ -649,16 +677,18 @@ fn render_new_project_dialog(
         "Project Name",
         &state.name_input,
         true,
-        overlay_surface_color(),
+        app.theme.dialog_surface(),
+        app.theme,
     );
 }
 
-fn render_message_dialog(frame: &mut Frame<'_>, area: Rect, title: &str, text: &str) {
+fn render_message_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, title: &str, text: &str) {
+    let theme = app.theme;
     let mut paragraph = Paragraph::default()
         .title(title, Alignment::Center)
-        .borders(rounded_borders(Theme::default().focus))
-        .foreground(Theme::default().task)
-        .background(overlay_surface_color())
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.dialog_surface())
         .wrap(true)
         .text(text.lines().map(|line| TextSpan::from(line.to_string())));
     paragraph.view(frame, area);
@@ -670,16 +700,29 @@ fn render_action_button(
     label: &str,
     focused: bool,
     destructive: bool,
+    app: &App,
 ) {
-    let theme = Theme::default();
-    let accent = if destructive { Color::Red } else { theme.focus };
-    let fg = if focused { Color::Black } else { accent };
-    let bg = if focused { accent } else { Color::Black };
+    let theme = app.theme;
+    let accent = if destructive {
+        theme.base.danger
+    } else {
+        theme.interactive.focus
+    };
+    let fg = if focused {
+        theme.dialog.button_fg
+    } else {
+        accent
+    };
+    let bg = if focused {
+        accent
+    } else {
+        theme.dialog.button_bg
+    };
 
     let mut button = Paragraph::default()
         .borders(rounded_borders(accent))
         .foreground(fg)
-        .background(if focused { bg } else { overlay_surface_color() })
+        .background(if focused { bg } else { theme.dialog_surface() })
         .alignment(Alignment::Center)
         .text([TextSpan::from(label.to_string())]);
     button.view(frame, area);
@@ -691,7 +734,7 @@ fn render_command_palette_dialog(
     app: &App,
     state: &crate::command_palette::CommandPaletteState,
 ) {
-    let theme = Theme::default();
+    let theme = app.theme;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -707,14 +750,15 @@ fn render_command_palette_dialog(
         "Command Palette",
         &state.query,
         true,
-        overlay_surface_color(),
+        theme.dialog_surface(),
+        theme,
     );
 
     let mut hint = Label::default()
         .text("Type to filter. Enter to execute. Esc to close.")
         .alignment(Alignment::Left)
-        .foreground(theme.secondary)
-        .background(overlay_surface_color());
+        .foreground(theme.base.text_muted)
+        .background(theme.dialog_surface());
     hint.view(frame, chunks[1]);
 
     if !should_render_command_palette_results(app.viewport) {
@@ -742,21 +786,21 @@ fn render_command_palette_dialog(
         .min(state.filtered.len().saturating_sub(1));
     let mut list = Table::default()
         .title("Results", Alignment::Left)
-        .borders(rounded_borders(theme.focus))
-        .foreground(theme.task)
-        .highlighted_color(theme.focus)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
         .headers(["Command", "Key"])
         .widths(&[75, 25])
         .scroll(true)
         .table(rows.build())
         .selected_line(selected)
-        .inactive(Style::default().fg(theme.secondary));
+        .inactive(Style::default().fg(theme.base.text_muted));
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, chunks[2]);
 }
 
-fn render_help_overlay(frame: &mut Frame<'_>) {
+fn render_help_overlay(frame: &mut Frame<'_>, app: &App) {
     let area = centered_rect(84, 84, frame.area());
     let lines = [
         "Keyboard shortcuts",
@@ -781,14 +825,15 @@ fn render_help_overlay(frame: &mut Frame<'_>) {
         "  Enter: confirm",
         "  Esc: cancel",
     ];
-    render_message_dialog(frame, area, "Help", &lines.join("\n"));
+    render_message_dialog(frame, area, app, "Help", &lines.join("\n"));
 }
 
-fn render_empty_state(frame: &mut Frame<'_>, area: Rect, message: &str) {
+fn render_empty_state(frame: &mut Frame<'_>, area: Rect, message: &str, app: &App) {
+    let theme = app.theme;
     let mut paragraph = Paragraph::default()
         .title("opencode-kanban", Alignment::Center)
-        .borders(rounded_borders(Theme::default().secondary))
-        .foreground(Theme::default().secondary)
+        .borders(rounded_borders(theme.base.text_muted))
+        .foreground(theme.base.text_muted)
         .wrap(true)
         .text([TextSpan::from(message.to_string())]);
     paragraph.view(frame, area);
@@ -801,18 +846,18 @@ fn render_input_component(
     value: &str,
     focused: bool,
     background: Color,
+    theme: Theme,
 ) {
-    let theme = Theme::default();
     let mut input = Input::default()
         .title(title, Alignment::Left)
         .borders(rounded_borders(if focused {
-            theme.focus
+            theme.interactive.focus
         } else {
-            theme.secondary
+            theme.base.text_muted
         }))
-        .foreground(theme.task)
+        .foreground(theme.base.text)
         .background(background)
-        .inactive(Style::default().fg(theme.secondary))
+        .inactive(Style::default().fg(theme.base.text_muted))
         .input_type(InputType::Text)
         .value(value.to_string());
     input.attr(Attribute::Focus, AttrValue::Flag(focused));
@@ -862,13 +907,15 @@ fn append_task_tile_rows(
     task: &Task,
     is_selected: bool,
     tile_width: usize,
+    selected_border: Color,
 ) {
-    let theme = Theme::default();
-    let bg = tile_background(is_selected);
+    let theme = app.theme;
+    let tile = theme.tile_colors(is_selected);
+    let bg = tile.background;
     let border = if is_selected {
-        Color::LightCyan
+        selected_border
     } else {
-        Color::DarkGray
+        tile.border
     };
     let inner_width = tile_width.saturating_sub(2).max(4);
 
@@ -882,7 +929,7 @@ fn append_task_tile_rows(
     rows.add_col(TextSpan::new("│").fg(border).bg(bg))
         .add_col(
             TextSpan::new(status_line)
-                .fg(task_status_color(task.tmux_status.as_str()))
+                .fg(theme.status_color(task.tmux_status.as_str()))
                 .bg(bg)
                 .bold(),
         )
@@ -891,7 +938,7 @@ fn append_task_tile_rows(
 
     let title_line = pad_to_width(&format!(" {}", task_tile_title(task)), inner_width);
     rows.add_col(TextSpan::new("│").fg(border).bg(bg))
-        .add_col(TextSpan::new(title_line).fg(theme.task).bg(bg).bold())
+        .add_col(TextSpan::new(title_line).fg(theme.base.text).bg(bg).bold())
         .add_col(TextSpan::new("│").fg(border).bg(bg))
         .add_row();
 
@@ -902,9 +949,9 @@ fn append_task_tile_rows(
 
     rows.add_col(TextSpan::new("│").fg(border).bg(bg))
         .add_col(TextSpan::new(" ").bg(bg))
-        .add_col(TextSpan::new(repo).fg(Color::LightCyan).bg(bg))
-        .add_col(TextSpan::new(":").fg(theme.secondary).bg(bg))
-        .add_col(TextSpan::new(branch).fg(Color::LightYellow).bg(bg))
+        .add_col(TextSpan::new(repo).fg(theme.tile.repo).bg(bg))
+        .add_col(TextSpan::new(":").fg(theme.base.text_muted).bg(bg))
+        .add_col(TextSpan::new(branch).fg(theme.tile.branch).bg(bg))
         .add_col(TextSpan::new(" ".repeat(filler)).bg(bg))
         .add_col(TextSpan::new("│").fg(border).bg(bg))
         .add_row();
@@ -954,26 +1001,6 @@ fn pad_to_width(value: &str, width: usize) -> String {
         return clamp_text(value, width);
     }
     format!("{}{}", value, " ".repeat(width - len))
-}
-
-fn tile_background(is_selected: bool) -> Color {
-    if is_selected {
-        Color::Rgb(40, 46, 66)
-    } else {
-        Color::Reset
-    }
-}
-
-fn task_status_color(status: &str) -> Color {
-    match status {
-        "running" => Color::LightGreen,
-        "waiting" => Color::Yellow,
-        "idle" => Color::Gray,
-        "dead" => Color::Red,
-        STATUS_BROKEN => Color::LightRed,
-        STATUS_REPO_UNAVAILABLE => Color::Red,
-        _ => Color::White,
-    }
 }
 
 fn clamp_text(value: &str, max_chars: usize) -> String {
@@ -1075,10 +1102,6 @@ fn inset_rect(area: Rect, horizontal: u16, vertical: u16) -> Rect {
     let width = area.width.saturating_sub(horizontal.saturating_mul(2));
     let height = area.height.saturating_sub(vertical.saturating_mul(2));
     Rect::new(x, y, width, height)
-}
-
-fn overlay_surface_color() -> Color {
-    Color::Rgb(36, 40, 56)
 }
 
 #[cfg(test)]

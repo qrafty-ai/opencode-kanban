@@ -8,6 +8,7 @@ pub mod state;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -37,6 +38,7 @@ use crate::opencode::{
     OpenCodeServerManager, Status, ensure_server_ready, opencode_attach_command,
 };
 use crate::projects::{self, ProjectInfo};
+use crate::theme::{Theme, ThemePreset};
 use crate::tmux::{tmux_capture_pane, tmux_kill_session};
 use crate::types::{Category, Repo, Task};
 
@@ -49,6 +51,7 @@ use self::state::{AttachTaskResult, CreateTaskOutcome, DesiredTaskState, Observe
 pub struct App {
     pub should_quit: bool,
     pub pulse_phase: u8,
+    pub theme: Theme,
     pub layout_epoch: u64,
     pub viewport: (u16, u16),
     pub last_mouse_event: Option<MouseEvent>,
@@ -91,6 +94,14 @@ impl App {
     }
 
     pub fn new(project_name: Option<&str>) -> Result<Self> {
+        let preset = std::env::var("OPENCODE_KANBAN_THEME")
+            .ok()
+            .and_then(|value| ThemePreset::from_str(&value).ok())
+            .unwrap_or_default();
+        Self::new_with_theme(project_name, preset)
+    }
+
+    pub fn new_with_theme(project_name: Option<&str>, preset: ThemePreset) -> Result<Self> {
         let db_path = default_db_path()?;
         let db = Database::open(&db_path)?;
         let server_manager = ensure_server_ready();
@@ -99,6 +110,7 @@ impl App {
         let mut app = Self {
             should_quit: false,
             pulse_phase: 0,
+            theme: Theme::from_preset(preset),
             layout_epoch: 0,
             viewport: (80, 24),
             last_mouse_event: None,

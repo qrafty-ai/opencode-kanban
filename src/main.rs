@@ -1,6 +1,7 @@
 use std::{
     io, panic,
     process::Command,
+    str::FromStr,
     sync::{Arc, Mutex},
 };
 
@@ -20,6 +21,7 @@ use opencode_kanban::{
     app::App,
     logging::{init_logging, print_log_location},
     realm::{RootId, apply_message, init_application, should_quit},
+    theme::ThemePreset,
     tmux::{ensure_tmux_installed, tmux_session_exists},
 };
 
@@ -34,6 +36,9 @@ use opencode_kanban::{
 struct Cli {
     #[arg(short, long, value_name = "PROJECT")]
     project: Option<String>,
+
+    #[arg(long, value_name = "PRESET")]
+    theme: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -56,7 +61,12 @@ fn run_app() -> Result<()> {
     let _guard = TerminalGuard;
 
     let project_name = cli.project.as_deref();
-    let app = Arc::new(Mutex::new(App::new(project_name)?));
+    let preset = cli
+        .theme
+        .as_deref()
+        .and_then(|value| ThemePreset::from_str(value).ok())
+        .unwrap_or_default();
+    let app = Arc::new(Mutex::new(App::new_with_theme(project_name, preset)?));
     let mut realm = init_application(Arc::clone(&app))?;
 
     let mut redraw = true;
