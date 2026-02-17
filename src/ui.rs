@@ -14,7 +14,7 @@ use tuirealm::{
 
 use crate::app::{
     ActiveDialog, App, CategoryInputMode, DeleteTaskField, NewTaskField, STATUS_BROKEN,
-    STATUS_REPO_UNAVAILABLE, View, ViewMode,
+    STATUS_REPO_UNAVAILABLE, SidePanelRow, View, ViewMode,
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
@@ -146,9 +146,15 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = app.theme;
-    let notice = app.footer_notice.as_deref().unwrap_or(
-        "n:new  Enter:attach  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view",
-    );
+    let default_notice = match app.view_mode {
+        ViewMode::Kanban => {
+            "n:new  Enter:attach  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view"
+        }
+        ViewMode::SidePanel => {
+            "j/k:select  Space:collapse  Enter:attach task  c/r/x:category  H/L/J/K:move  v:view"
+        }
+    };
+    let notice = app.footer_notice.as_deref().unwrap_or(default_notice);
 
     let mut footer = Label::default()
         .text(notice)
@@ -235,8 +241,12 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let entries = linear_entries(app);
-    if entries.is_empty() {
+    if app.categories.is_empty() {
+        render_empty_state(frame, area, "No categories yet. Press c to add one.", app);
+        return;
+    }
+    let rows = app.side_panel_rows();
+    if rows.is_empty() {
         render_empty_state(frame, area, "No tasks available.", app);
         return;
     }
@@ -250,44 +260,64 @@ fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ])
         .split(area);
 
-    render_side_panel_list(frame, sections[0], app, &entries);
-    render_side_panel_details(frame, sections[1], app, &entries);
+    render_side_panel_list(frame, sections[0], app, &rows);
+    render_side_panel_details(frame, sections[1], app, &rows);
 }
 
 fn render_side_panel_list(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
-    entries: &[(String, Task)],
+    rows_data: &[SidePanelRow],
 ) {
     let theme = app.theme;
-    let mut rows = TableBuilder::default();
-    let row_count = if entries.is_empty() {
-        1
-    } else {
-        entries.iter().map(|(_, task)| task_tile_lines(task)).sum()
-    };
-    let selected_task = app.selected_task_index.min(entries.len().saturating_sub(1));
-    let tile_width = list_inner_width(area);
-    for (task_index, (_, task)) in entries.iter().enumerate() {
-        append_task_tile_rows(
-            &mut rows,
-            app,
-            task,
-            task_index == selected_task,
-            tile_width,
-            theme.interactive.selected_border,
-        );
+    if rows_data.is_empty() {
+        return;
     }
 
-    let selected_line = entries
-        .iter()
-        .take(selected_task)
-        .map(|(_, task)| task_tile_lines(task))
-        .sum::<usize>()
-        .min(row_count.saturating_sub(1));
+    let selected_row = app
+        .side_panel_selected_row
+        .min(rows_data.len().saturating_sub(1));
+    let tile_width = list_inner_width(area);
+    let mut rows = TableBuilder::default();
+    for (row_index, row) in rows_data.iter().enumerate() {
+        match row {
+            SidePanelRow::CategoryHeader {
+                category_name,
+                category_color,
+                visible_tasks,
+                total_tasks,
+                collapsed,
+                ..
+            } => {
+                let accent = theme.category_accent(category_color.as_deref());
+                let marker = if *collapsed { ">" } else { "v" };
+                let text = format!("{marker} {category_name} ({visible_tasks}/{total_tasks})");
+                let line = pad_to_width(&format!(" {text}"), tile_width);
+                let style = if row_index == selected_row {
+                    theme.tile_colors(true)
+                } else {
+                    theme.tile_colors(false)
+                };
+                rows.add_col(TextSpan::new(line).fg(accent).bg(style.background).bold())
+                    .add_row();
+            }
+            SidePanelRow::Task { task, .. } => {
+                append_task_tile_rows(
+                    &mut rows,
+                    app,
+                    task,
+                    row_index == selected_row,
+                    tile_width,
+                    theme.interactive.selected_border,
+                );
+            }
+        }
+    }
+
+    let selected_line = side_panel_selected_line(rows_data, selected_row);
     let mut list = List::default()
-        .title("Tasks", Alignment::Left)
+        .title("Tasks by Category", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
         .background(theme.base.surface)
@@ -303,11 +333,24 @@ fn render_side_panel_details(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
-    entries: &[(String, Task)],
+    rows_data: &[SidePanelRow],
 ) {
+    if rows_data.is_empty() {
+        return;
+    }
+    let selected_row = app
+        .side_panel_selected_row
+        .min(rows_data.len().saturating_sub(1));
+    match &rows_data[selected_row] {
+        SidePanelRow::Task { task, .. } => render_side_panel_task_details(frame, area, app, task),
+        SidePanelRow::CategoryHeader { .. } => {
+            render_side_panel_category_details(frame, area, app, &rows_data[selected_row])
+        }
+    }
+}
+
+fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, task: &Task) {
     let theme = app.theme;
-    let selected = app.selected_task_index.min(entries.len().saturating_sub(1));
-    let (_, task) = &entries[selected];
 
     let repo_name = app
         .repos
@@ -361,6 +404,70 @@ fn render_side_panel_details(
     let mut paragraph = Paragraph::default()
         .title("Details", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
+        .wrap(true)
+        .text(lines);
+    paragraph.view(frame, area);
+}
+
+fn render_side_panel_category_details(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    row: &SidePanelRow,
+) {
+    let SidePanelRow::CategoryHeader {
+        category_name,
+        category_id,
+        category_color,
+        total_tasks,
+        visible_tasks,
+        collapsed,
+        ..
+    } = row
+    else {
+        return;
+    };
+
+    let theme = app.theme;
+    let accent = theme.category_accent(category_color.as_deref());
+    let (running, idle, broken, unavailable, waiting, dead, other) =
+        category_status_counts(app, *category_id);
+
+    let mut lines = vec![
+        TextSpan::new("CATEGORY").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Name", category_name.as_str())).fg(theme.base.text),
+        TextSpan::new(detail_kv(
+            "State",
+            if *collapsed { "collapsed" } else { "expanded" },
+        ))
+        .fg(theme.base.text),
+        TextSpan::new(detail_kv("Visible", &visible_tasks.to_string())).fg(theme.base.text),
+        TextSpan::new(detail_kv("Tasks", &total_tasks.to_string())).fg(theme.base.text),
+        TextSpan::new(""),
+        TextSpan::new("STATUS").fg(theme.base.header).bold(),
+        TextSpan::new(detail_kv("Running", &running.to_string())).fg(theme.status_color("running")),
+        TextSpan::new(detail_kv("Idle", &idle.to_string())).fg(theme.status_color("idle")),
+        TextSpan::new(detail_kv("Broken", &broken.to_string()))
+            .fg(theme.status_color(STATUS_BROKEN)),
+        TextSpan::new(detail_kv("Unavailable", &unavailable.to_string()))
+            .fg(theme.status_color(STATUS_REPO_UNAVAILABLE)),
+        TextSpan::new(detail_kv("Waiting", &waiting.to_string())).fg(theme.status_color("waiting")),
+        TextSpan::new(detail_kv("Dead", &dead.to_string())).fg(theme.status_color("dead")),
+    ];
+
+    if other > 0 {
+        lines.push(TextSpan::new(detail_kv("Other", &other.to_string())).fg(theme.base.text));
+    }
+
+    lines.push(TextSpan::new(""));
+    lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
+    lines.push(TextSpan::new("Space toggle  j/k navigate  Enter attach on task").fg(accent));
+
+    let mut paragraph = Paragraph::default()
+        .title("Category Summary", Alignment::Left)
+        .borders(rounded_borders(accent))
         .foreground(theme.base.text)
         .background(theme.base.surface)
         .wrap(true)
@@ -886,18 +993,6 @@ fn render_input_component(
     input.view(frame, area);
 }
 
-fn linear_entries(app: &App) -> Vec<(String, Task)> {
-    let mut out = Vec::new();
-    for (_, category) in sorted_categories(app) {
-        let mut tasks = tasks_for_category(app, category.id);
-        tasks.sort_by_key(|task| task.position);
-        for task in tasks {
-            out.push((category.name.clone(), task));
-        }
-    }
-    out
-}
-
 fn tasks_for_category(app: &App, category_id: uuid::Uuid) -> Vec<Task> {
     let mut tasks: Vec<Task> = app
         .tasks
@@ -913,6 +1008,55 @@ fn sorted_categories(app: &App) -> Vec<(usize, &Category)> {
     let mut categories: Vec<(usize, &Category)> = app.categories.iter().enumerate().collect();
     categories.sort_by_key(|(_, category)| category.position);
     categories
+}
+
+fn side_panel_row_lines(row: &SidePanelRow) -> usize {
+    match row {
+        SidePanelRow::CategoryHeader { .. } => 1,
+        SidePanelRow::Task { task, .. } => task_tile_lines(task),
+    }
+}
+
+fn side_panel_selected_line(rows: &[SidePanelRow], selected_row: usize) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    let selected_row = selected_row.min(rows.len().saturating_sub(1));
+    rows.iter()
+        .take(selected_row)
+        .map(side_panel_row_lines)
+        .sum::<usize>()
+}
+
+fn category_status_counts(
+    app: &App,
+    category_id: uuid::Uuid,
+) -> (usize, usize, usize, usize, usize, usize, usize) {
+    let mut running = 0;
+    let mut idle = 0;
+    let mut broken = 0;
+    let mut unavailable = 0;
+    let mut waiting = 0;
+    let mut dead = 0;
+    let mut other = 0;
+
+    for task in app
+        .tasks
+        .iter()
+        .filter(|task| task.category_id == category_id)
+    {
+        match task.tmux_status.as_str() {
+            "running" => running += 1,
+            "idle" => idle += 1,
+            STATUS_BROKEN => broken += 1,
+            STATUS_REPO_UNAVAILABLE => unavailable += 1,
+            "waiting" => waiting += 1,
+            "dead" => dead += 1,
+            _ => other += 1,
+        }
+    }
+
+    (running, idle, broken, unavailable, waiting, dead, other)
 }
 
 const TASK_TITLE_MAX: usize = 34;
@@ -1133,6 +1277,7 @@ fn inset_rect(area: Rect, horizontal: u16, vertical: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn test_calculate_overlay_area_center() {
@@ -1158,5 +1303,58 @@ mod tests {
     fn test_command_palette_hides_results_on_short_terminal() {
         assert!(!should_render_command_palette_results((120, 9)));
         assert!(should_render_command_palette_results((120, 10)));
+    }
+
+    #[test]
+    fn test_side_panel_selected_line_accounts_for_header_and_tile_rows() {
+        let category_id = Uuid::new_v4();
+        let rows = vec![
+            SidePanelRow::CategoryHeader {
+                column_index: 0,
+                category_id,
+                category_name: "TODO".to_string(),
+                category_color: None,
+                total_tasks: 2,
+                visible_tasks: 2,
+                collapsed: false,
+            },
+            SidePanelRow::Task {
+                column_index: 0,
+                index_in_column: 0,
+                category_id,
+                task: Box::new(test_task(category_id, 0)),
+            },
+            SidePanelRow::Task {
+                column_index: 0,
+                index_in_column: 1,
+                category_id,
+                task: Box::new(test_task(category_id, 1)),
+            },
+        ];
+
+        assert_eq!(side_panel_selected_line(&rows, 0), 0);
+        assert_eq!(side_panel_selected_line(&rows, 1), 1);
+        assert_eq!(side_panel_selected_line(&rows, 2), 6);
+    }
+
+    fn test_task(category_id: Uuid, position: i64) -> Task {
+        Task {
+            id: Uuid::new_v4(),
+            title: "Task".to_string(),
+            repo_id: Uuid::new_v4(),
+            branch: "feature/test".to_string(),
+            category_id,
+            position,
+            tmux_session_name: None,
+            worktree_path: None,
+            tmux_status: "idle".to_string(),
+            status_source: "none".to_string(),
+            status_fetched_at: None,
+            status_error: None,
+            opencode_session_id: None,
+            session_todo_json: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
     }
 }
