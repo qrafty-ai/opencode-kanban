@@ -85,9 +85,9 @@ def stage_main_package(
     temp_root: Path,
 ) -> None:
     staging_dir = temp_root / "main"
-    (staging_dir / "npm" / "bin").mkdir(parents=True, exist_ok=True)
+    (staging_dir / "bin").mkdir(parents=True, exist_ok=True)
 
-    shutil.copy2(BIN_SOURCE_PATH, staging_dir / "npm" / "bin" / "opencode-kanban.js")
+    shutil.copy2(BIN_SOURCE_PATH, staging_dir / "bin" / "opencode-kanban.js")
 
     readme_src = ROOT / "README.md"
     if readme_src.exists():
@@ -98,8 +98,9 @@ def stage_main_package(
         shutil.copy2(license_src, staging_dir / "LICENSE")
 
     package_json = dict(package_template)
+    package_json["name"] = PACKAGE_NAME
     package_json["version"] = version
-    package_json["files"] = ["npm/bin"]
+    package_json["files"] = ["bin"]
     package_json["optionalDependencies"] = {
         f"{PACKAGE_FILENAME}-{platform_tag}": f"npm:{PACKAGE_NAME}@{version}-{platform_tag}"
         for platform_tag in PLATFORM_PACKAGES
