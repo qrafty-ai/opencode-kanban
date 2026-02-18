@@ -1,5 +1,6 @@
 //! Application state types for dialogs and UI components
 
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use uuid::Uuid;
@@ -41,6 +42,45 @@ pub struct NewProjectDialogState {
     pub name_input: String,
     pub focused_field: NewProjectField,
     pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RenameProjectField {
+    Name,
+    Confirm,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RenameProjectDialogState {
+    pub name_input: String,
+    pub focused_field: RenameProjectField,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DeleteProjectDialogState {
+    pub project_name: String,
+    pub project_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RenameRepoField {
+    Name,
+    Confirm,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RenameRepoDialogState {
+    pub repo_id: Uuid,
+    pub name_input: String,
+    pub focused_field: RenameRepoField,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DeleteRepoDialogState {
+    pub repo_id: Uuid,
+    pub repo_name: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -158,6 +198,7 @@ pub enum SettingsSection {
     CategoryColors,
     Keybindings,
     General,
+    Repos,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -165,6 +206,7 @@ pub struct SettingsViewState {
     pub active_section: SettingsSection,
     pub general_selected_field: usize,
     pub category_color_selected: usize,
+    pub repos_selected_field: usize,
     pub previous_view: View,
 }
 
@@ -267,6 +309,8 @@ pub enum ActiveDialog {
     NewTask(NewTaskDialogState),
     CommandPalette(CommandPaletteState),
     NewProject(NewProjectDialogState),
+    RenameProject(RenameProjectDialogState),
+    DeleteProject(DeleteProjectDialogState),
     CategoryInput(CategoryInputDialogState),
     CategoryColor(CategoryColorDialogState),
     DeleteCategory(DeleteCategoryDialogState),
@@ -277,6 +321,8 @@ pub enum ActiveDialog {
     WorktreeNotFound(WorktreeNotFoundDialogState),
     RepoUnavailable(RepoUnavailableDialogState),
     ConfirmQuit(ConfirmQuitDialogState),
+    RenameRepo(RenameRepoDialogState),
+    DeleteRepo(DeleteRepoDialogState),
     Help,
 }
 

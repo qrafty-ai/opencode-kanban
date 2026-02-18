@@ -26,8 +26,10 @@ pub use self::state::{
     ActiveDialog, ArchiveTaskDialogState, CATEGORY_COLOR_PALETTE, CategoryColorDialogState,
     CategoryColorField, CategoryInputDialogState, CategoryInputField, CategoryInputMode,
     ConfirmCancelField, ConfirmQuitDialogState, ContextMenuItem, ContextMenuState,
-    DeleteCategoryDialogState, DeleteTaskDialogState, DeleteTaskField, ErrorDialogState,
-    MoveTaskDialogState, NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
+    DeleteCategoryDialogState, DeleteProjectDialogState, DeleteRepoDialogState,
+    DeleteTaskDialogState, DeleteTaskField, ErrorDialogState, MoveTaskDialogState,
+    NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
+    RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
     RepoUnavailableDialogState, SettingsSection, SettingsViewState, TodoVisualizationMode, View,
     ViewMode, WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
 };
@@ -67,6 +69,15 @@ pub enum SidePanelRow {
         category_id: Uuid,
         task: Box<Task>,
     },
+}
+
+pub struct ProjectDetailCache {
+    pub project_name: String,
+    pub task_count: usize,
+    pub running_count: usize,
+    pub repo_count: usize,
+    pub category_count: usize,
+    pub file_size_kb: u64,
 }
 
 pub struct App {
@@ -113,6 +124,27 @@ pub struct App {
     pub settings: crate::settings::Settings,
     pub settings_view_state: Option<SettingsViewState>,
     pub category_edit_mode: bool,
+    pub project_detail_cache: Option<ProjectDetailCache>,
+}
+
+fn load_project_detail(info: &crate::projects::ProjectInfo) -> Option<ProjectDetailCache> {
+    let db = Database::open(&info.path).ok()?;
+    let tasks = db.list_tasks().ok()?;
+    let repos = db.list_repos().ok()?;
+    let categories = db.list_categories().ok()?;
+    let running = tasks.iter().filter(|t| t.tmux_status == "running").count();
+    let size_kb = fs::metadata(&info.path)
+        .ok()
+        .map(|m| m.len() / 1024)
+        .unwrap_or(0);
+    Some(ProjectDetailCache {
+        project_name: info.name.clone(),
+        task_count: tasks.len(),
+        running_count: running,
+        repo_count: repos.len(),
+        category_count: categories.len(),
+        file_size_kb: size_kb,
+    })
 }
 
 impl App {
@@ -195,6 +227,7 @@ impl App {
             settings,
             settings_view_state: None,
             category_edit_mode: false,
+            project_detail_cache: None,
         };
 
         app.refresh_data()?;
@@ -333,9 +366,13 @@ impl App {
                 self.selected_project_index.min(self.project_list.len() - 1);
             self.project_list_state
                 .select(Some(self.selected_project_index));
+            if let Some(project) = self.project_list.get(self.selected_project_index) {
+                self.project_detail_cache = load_project_detail(project);
+            }
         } else {
             self.selected_project_index = 0;
             self.project_list_state.select(None);
+            self.project_detail_cache = None;
         }
         Ok(())
     }
@@ -479,6 +516,7 @@ impl App {
                     category_color_selected: self
                         .focused_column
                         .min(self.categories.len().saturating_sub(1)),
+                    repos_selected_field: 0,
                     previous_view: self.current_view,
                 });
                 self.current_view = View::Settings;
@@ -513,17 +551,19 @@ impl App {
                         SettingsSection::Theme => SettingsSection::CategoryColors,
                         SettingsSection::CategoryColors => SettingsSection::Keybindings,
                         SettingsSection::Keybindings => SettingsSection::General,
-                        SettingsSection::General => SettingsSection::Theme,
+                        SettingsSection::General => SettingsSection::Repos,
+                        SettingsSection::Repos => SettingsSection::Theme,
                     };
                 }
             }
             Message::SettingsPrevSection => {
                 if let Some(state) = &mut self.settings_view_state {
                     state.active_section = match state.active_section {
-                        SettingsSection::Theme => SettingsSection::General,
+                        SettingsSection::Theme => SettingsSection::Repos,
                         SettingsSection::CategoryColors => SettingsSection::Theme,
                         SettingsSection::Keybindings => SettingsSection::CategoryColors,
                         SettingsSection::General => SettingsSection::Keybindings,
+                        SettingsSection::Repos => SettingsSection::General,
                     };
                 }
             }
@@ -540,6 +580,12 @@ impl App {
                                 .saturating_add(1)
                                 .min(self.categories.len().saturating_sub(1));
                         }
+                        SettingsSection::Repos => {
+                            state.repos_selected_field = state
+                                .repos_selected_field
+                                .saturating_add(1)
+                                .min(self.repos.len().saturating_sub(1));
+                        }
                         SettingsSection::Theme | SettingsSection::Keybindings => {}
                     }
                 }
@@ -554,6 +600,10 @@ impl App {
                         SettingsSection::CategoryColors => {
                             state.category_color_selected =
                                 state.category_color_selected.saturating_sub(1);
+                        }
+                        SettingsSection::Repos => {
+                            state.repos_selected_field =
+                                state.repos_selected_field.saturating_sub(1);
                         }
                         SettingsSection::Theme | SettingsSection::Keybindings => {}
                     }
@@ -631,6 +681,7 @@ impl App {
                             }
                         }
                         SettingsSection::Keybindings => {}
+                        SettingsSection::Repos => {}
                     }
                 }
             }
@@ -749,6 +800,9 @@ impl App {
                     self.selected_project_index -= 1;
                     self.project_list_state
                         .select(Some(self.selected_project_index));
+                    if let Some(project) = self.project_list.get(self.selected_project_index) {
+                        self.project_detail_cache = load_project_detail(project);
+                    }
                 }
             }
             Message::ProjectListSelectDown => {
@@ -756,6 +810,9 @@ impl App {
                     self.selected_project_index += 1;
                     self.project_list_state
                         .select(Some(self.selected_project_index));
+                    if let Some(project) = self.project_list.get(self.selected_project_index) {
+                        self.project_detail_cache = load_project_detail(project);
+                    }
                 }
             }
             Message::ProjectListConfirm => {
@@ -799,6 +856,152 @@ impl App {
                                     detail: e.to_string(),
                                 });
                             }
+                        }
+                    }
+                }
+            }
+            Message::OpenRenameProjectDialog => {
+                if let Some(project) = self.project_list.get(self.selected_project_index) {
+                    self.active_dialog = ActiveDialog::RenameProject(RenameProjectDialogState {
+                        name_input: project.name.clone(),
+                        focused_field: RenameProjectField::Name,
+                    });
+                }
+            }
+            Message::ConfirmRenameProject => {
+                if let ActiveDialog::RenameProject(state) = &self.active_dialog {
+                    let new_name = state.name_input.trim().to_string();
+                    if !new_name.is_empty()
+                        && let Some(project) = self.project_list.get(self.selected_project_index)
+                    {
+                        let old_path = project.path.clone();
+                        let is_current = self.current_project_path.as_deref() == Some(&old_path);
+                        match projects::rename_project(&old_path, &new_name) {
+                            Ok(new_path) => {
+                                self.active_dialog = ActiveDialog::None;
+                                if is_current {
+                                    self.current_project_path = Some(new_path.clone());
+                                }
+                                self.refresh_projects()?;
+                            }
+                            Err(e) => {
+                                self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                                    title: "Failed to rename project".to_string(),
+                                    detail: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Message::FocusRenameProjectField(field) => {
+                if let ActiveDialog::RenameProject(state) = &mut self.active_dialog {
+                    state.focused_field = field;
+                }
+            }
+            Message::OpenDeleteProjectDialog => {
+                if let Some(project) = self.project_list.get(self.selected_project_index) {
+                    self.active_dialog = ActiveDialog::DeleteProject(DeleteProjectDialogState {
+                        project_name: project.name.clone(),
+                        project_path: project.path.clone(),
+                    });
+                }
+            }
+            Message::ConfirmDeleteProject => {
+                if let ActiveDialog::DeleteProject(state) = &self.active_dialog {
+                    let path = state.project_path.clone();
+                    let is_current = self.current_project_path.as_deref() == Some(&path);
+                    if is_current {
+                        self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                            title: "Cannot delete active project".to_string(),
+                            detail: "Switch to another project first.".to_string(),
+                        });
+                    } else {
+                        match projects::delete_project(&path) {
+                            Ok(()) => {
+                                self.active_dialog = ActiveDialog::None;
+                                self.selected_project_index =
+                                    self.selected_project_index.saturating_sub(1);
+                                self.refresh_projects()?;
+                            }
+                            Err(e) => {
+                                self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                                    title: "Failed to delete project".to_string(),
+                                    detail: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Message::OpenRenameRepoDialog => {
+                let repos_selected = self
+                    .settings_view_state
+                    .as_ref()
+                    .map(|s| s.repos_selected_field)
+                    .unwrap_or(0);
+                if let Some(repo) = self.repos.get(repos_selected) {
+                    self.active_dialog = ActiveDialog::RenameRepo(RenameRepoDialogState {
+                        repo_id: repo.id,
+                        name_input: repo.name.clone(),
+                        focused_field: RenameRepoField::Name,
+                    });
+                }
+            }
+            Message::ConfirmRenameRepo => {
+                if let ActiveDialog::RenameRepo(state) = &self.active_dialog {
+                    let new_name = state.name_input.trim().to_string();
+                    let repo_id = state.repo_id;
+                    if !new_name.is_empty() {
+                        match self.db.update_repo_name(repo_id, &new_name) {
+                            Ok(()) => {
+                                self.active_dialog = ActiveDialog::None;
+                                self.refresh_data()?;
+                            }
+                            Err(e) => {
+                                self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                                    title: "Failed to rename repo".to_string(),
+                                    detail: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Message::FocusRenameRepoField(field) => {
+                if let ActiveDialog::RenameRepo(state) = &mut self.active_dialog {
+                    state.focused_field = field;
+                }
+            }
+            Message::OpenDeleteRepoDialog => {
+                let repos_selected = self
+                    .settings_view_state
+                    .as_ref()
+                    .map(|s| s.repos_selected_field)
+                    .unwrap_or(0);
+                if let Some(repo) = self.repos.get(repos_selected) {
+                    self.active_dialog = ActiveDialog::DeleteRepo(DeleteRepoDialogState {
+                        repo_id: repo.id,
+                        repo_name: repo.name.clone(),
+                    });
+                }
+            }
+            Message::ConfirmDeleteRepo => {
+                if let ActiveDialog::DeleteRepo(state) = &self.active_dialog {
+                    let repo_id = state.repo_id;
+                    match self.db.delete_repo(repo_id) {
+                        Ok(()) => {
+                            self.active_dialog = ActiveDialog::None;
+                            self.refresh_data()?;
+                            if let Some(s) = &mut self.settings_view_state {
+                                s.repos_selected_field = s.repos_selected_field.saturating_sub(1);
+                            }
+                        }
+                        Err(e) => {
+                            self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                                title: "Failed to delete repo".to_string(),
+                                detail: e.to_string(),
+                            });
                         }
                     }
                 }
@@ -956,6 +1159,8 @@ impl App {
                     KeyAction::ProjectDown => self.update(Message::ProjectListSelectDown)?,
                     KeyAction::ProjectConfirm => self.update(Message::ProjectListConfirm)?,
                     KeyAction::NewProject => self.update(Message::OpenNewProjectDialog)?,
+                    KeyAction::ProjectRename => self.update(Message::OpenRenameProjectDialog)?,
+                    KeyAction::ProjectDelete => self.update(Message::OpenDeleteProjectDialog)?,
                     _ => {}
                 }
             }
@@ -963,12 +1168,19 @@ impl App {
         }
 
         if self.current_view == View::Settings {
+            let active_section = self.settings_view_state.as_ref().map(|s| s.active_section);
             match key.code {
                 KeyCode::Left | KeyCode::Char('h') => self.update(Message::SettingsPrevSection)?,
                 KeyCode::Right | KeyCode::Char('l') => self.update(Message::SettingsNextSection)?,
                 KeyCode::Up | KeyCode::Char('k') => self.update(Message::SettingsPrevItem)?,
                 KeyCode::Down | KeyCode::Char('j') => self.update(Message::SettingsNextItem)?,
                 KeyCode::Enter | KeyCode::Char(' ') => self.update(Message::SettingsToggle)?,
+                KeyCode::Char('r') if active_section == Some(SettingsSection::Repos) => {
+                    self.update(Message::OpenRenameRepoDialog)?;
+                }
+                KeyCode::Char('x') if active_section == Some(SettingsSection::Repos) => {
+                    self.update(Message::OpenDeleteRepoDialog)?;
+                }
                 KeyCode::Esc => self.update(Message::CloseSettings)?,
                 _ => {}
             }
@@ -2308,6 +2520,7 @@ mod tests {
             settings: crate::settings::Settings::load(),
             settings_view_state: None,
             category_edit_mode: false,
+            project_detail_cache: None,
         };
 
         app.refresh_data()?;

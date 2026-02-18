@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -105,6 +105,38 @@ pub fn create_project(name: &str) -> Result<PathBuf> {
     let _db = Database::open(&path).context("failed to create project database")?;
 
     Ok(path)
+}
+
+pub fn rename_project(old_path: &Path, new_name: &str) -> Result<PathBuf> {
+    validate_project_name(new_name)?;
+
+    let sanitized = sanitize_project_name(new_name);
+    let new_path = get_data_dir().join(format!("{}.sqlite", sanitized));
+
+    if new_path.exists() {
+        bail!("project '{}' already exists", sanitized);
+    }
+
+    fs::rename(old_path, &new_path).with_context(|| {
+        format!(
+            "failed to rename project '{}' to '{}'",
+            old_path.display(),
+            new_path.display()
+        )
+    })?;
+
+    Ok(new_path)
+}
+
+pub fn delete_project(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("project file does not exist: {}", path.display());
+    }
+
+    fs::remove_file(path)
+        .with_context(|| format!("failed to delete project file '{}'", path.display()))?;
+
+    Ok(())
 }
 
 #[cfg(test)]

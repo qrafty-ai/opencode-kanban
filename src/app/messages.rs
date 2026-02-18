@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyEvent, MouseEvent};
 
-use super::state::{CategoryInputField, DeleteTaskField, NewProjectField, NewTaskField};
+use super::state::{
+    CategoryInputField, DeleteTaskField, NewProjectField, NewTaskField, RenameProjectField,
+    RenameRepoField,
+};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Message {
@@ -71,6 +74,16 @@ pub enum Message {
     ProjectListConfirm,
     OpenNewProjectDialog,
     CreateProject,
+    OpenRenameProjectDialog,
+    ConfirmRenameProject,
+    FocusRenameProjectField(RenameProjectField),
+    OpenDeleteProjectDialog,
+    ConfirmDeleteProject,
+    OpenRenameRepoDialog,
+    ConfirmRenameRepo,
+    FocusRenameRepoField(RenameRepoField),
+    OpenDeleteRepoDialog,
+    ConfirmDeleteRepo,
     FocusNewTaskField(NewTaskField),
     ToggleNewTaskCheckbox,
     FocusCategoryInputField(CategoryInputField),

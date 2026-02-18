@@ -10,7 +10,8 @@ use super::state::{
     ActiveDialog, ArchiveTaskDialogState, CategoryColorDialogState, CategoryColorField,
     CategoryInputDialogState, CategoryInputField, ConfirmCancelField, ConfirmQuitDialogState,
     DeleteCategoryDialogState, DeleteTaskDialogState, DeleteTaskField, NewProjectDialogState,
-    NewProjectField, NewTaskDialogState, NewTaskField, WorktreeNotFoundDialogState,
+    NewProjectField, NewTaskDialogState, NewTaskField, RenameProjectDialogState,
+    RenameProjectField, RenameRepoDialogState, RenameRepoField, WorktreeNotFoundDialogState,
     WorktreeNotFoundField,
 };
 
@@ -32,6 +33,28 @@ pub fn handle_dialog_key(
         ActiveDialog::NewProject(state) => {
             handle_new_project_dialog_key(state, key, &mut follow_up);
         }
+        ActiveDialog::RenameProject(state) => {
+            handle_rename_project_dialog_key(state, key, &mut follow_up);
+        }
+        ActiveDialog::DeleteProject(_) => match key.code {
+            KeyCode::Esc => follow_up = Some(Message::DismissDialog),
+            KeyCode::Enter => follow_up = Some(Message::ConfirmDeleteProject),
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+                follow_up = Some(Message::DismissDialog);
+            }
+            _ => {}
+        },
+        ActiveDialog::RenameRepo(state) => {
+            handle_rename_repo_dialog_key(state, key, &mut follow_up);
+        }
+        ActiveDialog::DeleteRepo(_) => match key.code {
+            KeyCode::Esc => follow_up = Some(Message::DismissDialog),
+            KeyCode::Enter => follow_up = Some(Message::ConfirmDeleteRepo),
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+                follow_up = Some(Message::DismissDialog);
+            }
+            _ => {}
+        },
         ActiveDialog::CategoryInput(state) => {
             handle_category_input_dialog_key(state, key, &mut follow_up);
         }
@@ -561,6 +584,126 @@ fn handle_confirm_cancel_dialog_key(
                 ConfirmCancelField::Confirm => confirm_message,
                 ConfirmCancelField::Cancel => cancel_message,
             });
+        }
+        _ => {}
+    }
+}
+
+fn handle_rename_project_dialog_key(
+    state: &mut RenameProjectDialogState,
+    key: KeyEvent,
+    follow_up: &mut Option<Message>,
+) {
+    let fields = [
+        RenameProjectField::Name,
+        RenameProjectField::Confirm,
+        RenameProjectField::Cancel,
+    ];
+
+    let mut focus_index = fields
+        .iter()
+        .position(|field| *field == state.focused_field)
+        .unwrap_or(0);
+
+    let move_focus = |current: usize, delta: isize| -> usize {
+        let len = fields.len() as isize;
+        let next = (current as isize + delta).rem_euclid(len);
+        next as usize
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            *follow_up = Some(Message::DismissDialog);
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            focus_index = move_focus(focus_index, 1);
+            state.focused_field = fields[focus_index];
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            focus_index = move_focus(focus_index, -1);
+            state.focused_field = fields[focus_index];
+        }
+        KeyCode::Left if state.focused_field == RenameProjectField::Confirm => {
+            state.focused_field = RenameProjectField::Cancel;
+        }
+        KeyCode::Right if state.focused_field == RenameProjectField::Cancel => {
+            state.focused_field = RenameProjectField::Confirm;
+        }
+        KeyCode::Backspace => {
+            if state.focused_field == RenameProjectField::Name {
+                state.name_input.pop();
+            }
+        }
+        KeyCode::Enter => {
+            *follow_up = Some(match state.focused_field {
+                RenameProjectField::Cancel => Message::DismissDialog,
+                _ => Message::ConfirmRenameProject,
+            });
+        }
+        KeyCode::Char(ch) => {
+            if state.focused_field == RenameProjectField::Name {
+                state.name_input.push(ch);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_rename_repo_dialog_key(
+    state: &mut RenameRepoDialogState,
+    key: KeyEvent,
+    follow_up: &mut Option<Message>,
+) {
+    let fields = [
+        RenameRepoField::Name,
+        RenameRepoField::Confirm,
+        RenameRepoField::Cancel,
+    ];
+
+    let mut focus_index = fields
+        .iter()
+        .position(|field| *field == state.focused_field)
+        .unwrap_or(0);
+
+    let move_focus = |current: usize, delta: isize| -> usize {
+        let len = fields.len() as isize;
+        let next = (current as isize + delta).rem_euclid(len);
+        next as usize
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            *follow_up = Some(Message::DismissDialog);
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            focus_index = move_focus(focus_index, 1);
+            state.focused_field = fields[focus_index];
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            focus_index = move_focus(focus_index, -1);
+            state.focused_field = fields[focus_index];
+        }
+        KeyCode::Left if state.focused_field == RenameRepoField::Confirm => {
+            state.focused_field = RenameRepoField::Cancel;
+        }
+        KeyCode::Right if state.focused_field == RenameRepoField::Cancel => {
+            state.focused_field = RenameRepoField::Confirm;
+        }
+        KeyCode::Backspace => {
+            if state.focused_field == RenameRepoField::Name {
+                state.name_input.pop();
+            }
+        }
+        KeyCode::Enter => {
+            *follow_up = Some(match state.focused_field {
+                RenameRepoField::Cancel => Message::DismissDialog,
+                _ => Message::ConfirmRenameRepo,
+            });
+        }
+        KeyCode::Char(ch) => {
+            if state.focused_field == RenameRepoField::Name {
+                state.name_input.push(ch);
+            }
         }
         _ => {}
     }

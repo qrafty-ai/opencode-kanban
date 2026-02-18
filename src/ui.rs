@@ -15,8 +15,11 @@ use tuirealm::{
 
 use crate::app::{
     ActiveDialog, App, ArchiveTaskDialogState, CATEGORY_COLOR_PALETTE, CategoryColorField,
-    CategoryInputField, CategoryInputMode, ConfirmCancelField, DeleteTaskField, NewTaskField,
-    SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode, category_color_label,
+    CategoryInputField, CategoryInputMode, ConfirmCancelField, DeleteProjectDialogState,
+    DeleteRepoDialogState, DeleteTaskField, NewProjectDialogState, NewProjectField, NewTaskField,
+    ProjectDetailCache, RenameProjectDialogState, RenameProjectField, RenameRepoDialogState,
+    RenameRepoField, SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode,
+    category_color_label,
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
@@ -55,50 +58,131 @@ fn render_project_list(frame: &mut Frame<'_>, app: &App) {
         .split(frame.area());
 
     let mut header = Label::default()
-        .text("Select Project")
+        .text("opencode-kanban — Select Project")
         .alignment(Alignment::Center)
         .foreground(theme.base.header)
         .background(theme.base.canvas);
     header.view(frame, chunks[0]);
 
+    let content = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(chunks[1]);
+
     let mut rows = TableBuilder::default();
     for (idx, project) in app.project_list.iter().enumerate() {
-        let prefix = if idx == app.selected_project_index {
-            ">"
+        let is_selected = idx == app.selected_project_index;
+        let is_active = app
+            .current_project_path
+            .as_ref()
+            .map(|p| p == &project.path)
+            .unwrap_or(false);
+        let marker = if is_active { "*" } else { " " };
+        let name = format!("{} {}", marker, project.name);
+        if is_selected {
+            rows.add_col(TextSpan::new(name).fg(theme.interactive.focus).bold())
+                .add_row();
         } else {
-            " "
-        };
-        rows.add_col(TextSpan::from(prefix))
-            .add_col(TextSpan::from(project.name.clone()))
-            .add_row();
+            rows.add_col(TextSpan::from(name)).add_row();
+        }
     }
     if app.project_list.is_empty() {
-        rows.add_col(TextSpan::from(" "))
-            .add_col(TextSpan::from("No projects found"))
-            .add_row();
+        rows.add_col(TextSpan::from(
+            "  No projects found — press n to create one",
+        ))
+        .add_row();
     }
 
     let selected = app
         .selected_project_index
         .min(app.project_list.len().saturating_sub(1));
     let mut list = List::default()
-        .title("Projects", Alignment::Left)
+        .title("Projects  (* = active)", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
+        .background(theme.base.canvas)
         .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
         .scroll(true)
         .rows(rows.build())
         .selected_line(selected);
     list.attr(Attribute::Focus, AttrValue::Flag(true));
-    list.view(frame, chunks[1]);
+    list.view(frame, content[0]);
+
+    render_project_detail_panel(frame, content[1], app);
 
     let mut footer = Label::default()
-        .text("n: new project  Enter: select  q: quit")
+        .text("n: new  r: rename  x: delete  Enter: open  j/k: navigate  q: quit")
         .alignment(Alignment::Center)
         .foreground(theme.base.text_muted)
         .background(theme.base.canvas);
     footer.view(frame, chunks[2]);
+}
+
+fn render_project_detail_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+
+    let selected = app.project_list.get(app.selected_project_index);
+    let cache: Option<&ProjectDetailCache> = app.project_detail_cache.as_ref();
+
+    let mut lines: Vec<TextSpan> = Vec::new();
+
+    if let Some(project) = selected {
+        lines.push(TextSpan::new("PROJECT").fg(theme.base.header).bold());
+        lines.push(TextSpan::new(detail_kv("Name", &project.name)).fg(theme.base.text));
+
+        let path_str = project.path.to_string_lossy();
+        let path_short = clamp_text(&path_str, 55);
+        lines.push(TextSpan::new(detail_kv("Path", &path_short)).fg(theme.base.text_muted));
+        lines.push(TextSpan::new(""));
+
+        if let Some(c) = cache {
+            if c.project_name == project.name {
+                lines.push(TextSpan::new("CONTENTS").fg(theme.base.header).bold());
+                lines.push(
+                    TextSpan::new(detail_kv("Tasks", &c.task_count.to_string()))
+                        .fg(theme.base.text),
+                );
+                lines.push(
+                    TextSpan::new(detail_kv("Running", &c.running_count.to_string()))
+                        .fg(theme.status_color("running")),
+                );
+                lines.push(
+                    TextSpan::new(detail_kv("Repos", &c.repo_count.to_string()))
+                        .fg(theme.base.text),
+                );
+                lines.push(
+                    TextSpan::new(detail_kv("Columns", &c.category_count.to_string()))
+                        .fg(theme.base.text),
+                );
+                lines.push(TextSpan::new(""));
+                lines.push(TextSpan::new("FILE").fg(theme.base.header).bold());
+                lines.push(
+                    TextSpan::new(detail_kv("Size", &format!("{} KB", c.file_size_kb)))
+                        .fg(theme.base.text_muted),
+                );
+            }
+        } else {
+            lines.push(TextSpan::new("  (loading…)").fg(theme.base.text_muted));
+        }
+
+        lines.push(TextSpan::new(""));
+        lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
+        lines.push(
+            TextSpan::new("  Enter open  r rename  x delete  n new").fg(theme.base.text_muted),
+        );
+    } else {
+        lines.push(TextSpan::new("No project selected").fg(theme.base.text_muted));
+    }
+
+    let mut paragraph = Paragraph::default()
+        .title("Details", Alignment::Left)
+        .borders(rounded_borders(theme.base.text_muted))
+        .foreground(theme.base.text)
+        .background(theme.base.canvas)
+        .wrap(true)
+        .text(lines);
+    paragraph.view(frame, area);
 }
 
 fn render_board(frame: &mut Frame<'_>, app: &App) {
@@ -674,7 +758,11 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
         ActiveDialog::CategoryInput(_) => (60, 40),
         ActiveDialog::CategoryColor(_) => (60, 58),
         ActiveDialog::DeleteCategory(_) => (60, 40),
-        ActiveDialog::NewProject(_) => (60, 35),
+        ActiveDialog::NewProject(_) => (60, 40),
+        ActiveDialog::RenameProject(_) => (60, 40),
+        ActiveDialog::DeleteProject(_) => (60, 35),
+        ActiveDialog::RenameRepo(_) => (60, 40),
+        ActiveDialog::DeleteRepo(_) => (60, 35),
         _ => (60, 45),
     };
     let anchor = if matches!(app.active_dialog, ActiveDialog::CommandPalette(_)) {
@@ -729,6 +817,18 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
         }
         ActiveDialog::NewProject(state) => {
             render_new_project_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::RenameProject(state) => {
+            render_rename_project_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::DeleteProject(state) => {
+            render_delete_project_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::RenameRepo(state) => {
+            render_rename_repo_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::DeleteRepo(state) => {
+            render_delete_repo_dialog(frame, dialog_area, app, state)
         }
         ActiveDialog::MoveTask(_) | ActiveDialog::None | ActiveDialog::Help => {}
     }
@@ -1155,17 +1255,297 @@ fn render_new_project_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
-    state: &crate::app::NewProjectDialogState,
+    state: &NewProjectDialogState,
 ) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel =
+        dialog_panel("New Project", Alignment::Center, theme, surface).text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
     render_input_component(
         frame,
-        area,
-        "Project Name",
+        layout[0],
+        "Name",
         &state.name_input,
-        true,
-        dialog_surface(app.theme),
-        app.theme,
+        matches!(state.focused_field, NewProjectField::Name),
+        surface,
+        theme,
     );
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Create",
+        matches!(state.focused_field, NewProjectField::Create),
+        false,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, NewProjectField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Tab: next field  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
+fn render_rename_project_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &RenameProjectDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel = dialog_panel("Rename Project", Alignment::Center, theme, surface)
+        .text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
+    render_input_component(
+        frame,
+        layout[0],
+        "New Name",
+        &state.name_input,
+        matches!(state.focused_field, RenameProjectField::Name),
+        surface,
+        theme,
+    );
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Rename",
+        matches!(state.focused_field, RenameProjectField::Confirm),
+        false,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, RenameProjectField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Tab: next field  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
+fn render_delete_project_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &DeleteProjectDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel = dialog_panel("Delete Project", Alignment::Center, theme, surface)
+        .text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Length(2),
+        ])
+        .split(panel_inner);
+
+    let mut summary = Paragraph::default()
+        .foreground(theme.base.text)
+        .background(surface)
+        .wrap(true)
+        .alignment(Alignment::Center)
+        .text([TextSpan::from(format!(
+            "Permanently delete '{}'?\nAll tasks will be lost.",
+            state.project_name
+        ))]);
+    summary.view(frame, layout[0]);
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(frame, buttons[0], "Delete", true, true, app);
+    render_action_button(frame, buttons[1], "Cancel", false, false, app);
+
+    let mut hint = Label::default()
+        .text("Enter: confirm delete  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
+fn render_rename_repo_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &RenameRepoDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel =
+        dialog_panel("Rename Repo", Alignment::Center, theme, surface).text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
+    render_input_component(
+        frame,
+        layout[0],
+        "Display Name",
+        &state.name_input,
+        matches!(state.focused_field, RenameRepoField::Name),
+        surface,
+        theme,
+    );
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Rename",
+        matches!(state.focused_field, RenameRepoField::Confirm),
+        false,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, RenameRepoField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Tab: next field  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
+fn render_delete_repo_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &DeleteRepoDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel =
+        dialog_panel("Remove Repo", Alignment::Center, theme, surface).text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Length(2),
+        ])
+        .split(panel_inner);
+
+    let mut summary = Paragraph::default()
+        .foreground(theme.base.text)
+        .background(surface)
+        .wrap(true)
+        .alignment(Alignment::Center)
+        .text([TextSpan::from(format!(
+            "Remove repo '{}' from this project?\n(Only allowed if no tasks reference it.)",
+            state.repo_name
+        ))]);
+    summary.view(frame, layout[0]);
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(frame, buttons[0], "Remove", true, true, app);
+    render_action_button(frame, buttons[1], "Cancel", false, false, app);
+
+    let mut hint = Label::default()
+        .text("Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
 }
 
 fn render_category_color_dialog(
@@ -1875,12 +2255,14 @@ fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         SettingsSection::CategoryColors,
         SettingsSection::Keybindings,
         SettingsSection::General,
+        SettingsSection::Repos,
     ] {
         let label = match section {
             SettingsSection::Theme => "Theme",
             SettingsSection::CategoryColors => "Category Colors",
             SettingsSection::Keybindings => "Keybindings",
             SettingsSection::General => "General",
+            SettingsSection::Repos => "Repos",
         };
         let prefix = if section == active_section {
             "> "
@@ -1896,6 +2278,7 @@ fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         SettingsSection::CategoryColors => 1,
         SettingsSection::Keybindings => 2,
         SettingsSection::General => 3,
+        SettingsSection::Repos => 4,
     };
 
     let mut list = List::default()
@@ -1922,6 +2305,7 @@ fn render_settings_active_section(frame: &mut Frame<'_>, area: Rect, app: &App) 
         SettingsSection::CategoryColors => render_settings_category_colors(frame, area, app),
         SettingsSection::Keybindings => render_settings_keybindings(frame, area, app),
         SettingsSection::General => render_settings_general(frame, area, app),
+        SettingsSection::Repos => render_settings_repos(frame, area, app),
     }
 }
 
@@ -2059,6 +2443,53 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &App) {
     list.view(frame, area);
 }
 
+fn render_settings_repos(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let selected_field = app
+        .settings_view_state
+        .as_ref()
+        .map(|s| s.repos_selected_field)
+        .unwrap_or(0)
+        .min(app.repos.len().saturating_sub(1));
+
+    let mut rows = TableBuilder::default();
+
+    if app.repos.is_empty() {
+        rows.add_col(TextSpan::from("  No repos configured for this project"))
+            .add_row();
+    } else {
+        for (index, repo) in app.repos.iter().enumerate() {
+            let prefix = if index == selected_field { "> " } else { "  " };
+            let path_short = clamp_text(&repo.path, 45);
+            let base = repo
+                .default_base
+                .as_deref()
+                .filter(|b| !b.is_empty())
+                .unwrap_or("—");
+            rows.add_col(TextSpan::new(format!(
+                "{}{:<20} {} [{}]",
+                prefix,
+                clamp_text(&repo.name, 20),
+                path_short,
+                base
+            )))
+            .add_row();
+        }
+    }
+
+    let mut list = List::default()
+        .title("Repositories", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
+        .highlighted_str("> ")
+        .scroll(true)
+        .rows(rows.build())
+        .selected_line(selected_field);
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, area);
+}
+
 fn render_settings_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = app.theme;
     let active_section = app
@@ -2074,6 +2505,7 @@ fn render_settings_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         }
         SettingsSection::Keybindings => "h/l: section  Esc: close",
         SettingsSection::General => "j/k: select  h/l: section  Esc: close",
+        SettingsSection::Repos => "j/k: select  r: rename  x: remove  h/l: section  Esc: close",
     };
 
     let mut footer = Label::default()
