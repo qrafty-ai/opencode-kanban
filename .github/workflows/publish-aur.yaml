@@ -1,0 +1,85 @@
+name: Publish AUR
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-aur-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Publish to AUR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unsupported tag format: ${GITHUB_REF_NAME} (only vX.Y.Z supported)"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute source tarball SHA256
+        id: sha256
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          URL="https://github.com/qrafty-ai/opencode-kanban/archive/refs/tags/v${VERSION}.tar.gz"
+          SHA256="$(curl -fsSL "${URL}" | sha256sum | awk '{print $1}')"
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "Tarball URL: ${URL}"
+          echo "SHA256: ${SHA256}"
+
+      - name: Stamp PKGBUILD
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA256="${{ steps.sha256.outputs.sha256 }}"
+
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          sha256  = os.environ["SHA256"]
+
+          pkgbuild = Path("aur/PKGBUILD")
+          text = pkgbuild.read_text()
+
+          text = re.sub(r"^pkgver=.*$", f"pkgver={version}",        text, flags=re.MULTILINE)
+          text = re.sub(r"^pkgrel=.*$", "pkgrel=1",                  text, flags=re.MULTILINE)
+          text = re.sub(r"^sha256sums=\('.*?'\)$", f"sha256sums=('{sha256}')", text, flags=re.MULTILINE)
+
+          pkgbuild.write_text(text)
+          print(f"Stamped PKGBUILD: version={version}, sha256={sha256}")
+          PY
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.sha256.outputs.sha256 }}
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
+        with:
+          pkgname: opencode-kanban
+          pkgbuild: aur/PKGBUILD
+          commit_username: qrafty-ai[bot]
+          commit_email: github-actions@qrafty.ai
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to v${{ steps.version.outputs.version }}"
+          allow_empty_commits: false
+          force_push: false
