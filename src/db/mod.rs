@@ -120,6 +120,49 @@ impl Database {
         block_on_db(self.list_repos_async())
     }
 
+    pub async fn update_repo_name_async(&self, id: Uuid, new_name: &str) -> Result<()> {
+        let now = now_iso();
+        sqlx::query("UPDATE repos SET name = ?, updated_at = ? WHERE id = ?")
+            .bind(new_name)
+            .bind(&now)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("failed to update repo name")?;
+        Ok(())
+    }
+
+    pub fn update_repo_name(&self, id: Uuid, new_name: &str) -> Result<()> {
+        block_on_db(self.update_repo_name_async(id, new_name))
+    }
+
+    pub async fn delete_repo_async(&self, id: Uuid) -> Result<()> {
+        let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE repo_id = ?")
+            .bind(id.to_string())
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count tasks for repo")?;
+
+        if task_count > 0 {
+            anyhow::bail!(
+                "cannot delete repo: {} task(s) still reference it",
+                task_count
+            );
+        }
+
+        sqlx::query("DELETE FROM repos WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("failed to delete repo")?;
+
+        Ok(())
+    }
+
+    pub fn delete_repo(&self, id: Uuid) -> Result<()> {
+        block_on_db(self.delete_repo_async(id))
+    }
+
     pub async fn add_task_async(
         &self,
         repo_id: Uuid,
@@ -155,8 +198,8 @@ impl Database {
                 id, title, repo_id, branch, category_id, position, tmux_session_name,
                 worktree_path, tmux_status, status_source,
                 status_fetched_at, status_error, opencode_session_id,
-                created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                archived, archived_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(resolved_title)
@@ -170,6 +213,8 @@ impl Database {
         .bind(DEFAULT_STATUS_SOURCE)
         .bind(Option::<String>::None)
         .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(0)
         .bind(Option::<String>::None)
         .bind(now.clone())
         .bind(now)
@@ -200,6 +245,7 @@ impl Database {
             "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
                     worktree_path, tmux_status, status_source,
                     status_fetched_at, status_error, opencode_session_id,
+                    archived, archived_at,
                     created_at, updated_at
              FROM tasks WHERE id = ?",
         )
@@ -220,8 +266,10 @@ impl Database {
             "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
                     worktree_path, tmux_status, status_source,
                     status_fetched_at, status_error, opencode_session_id,
+                    archived, archived_at,
                     created_at, updated_at
-             FROM tasks ORDER BY category_id ASC, position ASC, created_at ASC",
+             FROM tasks WHERE archived = 0
+             ORDER BY category_id ASC, position ASC, created_at ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -232,6 +280,69 @@ impl Database {
 
     pub fn list_tasks(&self) -> Result<Vec<Task>> {
         block_on_db(self.list_tasks_async())
+    }
+
+    pub async fn list_archived_tasks_async(&self) -> Result<Vec<Task>> {
+        let rows = sqlx::query(
+            "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
+                    worktree_path, tmux_status, status_source,
+                    status_fetched_at, status_error, opencode_session_id,
+                    archived, archived_at,
+                    created_at, updated_at
+             FROM tasks WHERE archived = 1
+             ORDER BY archived_at DESC, updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to load archived tasks")?;
+
+        rows.into_iter().map(|row| map_task_row(&row)).collect()
+    }
+
+    pub fn list_archived_tasks(&self) -> Result<Vec<Task>> {
+        block_on_db(self.list_archived_tasks_async())
+    }
+
+    pub async fn archive_task_async(&self, id: Uuid) -> Result<()> {
+        let now = now_iso();
+        sqlx::query(
+            "UPDATE tasks
+             SET archived = 1,
+                 archived_at = ?,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(now.clone())
+        .bind(now)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to archive task")?;
+        Ok(())
+    }
+
+    pub fn archive_task(&self, id: Uuid) -> Result<()> {
+        block_on_db(self.archive_task_async(id))
+    }
+
+    pub async fn unarchive_task_async(&self, id: Uuid) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks
+             SET archived = 0,
+                 archived_at = NULL,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(now_iso())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to unarchive task")?;
+        Ok(())
+    }
+
+    pub fn unarchive_task(&self, id: Uuid) -> Result<()> {
+        block_on_db(self.unarchive_task_async(id))
     }
 
     pub async fn update_task_category_async(
@@ -591,6 +702,8 @@ impl Database {
                 status_fetched_at TEXT,
                 status_error TEXT,
                 opencode_session_id TEXT,
+                archived INTEGER NOT NULL DEFAULT 0,
+                archived_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(repo_id, branch)
@@ -635,11 +748,27 @@ impl Database {
             "failed to migrate tasks.opencode_session_id",
         )
         .await?;
+        execute_add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+            "failed to migrate tasks.archived",
+        )
+        .await?;
+        execute_add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE tasks ADD COLUMN archived_at TEXT",
+            "failed to migrate tasks.archived_at",
+        )
+        .await?;
 
         sqlx::query("UPDATE tasks SET status_source = 'none' WHERE status_source IS NULL")
             .execute(&self.pool)
             .await
             .context("failed to backfill tasks.status_source")?;
+        sqlx::query("UPDATE tasks SET archived = 0 WHERE archived IS NULL")
+            .execute(&self.pool)
+            .await
+            .context("failed to backfill tasks.archived")?;
 
         self.migrate_categories_color_column_async().await?;
         Ok(())
@@ -791,6 +920,8 @@ fn map_task_row(row: &SqliteRow) -> Result<Task> {
         status_fetched_at: row.try_get("status_fetched_at")?,
         status_error: row.try_get("status_error")?,
         opencode_session_id: row.try_get("opencode_session_id")?,
+        archived: row.try_get::<i64, _>("archived")? != 0,
+        archived_at: row.try_get("archived_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -893,6 +1024,8 @@ mod tests {
         let task = db.add_task(repo.id, "feature/db-layer", "", todo_category)?;
         assert_eq!(task.tmux_status, "unknown");
         assert_eq!(task.status_source, "none");
+        assert!(!task.archived);
+        assert_eq!(task.archived_at, None);
 
         db.update_task_status(task.id, "running")?;
         db.update_task_status_metadata(
@@ -913,6 +1046,35 @@ mod tests {
 
         db.delete_task(task.id)?;
         assert!(db.get_task(task.id).is_err());
+
+        std::fs::remove_dir_all(&repo_dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_archive_and_unarchive_task_visibility() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let repo_dir = create_temp_git_repo("archive-visibility")?;
+        let repo = db.add_repo(&repo_dir)?;
+        let category_id = db.list_categories()?[0].id;
+
+        let task = db.add_task(repo.id, "feature/archive", "Archive Me", category_id)?;
+        assert_eq!(db.list_tasks()?.len(), 1);
+        assert_eq!(db.list_archived_tasks()?.len(), 0);
+
+        db.archive_task(task.id)?;
+        assert_eq!(db.list_tasks()?.len(), 0);
+        let archived = db.list_archived_tasks()?;
+        assert_eq!(archived.len(), 1);
+        assert!(archived[0].archived);
+        assert!(archived[0].archived_at.is_some());
+
+        db.unarchive_task(task.id)?;
+        let visible = db.list_tasks()?;
+        assert_eq!(visible.len(), 1);
+        assert!(!visible[0].archived);
+        assert_eq!(visible[0].archived_at, None);
+        assert_eq!(db.list_archived_tasks()?.len(), 0);
 
         std::fs::remove_dir_all(&repo_dir)?;
         Ok(())

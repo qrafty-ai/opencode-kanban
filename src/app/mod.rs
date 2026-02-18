@@ -24,11 +24,13 @@ use uuid::Uuid;
 
 pub use self::messages::Message;
 pub use self::state::{
-    ActiveDialog, CATEGORY_COLOR_PALETTE, CategoryColorDialogState, CategoryColorField,
-    CategoryInputDialogState, CategoryInputField, CategoryInputMode, ConfirmQuitDialogState,
-    ContextMenuItem, ContextMenuState, DeleteCategoryDialogState, DeleteCategoryField,
+    ActiveDialog, ArchiveTaskDialogState, CATEGORY_COLOR_PALETTE, CategoryColorDialogState,
+    CategoryColorField, CategoryInputDialogState, CategoryInputField, CategoryInputMode,
+    ConfirmCancelField, ConfirmQuitDialogState, ContextMenuItem, ContextMenuState,
+    DeleteCategoryDialogState, DeleteProjectDialogState, DeleteRepoDialogState,
     DeleteTaskDialogState, DeleteTaskField, DetailFocus, ErrorDialogState, MoveTaskDialogState,
     NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
+    RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
     RepoUnavailableDialogState, SettingsSection, SettingsViewState, TodoVisualizationMode, View,
     ViewMode, WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
 };
@@ -70,6 +72,15 @@ pub enum SidePanelRow {
     },
 }
 
+pub struct ProjectDetailCache {
+    pub project_name: String,
+    pub task_count: usize,
+    pub running_count: usize,
+    pub repo_count: usize,
+    pub category_count: usize,
+    pub file_size_kb: u64,
+}
+
 pub struct App {
     pub should_quit: bool,
     pub pulse_phase: u8,
@@ -81,6 +92,7 @@ pub struct App {
     pub tasks: Vec<Task>,
     pub categories: Vec<Category>,
     pub repos: Vec<Repo>,
+    pub archived_tasks: Vec<Task>,
     pub focused_column: usize,
     pub selected_task_per_column: HashMap<usize, usize>,
     pub scroll_offset_per_column: HashMap<usize, usize>,
@@ -104,6 +116,7 @@ pub struct App {
     pub view_mode: ViewMode,
     pub side_panel_width: u16,
     pub side_panel_selected_row: usize,
+    pub archive_selected_index: usize,
     pub collapsed_categories: HashSet<Uuid>,
     pub current_log_buffer: Option<String>,
     pub detail_focus: DetailFocus,
@@ -121,6 +134,27 @@ pub struct App {
     pub settings: crate::settings::Settings,
     pub settings_view_state: Option<SettingsViewState>,
     pub category_edit_mode: bool,
+    pub project_detail_cache: Option<ProjectDetailCache>,
+}
+
+fn load_project_detail(info: &crate::projects::ProjectInfo) -> Option<ProjectDetailCache> {
+    let db = Database::open(&info.path).ok()?;
+    let tasks = db.list_tasks().ok()?;
+    let repos = db.list_repos().ok()?;
+    let categories = db.list_categories().ok()?;
+    let running = tasks.iter().filter(|t| t.tmux_status == "running").count();
+    let size_kb = fs::metadata(&info.path)
+        .ok()
+        .map(|m| m.len() / 1024)
+        .unwrap_or(0);
+    Some(ProjectDetailCache {
+        project_name: info.name.clone(),
+        task_count: tasks.len(),
+        running_count: running,
+        repo_count: repos.len(),
+        category_count: categories.len(),
+        file_size_kb: size_kb,
+    })
 }
 
 impl App {
@@ -173,6 +207,7 @@ impl App {
             tasks: Vec::new(),
             categories: Vec::new(),
             repos: Vec::new(),
+            archived_tasks: Vec::new(),
             focused_column: 0,
             selected_task_per_column: HashMap::new(),
             scroll_offset_per_column: HashMap::new(),
@@ -196,6 +231,7 @@ impl App {
             view_mode: default_view_mode,
             side_panel_width: settings.side_panel_width,
             side_panel_selected_row: 0,
+            archive_selected_index: 0,
             collapsed_categories: HashSet::new(),
             current_log_buffer: None,
             detail_focus: DetailFocus::List,
@@ -213,6 +249,7 @@ impl App {
             settings,
             settings_view_state: None,
             category_edit_mode: false,
+            project_detail_cache: None,
         };
 
         app.refresh_data()?;
@@ -344,9 +381,14 @@ impl App {
     }
 
     fn save_settings_with_notice(&mut self) {
-        if let Err(err) = self.settings.save() {
-            warn!(error = %err, "failed to save settings");
-            self.footer_notice = Some(" Failed to save settings to disk ".to_string());
+        match self.settings.save() {
+            Ok(()) => {
+                self.footer_notice = Some("  ✓ Settings saved  ".to_string());
+            }
+            Err(err) => {
+                warn!(error = %err, "failed to save settings");
+                self.footer_notice = Some(" Failed to save settings to disk ".to_string());
+            }
         }
     }
 
@@ -418,9 +460,13 @@ impl App {
                 self.selected_project_index.min(self.project_list.len() - 1);
             self.project_list_state
                 .select(Some(self.selected_project_index));
+            if let Some(project) = self.project_list.get(self.selected_project_index) {
+                self.project_detail_cache = load_project_detail(project);
+            }
         } else {
             self.selected_project_index = 0;
             self.project_list_state.select(None);
+            self.project_detail_cache = None;
         }
         Ok(())
     }
@@ -553,18 +599,38 @@ impl App {
             }
             Message::OpenProjectList => {
                 self.current_view = View::ProjectList;
+                self.archived_tasks.clear();
+                self.archive_selected_index = 0;
                 self.active_dialog = ActiveDialog::None;
             }
             Message::OpenSettings => {
                 self.settings_view_state = Some(SettingsViewState {
-                    active_section: SettingsSection::Theme,
+                    active_section: SettingsSection::General,
                     general_selected_field: 0,
+                    category_color_selected: self
+                        .focused_column
+                        .min(self.categories.len().saturating_sub(1)),
+                    repos_selected_field: 0,
                     previous_view: self.current_view,
                 });
                 self.current_view = View::Settings;
                 self.active_dialog = ActiveDialog::None;
                 self.context_menu = None;
                 self.hovered_message = None;
+            }
+            Message::OpenArchiveView => {
+                self.archived_tasks = self.db.list_archived_tasks()?;
+                self.archive_selected_index = 0;
+                self.current_view = View::Archive;
+                self.active_dialog = ActiveDialog::None;
+                self.context_menu = None;
+                self.hovered_message = None;
+            }
+            Message::CloseArchiveView => {
+                self.current_view = View::Board;
+                self.archived_tasks.clear();
+                self.archive_selected_index = 0;
+                self.active_dialog = ActiveDialog::None;
             }
             Message::CloseSettings => {
                 if let Some(state) = self.settings_view_state.take() {
@@ -576,66 +642,93 @@ impl App {
             Message::SettingsNextSection => {
                 if let Some(state) = &mut self.settings_view_state {
                     state.active_section = match state.active_section {
-                        SettingsSection::Theme => SettingsSection::Keybindings,
-                        SettingsSection::Keybindings => SettingsSection::General,
-                        SettingsSection::General => SettingsSection::Theme,
+                        SettingsSection::General => SettingsSection::CategoryColors,
+                        SettingsSection::CategoryColors => SettingsSection::Keybindings,
+                        SettingsSection::Keybindings => SettingsSection::Repos,
+                        SettingsSection::Repos => SettingsSection::General,
                     };
                 }
             }
             Message::SettingsPrevSection => {
                 if let Some(state) = &mut self.settings_view_state {
                     state.active_section = match state.active_section {
-                        SettingsSection::Theme => SettingsSection::General,
-                        SettingsSection::Keybindings => SettingsSection::Theme,
-                        SettingsSection::General => SettingsSection::Keybindings,
+                        SettingsSection::General => SettingsSection::Repos,
+                        SettingsSection::CategoryColors => SettingsSection::General,
+                        SettingsSection::Keybindings => SettingsSection::CategoryColors,
+                        SettingsSection::Repos => SettingsSection::Keybindings,
                     };
                 }
             }
             Message::SettingsNextItem => {
-                if let Some(state) = &mut self.settings_view_state
-                    && state.active_section == SettingsSection::General
-                {
-                    state.general_selected_field =
-                        state.general_selected_field.saturating_add(1).min(2);
+                if let Some(state) = &mut self.settings_view_state {
+                    match state.active_section {
+                        SettingsSection::General => {
+                            state.general_selected_field =
+                                state.general_selected_field.saturating_add(1).min(3);
+                        }
+                        SettingsSection::CategoryColors => {
+                            state.category_color_selected = state
+                                .category_color_selected
+                                .saturating_add(1)
+                                .min(self.categories.len().saturating_sub(1));
+                        }
+                        SettingsSection::Repos => {
+                            state.repos_selected_field = state
+                                .repos_selected_field
+                                .saturating_add(1)
+                                .min(self.repos.len().saturating_sub(1));
+                        }
+                        SettingsSection::Keybindings => {}
+                    }
                 }
             }
             Message::SettingsPrevItem => {
-                if let Some(state) = &mut self.settings_view_state
-                    && state.active_section == SettingsSection::General
-                {
-                    state.general_selected_field = state.general_selected_field.saturating_sub(1);
+                if let Some(state) = &mut self.settings_view_state {
+                    match state.active_section {
+                        SettingsSection::General => {
+                            state.general_selected_field =
+                                state.general_selected_field.saturating_sub(1);
+                        }
+                        SettingsSection::CategoryColors => {
+                            state.category_color_selected =
+                                state.category_color_selected.saturating_sub(1);
+                        }
+                        SettingsSection::Repos => {
+                            state.repos_selected_field =
+                                state.repos_selected_field.saturating_sub(1);
+                        }
+                        SettingsSection::Keybindings => {}
+                    }
                 }
             }
             Message::SettingsToggle => {
                 if let Some(state) = &self.settings_view_state {
                     match state.active_section {
-                        SettingsSection::Theme => {
-                            self.settings.theme = match self.settings.theme.as_str() {
-                                "default" => "high-contrast".to_string(),
-                                "high-contrast" => "mono".to_string(),
-                                _ => "default".to_string(),
-                            };
-
-                            let theme_preset = ThemePreset::from_str(&self.settings.theme)
-                                .unwrap_or(ThemePreset::Default);
-                            self.theme = Theme::from_preset(theme_preset);
-                            self.save_settings_with_notice();
-                        }
                         SettingsSection::General => {
-                            match state.general_selected_field.min(2) {
+                            match state.general_selected_field {
                                 0 => {
+                                    self.settings.theme = match self.settings.theme.as_str() {
+                                        "default" => "high-contrast".to_string(),
+                                        "high-contrast" => "mono".to_string(),
+                                        _ => "default".to_string(),
+                                    };
+                                    let theme_preset = ThemePreset::from_str(&self.settings.theme)
+                                        .unwrap_or(ThemePreset::Default);
+                                    self.theme = Theme::from_preset(theme_preset);
+                                }
+                                1 => {
                                     let next = self.settings.poll_interval_ms.saturating_add(500);
                                     self.settings.poll_interval_ms =
                                         if next > 30_000 { 500 } else { next };
                                     self.restart_status_poller();
                                 }
-                                1 => {
+                                2 => {
                                     let next = self.settings.side_panel_width.saturating_add(5);
                                     self.settings.side_panel_width =
                                         if next > 80 { 20 } else { next };
                                     self.side_panel_width = self.settings.side_panel_width;
                                 }
-                                2 => {
+                                3 => {
                                     self.settings.default_view =
                                         if self.settings.default_view == "kanban" {
                                             "detail".to_string()
@@ -647,8 +740,92 @@ impl App {
                             }
                             self.save_settings_with_notice();
                         }
+                        SettingsSection::CategoryColors => {
+                            let Some((category_id, current_color)) = self
+                                .categories
+                                .get(
+                                    state
+                                        .category_color_selected
+                                        .min(self.categories.len().saturating_sub(1)),
+                                )
+                                .map(|category| (category.id, category.color.clone()))
+                            else {
+                                return Ok(());
+                            };
+
+                            let next_color = next_palette_color(current_color.as_deref());
+                            self.db
+                                .update_category_color(category_id, next_color)
+                                .context("failed to update category color")?;
+                            self.refresh_data()?;
+
+                            if let Some(state) = &mut self.settings_view_state {
+                                state.category_color_selected = self
+                                    .categories
+                                    .iter()
+                                    .position(|category| category.id == category_id)
+                                    .unwrap_or_else(|| {
+                                        state
+                                            .category_color_selected
+                                            .min(self.categories.len().saturating_sub(1))
+                                    });
+                            }
+                        }
                         SettingsSection::Keybindings => {}
+                        SettingsSection::Repos => {}
                     }
+                }
+            }
+            Message::SettingsDecreaseItem => {
+                if let Some(state) = &self.settings_view_state
+                    && state.active_section == SettingsSection::General
+                {
+                    match state.general_selected_field {
+                        0 => {
+                            self.settings.theme = match self.settings.theme.as_str() {
+                                "high-contrast" => "default".to_string(),
+                                "mono" => "high-contrast".to_string(),
+                                _ => "mono".to_string(),
+                            };
+                            let theme_preset = ThemePreset::from_str(&self.settings.theme)
+                                .unwrap_or(ThemePreset::Default);
+                            self.theme = Theme::from_preset(theme_preset);
+                        }
+                        1 => {
+                            let prev = self.settings.poll_interval_ms.saturating_sub(500);
+                            self.settings.poll_interval_ms = if prev < 500 { 30_000 } else { prev };
+                            self.restart_status_poller();
+                        }
+                        2 => {
+                            let prev = self.settings.side_panel_width.saturating_sub(5);
+                            self.settings.side_panel_width = if prev < 20 { 80 } else { prev };
+                            self.side_panel_width = self.settings.side_panel_width;
+                        }
+                        _ => {}
+                    }
+                    self.save_settings_with_notice();
+                }
+            }
+            Message::SettingsResetItem => {
+                if let Some(state) = &self.settings_view_state
+                    && state.active_section == SettingsSection::General
+                {
+                    match state.general_selected_field {
+                        0 => {
+                            self.settings.theme = "default".to_string();
+                            self.theme = Theme::from_preset(ThemePreset::Default);
+                        }
+                        1 => {
+                            self.settings.poll_interval_ms = 1_000;
+                            self.restart_status_poller();
+                        }
+                        2 => {
+                            self.settings.side_panel_width = 40;
+                            self.side_panel_width = 40;
+                        }
+                        _ => {}
+                    }
+                    self.save_settings_with_notice();
                 }
             }
             Message::FocusColumn(index) => {
@@ -688,6 +865,7 @@ impl App {
             }
             Message::OpenDeleteCategoryDialog => self.open_delete_category_dialog()?,
             Message::OpenDeleteTaskDialog => self.open_delete_task_dialog()?,
+            Message::OpenArchiveTaskDialog => self.open_archive_task_dialog()?,
             Message::SubmitCategoryInput => self.confirm_category_input()?,
             Message::ConfirmDeleteCategory => self.confirm_delete_category()?,
             Message::MoveTaskLeft => self.move_task_left()?,
@@ -740,18 +918,34 @@ impl App {
             | Message::DeleteTaskToggleRemoveWorktree
             | Message::DeleteTaskToggleDeleteBranch => {}
             Message::ConfirmDeleteTask => self.confirm_delete_task()?,
+            Message::ConfirmArchiveTask => self.confirm_archive_task()?,
+            Message::UnarchiveTask => self.unarchive_selected_task()?,
+            Message::ArchiveSelectUp => {
+                self.archive_selected_index = self.archive_selected_index.saturating_sub(1);
+            }
+            Message::ArchiveSelectDown => {
+                let max = self.archived_tasks.len().saturating_sub(1);
+                self.archive_selected_index = (self.archive_selected_index + 1).min(max);
+            }
             Message::SwitchToProjectList => {
                 self.current_view = View::ProjectList;
+                self.archived_tasks.clear();
+                self.archive_selected_index = 0;
             }
             Message::SwitchToBoard(path) => {
                 self.switch_project(path)?;
                 self.current_view = View::Board;
+                self.archived_tasks.clear();
+                self.archive_selected_index = 0;
             }
             Message::ProjectListSelectUp => {
                 if self.selected_project_index > 0 {
                     self.selected_project_index -= 1;
                     self.project_list_state
                         .select(Some(self.selected_project_index));
+                    if let Some(project) = self.project_list.get(self.selected_project_index) {
+                        self.project_detail_cache = load_project_detail(project);
+                    }
                 }
             }
             Message::ProjectListSelectDown => {
@@ -759,12 +953,17 @@ impl App {
                     self.selected_project_index += 1;
                     self.project_list_state
                         .select(Some(self.selected_project_index));
+                    if let Some(project) = self.project_list.get(self.selected_project_index) {
+                        self.project_detail_cache = load_project_detail(project);
+                    }
                 }
             }
             Message::ProjectListConfirm => {
                 if let Some(project) = self.project_list.get(self.selected_project_index) {
                     self.switch_project(project.path.clone())?;
                     self.current_view = View::Board;
+                    self.archived_tasks.clear();
+                    self.archive_selected_index = 0;
                 }
             }
             Message::OpenNewProjectDialog => {
@@ -791,6 +990,8 @@ impl App {
                                 }
                                 self.switch_project(path)?;
                                 self.current_view = View::Board;
+                                self.archived_tasks.clear();
+                                self.archive_selected_index = 0;
                             }
                             Err(e) => {
                                 self.active_dialog = ActiveDialog::Error(ErrorDialogState {
@@ -798,6 +999,152 @@ impl App {
                                     detail: e.to_string(),
                                 });
                             }
+                        }
+                    }
+                }
+            }
+            Message::OpenRenameProjectDialog => {
+                if let Some(project) = self.project_list.get(self.selected_project_index) {
+                    self.active_dialog = ActiveDialog::RenameProject(RenameProjectDialogState {
+                        name_input: project.name.clone(),
+                        focused_field: RenameProjectField::Name,
+                    });
+                }
+            }
+            Message::ConfirmRenameProject => {
+                if let ActiveDialog::RenameProject(state) = &self.active_dialog {
+                    let new_name = state.name_input.trim().to_string();
+                    if !new_name.is_empty()
+                        && let Some(project) = self.project_list.get(self.selected_project_index)
+                    {
+                        let old_path = project.path.clone();
+                        let is_current = self.current_project_path.as_deref() == Some(&old_path);
+                        match projects::rename_project(&old_path, &new_name) {
+                            Ok(new_path) => {
+                                self.active_dialog = ActiveDialog::None;
+                                if is_current {
+                                    self.current_project_path = Some(new_path.clone());
+                                }
+                                self.refresh_projects()?;
+                            }
+                            Err(e) => {
+                                self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                                    title: "Failed to rename project".to_string(),
+                                    detail: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Message::FocusRenameProjectField(field) => {
+                if let ActiveDialog::RenameProject(state) = &mut self.active_dialog {
+                    state.focused_field = field;
+                }
+            }
+            Message::OpenDeleteProjectDialog => {
+                if let Some(project) = self.project_list.get(self.selected_project_index) {
+                    self.active_dialog = ActiveDialog::DeleteProject(DeleteProjectDialogState {
+                        project_name: project.name.clone(),
+                        project_path: project.path.clone(),
+                    });
+                }
+            }
+            Message::ConfirmDeleteProject => {
+                if let ActiveDialog::DeleteProject(state) = &self.active_dialog {
+                    let path = state.project_path.clone();
+                    let is_current = self.current_project_path.as_deref() == Some(&path);
+                    if is_current {
+                        self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                            title: "Cannot delete active project".to_string(),
+                            detail: "Switch to another project first.".to_string(),
+                        });
+                    } else {
+                        match projects::delete_project(&path) {
+                            Ok(()) => {
+                                self.active_dialog = ActiveDialog::None;
+                                self.selected_project_index =
+                                    self.selected_project_index.saturating_sub(1);
+                                self.refresh_projects()?;
+                            }
+                            Err(e) => {
+                                self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                                    title: "Failed to delete project".to_string(),
+                                    detail: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Message::OpenRenameRepoDialog => {
+                let repos_selected = self
+                    .settings_view_state
+                    .as_ref()
+                    .map(|s| s.repos_selected_field)
+                    .unwrap_or(0);
+                if let Some(repo) = self.repos.get(repos_selected) {
+                    self.active_dialog = ActiveDialog::RenameRepo(RenameRepoDialogState {
+                        repo_id: repo.id,
+                        name_input: repo.name.clone(),
+                        focused_field: RenameRepoField::Name,
+                    });
+                }
+            }
+            Message::ConfirmRenameRepo => {
+                if let ActiveDialog::RenameRepo(state) = &self.active_dialog {
+                    let new_name = state.name_input.trim().to_string();
+                    let repo_id = state.repo_id;
+                    if !new_name.is_empty() {
+                        match self.db.update_repo_name(repo_id, &new_name) {
+                            Ok(()) => {
+                                self.active_dialog = ActiveDialog::None;
+                                self.refresh_data()?;
+                            }
+                            Err(e) => {
+                                self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                                    title: "Failed to rename repo".to_string(),
+                                    detail: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Message::FocusRenameRepoField(field) => {
+                if let ActiveDialog::RenameRepo(state) = &mut self.active_dialog {
+                    state.focused_field = field;
+                }
+            }
+            Message::OpenDeleteRepoDialog => {
+                let repos_selected = self
+                    .settings_view_state
+                    .as_ref()
+                    .map(|s| s.repos_selected_field)
+                    .unwrap_or(0);
+                if let Some(repo) = self.repos.get(repos_selected) {
+                    self.active_dialog = ActiveDialog::DeleteRepo(DeleteRepoDialogState {
+                        repo_id: repo.id,
+                        repo_name: repo.name.clone(),
+                    });
+                }
+            }
+            Message::ConfirmDeleteRepo => {
+                if let ActiveDialog::DeleteRepo(state) = &self.active_dialog {
+                    let repo_id = state.repo_id;
+                    match self.db.delete_repo(repo_id) {
+                        Ok(()) => {
+                            self.active_dialog = ActiveDialog::None;
+                            self.refresh_data()?;
+                            if let Some(s) = &mut self.settings_view_state {
+                                s.repos_selected_field = s.repos_selected_field.saturating_sub(1);
+                            }
+                        }
+                        Err(e) => {
+                            self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                                title: "Failed to delete repo".to_string(),
+                                detail: e.to_string(),
+                            });
                         }
                     }
                 }
@@ -849,6 +1196,8 @@ impl App {
                     if let Some(project) = self.project_list.get(idx) {
                         let _ = self.switch_project(project.path.clone());
                         self.current_view = View::Board;
+                        self.archived_tasks.clear();
+                        self.archive_selected_index = 0;
                     }
                 }
             }
@@ -949,6 +1298,9 @@ impl App {
                 KeyAction::ExpandPanel => {
                     self.side_panel_width = self.side_panel_width.saturating_add(5).min(80);
                 }
+                KeyAction::OpenArchiveView => {
+                    self.update(Message::OpenArchiveView)?;
+                }
                 _ => {}
             }
             return Ok(());
@@ -1008,6 +1360,8 @@ impl App {
                     KeyAction::ProjectDown => self.update(Message::ProjectListSelectDown)?,
                     KeyAction::ProjectConfirm => self.update(Message::ProjectListConfirm)?,
                     KeyAction::NewProject => self.update(Message::OpenNewProjectDialog)?,
+                    KeyAction::ProjectRename => self.update(Message::OpenRenameProjectDialog)?,
+                    KeyAction::ProjectDelete => self.update(Message::OpenDeleteProjectDialog)?,
                     _ => {}
                 }
             }
@@ -1015,13 +1369,53 @@ impl App {
         }
 
         if self.current_view == View::Settings {
+            let active_section = self.settings_view_state.as_ref().map(|s| s.active_section);
+            let msg = match key.code {
+                KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                    Some(Message::SettingsNextSection)
+                }
+                KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                    Some(Message::SettingsPrevSection)
+                }
+                KeyCode::Up | KeyCode::Char('k') => Some(Message::SettingsPrevItem),
+                KeyCode::Down | KeyCode::Char('j') => Some(Message::SettingsNextItem),
+                KeyCode::Enter | KeyCode::Char(' ') => Some(Message::SettingsToggle),
+                KeyCode::Char('r') if active_section == Some(SettingsSection::Repos) => {
+                    Some(Message::OpenRenameRepoDialog)
+                }
+                KeyCode::Char('x') if active_section == Some(SettingsSection::Repos) => {
+                    Some(Message::OpenDeleteRepoDialog)
+                }
+                KeyCode::Char('0') if active_section == Some(SettingsSection::General) => {
+                    Some(Message::SettingsResetItem)
+                }
+                KeyCode::Esc => Some(Message::CloseSettings),
+                _ => None,
+            };
+
+            let msg = if active_section == Some(SettingsSection::General) {
+                match key.code {
+                    KeyCode::Right | KeyCode::Char('l') => Some(Message::SettingsToggle),
+                    KeyCode::Left | KeyCode::Char('h') => Some(Message::SettingsDecreaseItem),
+                    _ => msg,
+                }
+            } else {
+                msg
+            };
+
+            if let Some(msg) = msg {
+                self.update(msg)?;
+            }
+            return Ok(());
+        }
+
+        if self.current_view == View::Archive {
             match key.code {
-                KeyCode::Left | KeyCode::Char('h') => self.update(Message::SettingsPrevSection)?,
-                KeyCode::Right | KeyCode::Char('l') => self.update(Message::SettingsNextSection)?,
-                KeyCode::Up | KeyCode::Char('k') => self.update(Message::SettingsPrevItem)?,
-                KeyCode::Down | KeyCode::Char('j') => self.update(Message::SettingsNextItem)?,
-                KeyCode::Enter | KeyCode::Char(' ') => self.update(Message::SettingsToggle)?,
-                KeyCode::Esc => self.update(Message::CloseSettings)?,
+                KeyCode::Up | KeyCode::Char('k') => self.update(Message::ArchiveSelectUp)?,
+                KeyCode::Down | KeyCode::Char('j') => self.update(Message::ArchiveSelectDown)?,
+                KeyCode::Char('u') => self.update(Message::UnarchiveTask)?,
+                KeyCode::Char('d') => self.update(Message::OpenDeleteTaskDialog)?,
+                KeyCode::Esc => self.update(Message::CloseArchiveView)?,
                 _ => {}
             }
             return Ok(());
@@ -1102,6 +1496,9 @@ impl App {
                 }
                 KeyAction::DeleteTask => {
                     self.update(Message::OpenDeleteTaskDialog)?;
+                }
+                KeyAction::ArchiveTask => {
+                    self.update(Message::OpenArchiveTaskDialog)?;
                 }
                 KeyAction::MoveTaskLeft => {
                     if self.category_edit_mode {
@@ -1195,10 +1592,23 @@ impl App {
     }
 
     pub fn selected_task(&self) -> Option<Task> {
+        if self.current_view == View::Archive {
+            return self.selected_archived_task();
+        }
+
         match self.view_mode {
             ViewMode::Kanban => self.selected_task_in_column(self.focused_column),
             ViewMode::SidePanel => self.selected_task_in_side_panel(),
         }
+    }
+
+    fn selected_archived_task(&self) -> Option<Task> {
+        self.archived_tasks
+            .get(
+                self.archive_selected_index
+                    .min(self.archived_tasks.len().saturating_sub(1)),
+            )
+            .cloned()
     }
 
     fn selected_task_in_column(&self, column_index: usize) -> Option<Task> {
@@ -1567,7 +1977,7 @@ impl App {
             category_id: category.id,
             category_name: category.name.clone(),
             task_count,
-            focused_field: DeleteCategoryField::Cancel,
+            focused_field: ConfirmCancelField::Cancel,
         });
         Ok(())
     }
@@ -1604,7 +2014,12 @@ impl App {
     }
 
     fn open_delete_task_dialog(&mut self) -> Result<()> {
-        let Some(task) = self.selected_task() else {
+        let task = if self.current_view == View::Archive {
+            self.selected_archived_task()
+        } else {
+            self.selected_task()
+        };
+        let Some(task) = task else {
             return Ok(());
         };
 
@@ -1616,6 +2031,23 @@ impl App {
             remove_worktree: true,
             delete_branch: false,
             focused_field: DeleteTaskField::Cancel,
+        });
+        Ok(())
+    }
+
+    fn open_archive_task_dialog(&mut self) -> Result<()> {
+        if self.current_view != View::Board {
+            return Ok(());
+        }
+
+        let Some(task) = self.selected_task() else {
+            return Ok(());
+        };
+
+        self.active_dialog = ActiveDialog::ArchiveTask(ArchiveTaskDialogState {
+            task_id: task.id,
+            task_title: task.title,
+            focused_field: ConfirmCancelField::Cancel,
         });
         Ok(())
     }
@@ -1691,13 +2123,18 @@ impl App {
             return Ok(());
         };
 
-        let task = self.tasks.iter().find(|t| t.id == state.task_id);
+        let task = self
+            .tasks
+            .iter()
+            .find(|task| task.id == state.task_id)
+            .cloned()
+            .or_else(|| self.db.get_task(state.task_id).ok());
         let Some(task) = task else {
             self.active_dialog = ActiveDialog::None;
             return Ok(());
         };
 
-        let repo = self.repo_for_task(task);
+        let repo = self.repo_for_task(&task);
 
         if state.kill_tmux
             && let Some(ref session_name) = task.tmux_session_name
@@ -1725,6 +2162,41 @@ impl App {
         self.db.delete_task(state.task_id)?;
         self.active_dialog = ActiveDialog::None;
         self.refresh_data()?;
+        if self.current_view == View::Archive {
+            self.archived_tasks = self.db.list_archived_tasks()?;
+            self.archive_selected_index = self
+                .archive_selected_index
+                .min(self.archived_tasks.len().saturating_sub(1));
+        }
+        Ok(())
+    }
+
+    fn confirm_archive_task(&mut self) -> Result<()> {
+        let ActiveDialog::ArchiveTask(state) = self.active_dialog.clone() else {
+            return Ok(());
+        };
+
+        self.db.archive_task(state.task_id)?;
+        self.active_dialog = ActiveDialog::None;
+        self.refresh_data()?;
+        Ok(())
+    }
+
+    fn unarchive_selected_task(&mut self) -> Result<()> {
+        if self.current_view != View::Archive {
+            return Ok(());
+        }
+
+        let Some(task) = self.selected_archived_task() else {
+            return Ok(());
+        };
+
+        self.db.unarchive_task(task.id)?;
+        self.archived_tasks = self.db.list_archived_tasks()?;
+        self.archive_selected_index = self
+            .archive_selected_index
+            .min(self.archived_tasks.len().saturating_sub(1));
+        self.refresh_data()?;
         Ok(())
     }
 
@@ -1733,6 +2205,10 @@ impl App {
     }
 
     fn attach_selected_task(&mut self) -> Result<()> {
+        if self.current_view == View::Archive {
+            return Ok(());
+        }
+
         let Some(task) = self.selected_task() else {
             return Ok(());
         };
@@ -2390,6 +2866,8 @@ mod tests {
             status_fetched_at: None,
             status_error: None,
             opencode_session_id: None,
+            archived: false,
+            archived_at: None,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }
@@ -2434,6 +2912,7 @@ mod tests {
             tasks: Vec::new(),
             categories: Vec::new(),
             repos: Vec::new(),
+            archived_tasks: Vec::new(),
             focused_column: 0,
             selected_task_per_column: HashMap::new(),
             scroll_offset_per_column: HashMap::new(),
@@ -2457,6 +2936,7 @@ mod tests {
             view_mode: ViewMode::Kanban,
             side_panel_width: 40,
             side_panel_selected_row: 0,
+            archive_selected_index: 0,
             collapsed_categories: HashSet::new(),
             current_log_buffer: None,
             detail_focus: DetailFocus::List,
@@ -2474,6 +2954,7 @@ mod tests {
             settings: crate::settings::Settings::load(),
             settings_view_state: None,
             category_edit_mode: false,
+            project_detail_cache: None,
         };
 
         app.refresh_data()?;
@@ -2619,6 +3100,59 @@ mod tests {
             .find(|category| category.id == in_progress_id)
             .and_then(|category| category.color.as_deref());
         assert_eq!(canceled_color, Some("cyan"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn settings_category_color_toggle_updates_selected_category() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, [_todo_id, in_progress_id, _done_id]) =
+            test_app_with_middle_task()?;
+
+        app.focused_column = 1;
+        app.update(Message::OpenSettings)?;
+        if let Some(state) = &mut app.settings_view_state {
+            state.active_section = SettingsSection::CategoryColors;
+            state.category_color_selected = 1;
+        }
+
+        app.update(Message::SettingsToggle)?;
+
+        let categories_after_toggle = app.db.list_categories()?;
+        let toggled_color = categories_after_toggle
+            .iter()
+            .find(|category| category.id == in_progress_id)
+            .and_then(|category| category.color.as_deref());
+        assert_eq!(toggled_color, Some("cyan"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn settings_category_color_selection_moves_with_j_and_k() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        app.update(Message::OpenSettings)?;
+        if let Some(state) = &mut app.settings_view_state {
+            state.active_section = SettingsSection::CategoryColors;
+            state.category_color_selected = 0;
+        }
+
+        app.handle_key(key_char('j'))?;
+        assert_eq!(
+            app.settings_view_state
+                .as_ref()
+                .map(|state| state.category_color_selected),
+            Some(1)
+        );
+
+        app.handle_key(key_char('k'))?;
+        assert_eq!(
+            app.settings_view_state
+                .as_ref()
+                .map(|state| state.category_color_selected),
+            Some(0)
+        );
 
         Ok(())
     }

@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyEvent, MouseEvent};
 
-use super::state::{CategoryInputField, DeleteTaskField, NewProjectField, NewTaskField};
+use super::state::{
+    CategoryInputField, DeleteTaskField, NewProjectField, NewTaskField, RenameProjectField,
+    RenameRepoField,
+};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Message {
@@ -22,11 +25,15 @@ pub enum Message {
     OpenProjectList,
     OpenSettings,
     CloseSettings,
+    OpenArchiveView,
+    CloseArchiveView,
     SettingsNextSection,
     SettingsPrevSection,
     SettingsNextItem,
     SettingsPrevItem,
     SettingsToggle,
+    SettingsDecreaseItem,
+    SettingsResetItem,
     DismissDialog,
     FocusColumn(usize),
     SelectTask(usize, usize),
@@ -36,6 +43,7 @@ pub enum Message {
     OpenRenameCategoryDialog,
     OpenDeleteCategoryDialog,
     OpenDeleteTaskDialog,
+    OpenArchiveTaskDialog,
     SubmitCategoryInput,
     ConfirmDeleteCategory,
     MoveTaskLeft,
@@ -47,6 +55,10 @@ pub enum Message {
     DeleteTaskToggleRemoveWorktree,
     DeleteTaskToggleDeleteBranch,
     ConfirmDeleteTask,
+    ConfirmArchiveTask,
+    UnarchiveTask,
+    ArchiveSelectUp,
+    ArchiveSelectDown,
     WorktreeNotFoundRecreate,
     WorktreeNotFoundMarkBroken,
     RepoUnavailableDismiss,
@@ -64,6 +76,16 @@ pub enum Message {
     ProjectListConfirm,
     OpenNewProjectDialog,
     CreateProject,
+    OpenRenameProjectDialog,
+    ConfirmRenameProject,
+    FocusRenameProjectField(RenameProjectField),
+    OpenDeleteProjectDialog,
+    ConfirmDeleteProject,
+    OpenRenameRepoDialog,
+    ConfirmRenameRepo,
+    FocusRenameRepoField(RenameRepoField),
+    OpenDeleteRepoDialog,
+    ConfirmDeleteRepo,
     FocusNewTaskField(NewTaskField),
     ToggleNewTaskCheckbox,
     FocusCategoryInputField(CategoryInputField),

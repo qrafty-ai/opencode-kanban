@@ -7,10 +7,12 @@ use crate::types::{Category, Repo};
 
 use super::messages::Message;
 use super::state::{
-    ActiveDialog, CategoryColorDialogState, CategoryColorField, CategoryInputDialogState,
-    CategoryInputField, DeleteCategoryDialogState, DeleteCategoryField, DeleteTaskDialogState,
-    DeleteTaskField, NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
-    WorktreeNotFoundDialogState, WorktreeNotFoundField,
+    ActiveDialog, ArchiveTaskDialogState, CategoryColorDialogState, CategoryColorField,
+    CategoryInputDialogState, CategoryInputField, ConfirmCancelField, ConfirmQuitDialogState,
+    DeleteCategoryDialogState, DeleteTaskDialogState, DeleteTaskField, NewProjectDialogState,
+    NewProjectField, NewTaskDialogState, NewTaskField, RenameProjectDialogState,
+    RenameProjectField, RenameRepoDialogState, RenameRepoField, WorktreeNotFoundDialogState,
+    WorktreeNotFoundField,
 };
 
 /// Handle key events when a dialog is active
@@ -31,6 +33,28 @@ pub fn handle_dialog_key(
         ActiveDialog::NewProject(state) => {
             handle_new_project_dialog_key(state, key, &mut follow_up);
         }
+        ActiveDialog::RenameProject(state) => {
+            handle_rename_project_dialog_key(state, key, &mut follow_up);
+        }
+        ActiveDialog::DeleteProject(_) => match key.code {
+            KeyCode::Esc => follow_up = Some(Message::DismissDialog),
+            KeyCode::Enter => follow_up = Some(Message::ConfirmDeleteProject),
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+                follow_up = Some(Message::DismissDialog);
+            }
+            _ => {}
+        },
+        ActiveDialog::RenameRepo(state) => {
+            handle_rename_repo_dialog_key(state, key, &mut follow_up);
+        }
+        ActiveDialog::DeleteRepo(_) => match key.code {
+            KeyCode::Esc => follow_up = Some(Message::DismissDialog),
+            KeyCode::Enter => follow_up = Some(Message::ConfirmDeleteRepo),
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+                follow_up = Some(Message::DismissDialog);
+            }
+            _ => {}
+        },
         ActiveDialog::CategoryInput(state) => {
             handle_category_input_dialog_key(state, key, &mut follow_up);
         }
@@ -42,6 +66,12 @@ pub fn handle_dialog_key(
         }
         ActiveDialog::DeleteTask(state) => {
             handle_delete_task_dialog_key(state, key, &mut follow_up);
+        }
+        ActiveDialog::ArchiveTask(state) => {
+            handle_archive_task_dialog_key(state, key, &mut follow_up);
+        }
+        ActiveDialog::ConfirmQuit(state) => {
+            handle_confirm_quit_dialog_key(state, key, &mut follow_up);
         }
         ActiveDialog::WorktreeNotFound(state) => {
             handle_worktree_not_found_dialog_key(state, key, &mut follow_up);
@@ -326,30 +356,13 @@ fn handle_delete_category_dialog_key(
     key: KeyEvent,
     follow_up: &mut Option<Message>,
 ) {
-    match key.code {
-        KeyCode::Esc => {
-            *follow_up = Some(Message::DismissDialog);
-        }
-        KeyCode::Left | KeyCode::Char('h') => {
-            state.focused_field = match state.focused_field {
-                DeleteCategoryField::Delete => DeleteCategoryField::Cancel,
-                DeleteCategoryField::Cancel => DeleteCategoryField::Delete,
-            };
-        }
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
-            state.focused_field = match state.focused_field {
-                DeleteCategoryField::Delete => DeleteCategoryField::Cancel,
-                DeleteCategoryField::Cancel => DeleteCategoryField::Delete,
-            };
-        }
-        KeyCode::Enter => {
-            *follow_up = Some(match state.focused_field {
-                DeleteCategoryField::Delete => Message::ConfirmDeleteCategory,
-                DeleteCategoryField::Cancel => Message::DismissDialog,
-            });
-        }
-        _ => {}
-    }
+    handle_confirm_cancel_dialog_key(
+        &mut state.focused_field,
+        key,
+        Message::ConfirmDeleteCategory,
+        Message::DismissDialog,
+        follow_up,
+    );
 }
 
 fn handle_category_color_dialog_key(
@@ -503,6 +516,194 @@ fn handle_worktree_not_found_dialog_key(
                 WorktreeNotFoundField::MarkBroken => Message::WorktreeNotFoundMarkBroken,
                 WorktreeNotFoundField::Cancel => Message::DismissDialog,
             });
+        }
+        _ => {}
+    }
+}
+
+fn handle_archive_task_dialog_key(
+    state: &mut ArchiveTaskDialogState,
+    key: KeyEvent,
+    follow_up: &mut Option<Message>,
+) {
+    handle_confirm_cancel_dialog_key(
+        &mut state.focused_field,
+        key,
+        Message::ConfirmArchiveTask,
+        Message::DismissDialog,
+        follow_up,
+    );
+}
+
+fn handle_confirm_quit_dialog_key(
+    state: &mut ConfirmQuitDialogState,
+    key: KeyEvent,
+    follow_up: &mut Option<Message>,
+) {
+    handle_confirm_cancel_dialog_key(
+        &mut state.focused_field,
+        key,
+        Message::ConfirmQuit,
+        Message::CancelQuit,
+        follow_up,
+    );
+}
+
+fn toggle_confirm_cancel_field(field: &mut ConfirmCancelField) {
+    *field = match *field {
+        ConfirmCancelField::Confirm => ConfirmCancelField::Cancel,
+        ConfirmCancelField::Cancel => ConfirmCancelField::Confirm,
+    };
+}
+
+fn handle_confirm_cancel_dialog_key(
+    focused_field: &mut ConfirmCancelField,
+    key: KeyEvent,
+    confirm_message: Message,
+    cancel_message: Message,
+    follow_up: &mut Option<Message>,
+) {
+    match key.code {
+        KeyCode::Esc => {
+            *follow_up = Some(cancel_message);
+        }
+        KeyCode::Left
+        | KeyCode::Char('h')
+        | KeyCode::Up
+        | KeyCode::Char('k')
+        | KeyCode::Right
+        | KeyCode::Char('l')
+        | KeyCode::Down
+        | KeyCode::Char('j')
+        | KeyCode::Tab
+        | KeyCode::BackTab => {
+            toggle_confirm_cancel_field(focused_field);
+        }
+        KeyCode::Enter => {
+            *follow_up = Some(match focused_field {
+                ConfirmCancelField::Confirm => confirm_message,
+                ConfirmCancelField::Cancel => cancel_message,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn handle_rename_project_dialog_key(
+    state: &mut RenameProjectDialogState,
+    key: KeyEvent,
+    follow_up: &mut Option<Message>,
+) {
+    let fields = [
+        RenameProjectField::Name,
+        RenameProjectField::Confirm,
+        RenameProjectField::Cancel,
+    ];
+
+    let mut focus_index = fields
+        .iter()
+        .position(|field| *field == state.focused_field)
+        .unwrap_or(0);
+
+    let move_focus = |current: usize, delta: isize| -> usize {
+        let len = fields.len() as isize;
+        let next = (current as isize + delta).rem_euclid(len);
+        next as usize
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            *follow_up = Some(Message::DismissDialog);
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            focus_index = move_focus(focus_index, 1);
+            state.focused_field = fields[focus_index];
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            focus_index = move_focus(focus_index, -1);
+            state.focused_field = fields[focus_index];
+        }
+        KeyCode::Left if state.focused_field == RenameProjectField::Confirm => {
+            state.focused_field = RenameProjectField::Cancel;
+        }
+        KeyCode::Right if state.focused_field == RenameProjectField::Cancel => {
+            state.focused_field = RenameProjectField::Confirm;
+        }
+        KeyCode::Backspace => {
+            if state.focused_field == RenameProjectField::Name {
+                state.name_input.pop();
+            }
+        }
+        KeyCode::Enter => {
+            *follow_up = Some(match state.focused_field {
+                RenameProjectField::Cancel => Message::DismissDialog,
+                _ => Message::ConfirmRenameProject,
+            });
+        }
+        KeyCode::Char(ch) => {
+            if state.focused_field == RenameProjectField::Name {
+                state.name_input.push(ch);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_rename_repo_dialog_key(
+    state: &mut RenameRepoDialogState,
+    key: KeyEvent,
+    follow_up: &mut Option<Message>,
+) {
+    let fields = [
+        RenameRepoField::Name,
+        RenameRepoField::Confirm,
+        RenameRepoField::Cancel,
+    ];
+
+    let mut focus_index = fields
+        .iter()
+        .position(|field| *field == state.focused_field)
+        .unwrap_or(0);
+
+    let move_focus = |current: usize, delta: isize| -> usize {
+        let len = fields.len() as isize;
+        let next = (current as isize + delta).rem_euclid(len);
+        next as usize
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            *follow_up = Some(Message::DismissDialog);
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            focus_index = move_focus(focus_index, 1);
+            state.focused_field = fields[focus_index];
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            focus_index = move_focus(focus_index, -1);
+            state.focused_field = fields[focus_index];
+        }
+        KeyCode::Left if state.focused_field == RenameRepoField::Confirm => {
+            state.focused_field = RenameRepoField::Cancel;
+        }
+        KeyCode::Right if state.focused_field == RenameRepoField::Cancel => {
+            state.focused_field = RenameRepoField::Confirm;
+        }
+        KeyCode::Backspace => {
+            if state.focused_field == RenameRepoField::Name {
+                state.name_input.pop();
+            }
+        }
+        KeyCode::Enter => {
+            *follow_up = Some(match state.focused_field {
+                RenameRepoField::Cancel => Message::DismissDialog,
+                _ => Message::ConfirmRenameRepo,
+            });
+        }
+        KeyCode::Char(ch) => {
+            if state.focused_field == RenameRepoField::Name {
+                state.name_input.push(ch);
+            }
         }
         _ => {}
     }

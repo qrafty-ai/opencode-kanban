@@ -1,5 +1,6 @@
 //! Application state types for dialogs and UI components
 
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use uuid::Uuid;
@@ -43,6 +44,45 @@ pub struct NewProjectDialogState {
     pub error_message: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RenameProjectField {
+    Name,
+    Confirm,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RenameProjectDialogState {
+    pub name_input: String,
+    pub focused_field: RenameProjectField,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DeleteProjectDialogState {
+    pub project_name: String,
+    pub project_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RenameRepoField {
+    Name,
+    Confirm,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RenameRepoDialogState {
+    pub repo_id: Uuid,
+    pub name_input: String,
+    pub focused_field: RenameRepoField,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DeleteRepoDialogState {
+    pub repo_id: Uuid,
+    pub repo_name: String,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ErrorDialogState {
     pub title: String,
@@ -52,6 +92,13 @@ pub struct ErrorDialogState {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConfirmQuitDialogState {
     pub active_session_count: usize,
+    pub focused_field: ConfirmCancelField,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ConfirmCancelField {
+    Confirm,
+    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -72,6 +119,13 @@ pub struct DeleteTaskDialogState {
     pub remove_worktree: bool,
     pub delete_branch: bool,
     pub focused_field: DeleteTaskField,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ArchiveTaskDialogState {
+    pub task_id: Uuid,
+    pub task_title: String,
+    pub focused_field: ConfirmCancelField,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -135,19 +189,23 @@ pub enum View {
     ProjectList,
     Board,
     Settings,
+    Archive,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SettingsSection {
-    Theme,
-    Keybindings,
     General,
+    CategoryColors,
+    Keybindings,
+    Repos,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SettingsViewState {
     pub active_section: SettingsSection,
     pub general_selected_field: usize,
+    pub category_color_selected: usize,
+    pub repos_selected_field: usize,
     pub previous_view: View,
 }
 
@@ -159,18 +217,12 @@ pub struct CategoryInputDialogState {
     pub focused_field: CategoryInputField,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum DeleteCategoryField {
-    Delete,
-    Cancel,
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct DeleteCategoryDialogState {
     pub category_id: Uuid,
     pub category_name: String,
     pub task_count: usize,
-    pub focused_field: DeleteCategoryField,
+    pub focused_field: ConfirmCancelField,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -256,15 +308,20 @@ pub enum ActiveDialog {
     NewTask(NewTaskDialogState),
     CommandPalette(CommandPaletteState),
     NewProject(NewProjectDialogState),
+    RenameProject(RenameProjectDialogState),
+    DeleteProject(DeleteProjectDialogState),
     CategoryInput(CategoryInputDialogState),
     CategoryColor(CategoryColorDialogState),
     DeleteCategory(DeleteCategoryDialogState),
     Error(ErrorDialogState),
+    ArchiveTask(ArchiveTaskDialogState),
     DeleteTask(DeleteTaskDialogState),
     MoveTask(MoveTaskDialogState),
     WorktreeNotFound(WorktreeNotFoundDialogState),
     RepoUnavailable(RepoUnavailableDialogState),
     ConfirmQuit(ConfirmQuitDialogState),
+    RenameRepo(RenameRepoDialogState),
+    DeleteRepo(DeleteRepoDialogState),
     Help,
 }
 

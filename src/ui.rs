@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use chrono::{DateTime, Utc};
 use tui_realm_stdlib::{Checkbox, Input, Label, List, Paragraph, Table};
 use tuirealm::{
     MockComponent,
@@ -16,9 +17,12 @@ use tuirealm::{
 };
 
 use crate::app::{
-    ActiveDialog, App, CATEGORY_COLOR_PALETTE, CategoryColorField, CategoryInputField,
-    CategoryInputMode, DeleteCategoryField, DeleteTaskField, DetailFocus, NewTaskField,
-    SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode, category_color_label,
+    ActiveDialog, App, ArchiveTaskDialogState, CATEGORY_COLOR_PALETTE, CategoryColorField,
+    CategoryInputField, CategoryInputMode, ConfirmCancelField, DeleteProjectDialogState,
+    DeleteRepoDialogState, DeleteTaskField, DetailFocus, NewProjectDialogState, NewProjectField,
+    NewTaskField, ProjectDetailCache, RenameProjectDialogState, RenameProjectField,
+    RenameRepoDialogState, RenameRepoField, SettingsSection, SidePanelRow, TodoVisualizationMode,
+    View, ViewMode, category_color_label,
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
@@ -37,6 +41,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         View::ProjectList => render_project_list(frame, app),
         View::Board => render_board(frame, app),
         View::Settings => render_settings(frame, app),
+        View::Archive => render_archive(frame, app),
     }
 
     if app.active_dialog != ActiveDialog::None {
@@ -56,50 +61,131 @@ fn render_project_list(frame: &mut Frame<'_>, app: &App) {
         .split(frame.area());
 
     let mut header = Label::default()
-        .text("Select Project")
+        .text("opencode-kanban — Select Project")
         .alignment(Alignment::Center)
         .foreground(theme.base.header)
         .background(theme.base.canvas);
     header.view(frame, chunks[0]);
 
+    let content = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(chunks[1]);
+
     let mut rows = TableBuilder::default();
     for (idx, project) in app.project_list.iter().enumerate() {
-        let prefix = if idx == app.selected_project_index {
-            ">"
+        let is_selected = idx == app.selected_project_index;
+        let is_active = app
+            .current_project_path
+            .as_ref()
+            .map(|p| p == &project.path)
+            .unwrap_or(false);
+        let marker = if is_active { "*" } else { " " };
+        let name = format!("{} {}", marker, project.name);
+        if is_selected {
+            rows.add_col(TextSpan::new(name).fg(theme.interactive.focus).bold())
+                .add_row();
         } else {
-            " "
-        };
-        rows.add_col(TextSpan::from(prefix))
-            .add_col(TextSpan::from(project.name.clone()))
-            .add_row();
+            rows.add_col(TextSpan::from(name)).add_row();
+        }
     }
     if app.project_list.is_empty() {
-        rows.add_col(TextSpan::from(" "))
-            .add_col(TextSpan::from("No projects found"))
-            .add_row();
+        rows.add_col(TextSpan::from(
+            "  No projects found — press n to create one",
+        ))
+        .add_row();
     }
 
     let selected = app
         .selected_project_index
         .min(app.project_list.len().saturating_sub(1));
     let mut list = List::default()
-        .title("Projects", Alignment::Left)
+        .title("Projects  (* = active)", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
+        .background(theme.base.canvas)
         .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
         .scroll(true)
         .rows(rows.build())
         .selected_line(selected);
     list.attr(Attribute::Focus, AttrValue::Flag(true));
-    list.view(frame, chunks[1]);
+    list.view(frame, content[0]);
+
+    render_project_detail_panel(frame, content[1], app);
 
     let mut footer = Label::default()
-        .text("n: new project  Enter: select  q: quit")
+        .text("n: new  r: rename  x: delete  Enter: open  j/k: navigate  q: quit")
         .alignment(Alignment::Center)
         .foreground(theme.base.text_muted)
         .background(theme.base.canvas);
     footer.view(frame, chunks[2]);
+}
+
+fn render_project_detail_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+
+    let selected = app.project_list.get(app.selected_project_index);
+    let cache: Option<&ProjectDetailCache> = app.project_detail_cache.as_ref();
+
+    let mut lines: Vec<TextSpan> = Vec::new();
+
+    if let Some(project) = selected {
+        lines.push(TextSpan::new("PROJECT").fg(theme.base.header).bold());
+        lines.push(TextSpan::new(detail_kv("Name", &project.name)).fg(theme.base.text));
+
+        let path_str = project.path.to_string_lossy();
+        let path_short = clamp_text(&path_str, 55);
+        lines.push(TextSpan::new(detail_kv("Path", &path_short)).fg(theme.base.text_muted));
+        lines.push(TextSpan::new(""));
+
+        if let Some(c) = cache {
+            if c.project_name == project.name {
+                lines.push(TextSpan::new("CONTENTS").fg(theme.base.header).bold());
+                lines.push(
+                    TextSpan::new(detail_kv("Tasks", &c.task_count.to_string()))
+                        .fg(theme.base.text),
+                );
+                lines.push(
+                    TextSpan::new(detail_kv("Running", &c.running_count.to_string()))
+                        .fg(theme.status_color("running")),
+                );
+                lines.push(
+                    TextSpan::new(detail_kv("Repos", &c.repo_count.to_string()))
+                        .fg(theme.base.text),
+                );
+                lines.push(
+                    TextSpan::new(detail_kv("Columns", &c.category_count.to_string()))
+                        .fg(theme.base.text),
+                );
+                lines.push(TextSpan::new(""));
+                lines.push(TextSpan::new("FILE").fg(theme.base.header).bold());
+                lines.push(
+                    TextSpan::new(detail_kv("Size", &format!("{} KB", c.file_size_kb)))
+                        .fg(theme.base.text_muted),
+                );
+            }
+        } else {
+            lines.push(TextSpan::new("  (loading…)").fg(theme.base.text_muted));
+        }
+
+        lines.push(TextSpan::new(""));
+        lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
+        lines.push(
+            TextSpan::new("  Enter open  r rename  x delete  n new").fg(theme.base.text_muted),
+        );
+    } else {
+        lines.push(TextSpan::new("No project selected").fg(theme.base.text_muted));
+    }
+
+    let mut paragraph = Paragraph::default()
+        .title("Details", Alignment::Left)
+        .borders(rounded_borders(theme.base.text_muted))
+        .foreground(theme.base.text)
+        .background(theme.base.canvas)
+        .wrap(true)
+        .text(lines);
+    paragraph.view(frame, area);
 }
 
 fn render_board(frame: &mut Frame<'_>, app: &App) {
@@ -127,6 +213,117 @@ fn render_board(frame: &mut Frame<'_>, app: &App) {
         render_log_expanded_overlay(frame, chunks[1], app);
     }
     render_footer(frame, chunks[2], app);
+}
+
+fn render_archive(frame: &mut Frame<'_>, app: &App) {
+    let theme = app.theme;
+    let mut canvas = Paragraph::default()
+        .background(theme.base.canvas)
+        .text([TextSpan::from("")]);
+    canvas.view(frame, frame.area());
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    let mut header = Label::default()
+        .text(format!("Archive ({})", app.archived_tasks.len()))
+        .alignment(Alignment::Left)
+        .foreground(theme.base.header)
+        .background(theme.base.canvas);
+    header.view(frame, chunks[0]);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(chunks[1]);
+
+    let mut rows = TableBuilder::default();
+    for task in &app.archived_tasks {
+        let archived_label = task
+            .archived_at
+            .as_deref()
+            .map(format_archive_time)
+            .unwrap_or_else(|| "unknown time".to_string());
+        rows.add_col(
+            TextSpan::new(format!("{}  {}", archived_label, task.title)).fg(theme.base.text_muted),
+        )
+        .add_row();
+    }
+    if app.archived_tasks.is_empty() {
+        rows.add_col(TextSpan::from("No archived tasks")).add_row();
+    }
+
+    let selected = app
+        .archive_selected_index
+        .min(app.archived_tasks.len().saturating_sub(1));
+    let mut list = List::default()
+        .title("Archived Tasks", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
+        .highlighted_str("> ")
+        .scroll(true)
+        .rows(rows.build())
+        .selected_line(selected);
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, body[0]);
+
+    let details_lines = if let Some(task) = app.archived_tasks.get(selected) {
+        let repo_name = app
+            .repos
+            .iter()
+            .find(|repo| repo.id == task.repo_id)
+            .map(|repo| repo.name.as_str())
+            .unwrap_or("unknown");
+        let category_name = app
+            .categories
+            .iter()
+            .find(|category| category.id == task.category_id)
+            .map(|category| category.name.as_str())
+            .unwrap_or("unknown");
+        let archived_formatted = task
+            .archived_at
+            .as_deref()
+            .map(format_archive_time)
+            .unwrap_or_else(|| "unknown".to_string());
+        vec![
+            TextSpan::new("ARCHIVED TASK").fg(theme.base.header).bold(),
+            TextSpan::new(detail_kv("Title", task.title.as_str())).fg(theme.base.text),
+            TextSpan::new(detail_kv("Repo", repo_name)).fg(theme.base.text),
+            TextSpan::new(detail_kv("Branch", task.branch.as_str())).fg(theme.base.text),
+            TextSpan::new(detail_kv("Category", category_name)).fg(theme.base.text),
+            TextSpan::new(detail_kv("Archived", &archived_formatted)).fg(theme.base.text_muted),
+            TextSpan::new(detail_kv(
+                "Path",
+                task.worktree_path.as_deref().unwrap_or("n/a"),
+            ))
+            .fg(theme.base.text_muted),
+        ]
+    } else {
+        vec![TextSpan::new("No archived task selected").fg(theme.base.text_muted)]
+    };
+
+    let mut details = Paragraph::default()
+        .title("Details", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.canvas)
+        .wrap(true)
+        .text(details_lines);
+    details.view(frame, body[1]);
+
+    let mut footer = Label::default()
+        .text("j/k:select  u:unarchive  d:delete  Esc:back")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(theme.base.canvas);
+    footer.view(frame, chunks[2]);
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -170,19 +367,11 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         match app.view_mode {
             ViewMode::Kanban => {
-                "n:new  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view"
+                "n:new  a:archive  A:archive view  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x/p:category  H/L move  J/K reorder  v:view"
             }
-            ViewMode::SidePanel => match app.detail_focus {
-                DetailFocus::List => {
-                    "Tab:focus  j/k:select  Space:collapse  Enter:attach  t:todo  c/r/x:category  H/L/J/K:move  v:view"
-                }
-                DetailFocus::Details => {
-                    "Tab:focus  j/k:scroll details  +/-:resize split  Esc:list focus  Enter:attach  f:expand log"
-                }
-                DetailFocus::Log => {
-                    "Tab:focus  j/k:select log  e/Enter:toggle  +/-:resize split  f:expand log  Esc:list"
-                }
-            },
+            ViewMode::SidePanel => {
+                "j/k:select  Space:collapse  a:archive  A:archive view  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
+            }
         }
     };
 
@@ -723,11 +912,16 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
     let (width_percent, height_percent) = match &app.active_dialog {
         ActiveDialog::CommandPalette(_) => command_palette_overlay_size(app.viewport),
         ActiveDialog::NewTask(_) => (80, 72),
+        ActiveDialog::ArchiveTask(_) => (55, 35),
         ActiveDialog::DeleteTask(_) => (60, 60),
         ActiveDialog::CategoryInput(_) => (60, 40),
         ActiveDialog::CategoryColor(_) => (60, 58),
         ActiveDialog::DeleteCategory(_) => (60, 40),
-        ActiveDialog::NewProject(_) => (60, 35),
+        ActiveDialog::NewProject(_) => (60, 40),
+        ActiveDialog::RenameProject(_) => (60, 40),
+        ActiveDialog::DeleteProject(_) => (60, 35),
+        ActiveDialog::RenameRepo(_) => (60, 40),
+        ActiveDialog::DeleteRepo(_) => (60, 35),
         _ => (60, 45),
     };
     let anchor = if matches!(app.active_dialog, ActiveDialog::CommandPalette(_)) {
@@ -743,6 +937,9 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
         ActiveDialog::NewTask(state) => render_new_task_dialog(frame, dialog_area, app, state),
         ActiveDialog::DeleteTask(state) => {
             render_delete_task_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::ArchiveTask(state) => {
+            render_archive_task_dialog(frame, dialog_area, app, state)
         }
         ActiveDialog::CategoryInput(state) => {
             render_category_dialog(frame, dialog_area, app, state)
@@ -772,17 +969,25 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
             render_message_dialog(frame, dialog_area, app, "Repository Unavailable", &text);
         }
         ActiveDialog::ConfirmQuit(state) => {
-            let text = format!(
-                "{} active sessions detected.\n\nPress Enter to quit or Esc to cancel.",
-                state.active_session_count
-            );
-            render_message_dialog(frame, dialog_area, app, "Confirm Quit", &text);
+            render_confirm_quit_dialog(frame, dialog_area, app, state);
         }
         ActiveDialog::CommandPalette(state) => {
             render_command_palette_dialog(frame, dialog_area, app, state)
         }
         ActiveDialog::NewProject(state) => {
             render_new_project_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::RenameProject(state) => {
+            render_rename_project_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::DeleteProject(state) => {
+            render_delete_project_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::RenameRepo(state) => {
+            render_rename_repo_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::DeleteRepo(state) => {
+            render_delete_repo_dialog(frame, dialog_area, app, state)
         }
         ActiveDialog::MoveTask(_) | ActiveDialog::None | ActiveDialog::Help => {}
     }
@@ -987,6 +1192,27 @@ fn render_delete_task_dialog(
     );
 }
 
+fn render_archive_task_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &ArchiveTaskDialogState,
+) {
+    let text = format!("Archive task '{}' ?", state.task_title);
+    render_confirm_cancel_dialog(
+        frame,
+        area,
+        app,
+        ConfirmCancelDialogSpec {
+            title: "Archive Task",
+            text: &text,
+            confirm_label: "Archive",
+            confirm_destructive: false,
+            focused_field: state.focused_field,
+        },
+    );
+}
+
 fn render_category_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1067,11 +1293,72 @@ fn render_delete_category_dialog(
     app: &App,
     state: &crate::app::DeleteCategoryDialogState,
 ) {
+    let text = if state.task_count > 0 {
+        format!(
+            "Category '{}' contains {} tasks.\nEmpty the category before deleting.",
+            state.category_name, state.task_count
+        )
+    } else {
+        format!("Delete category '{}' ?", state.category_name)
+    };
+
+    render_confirm_cancel_dialog(
+        frame,
+        area,
+        app,
+        ConfirmCancelDialogSpec {
+            title: "Delete Category",
+            text: &text,
+            confirm_label: "Delete",
+            confirm_destructive: true,
+            focused_field: state.focused_field,
+        },
+    );
+}
+
+fn render_confirm_quit_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &crate::app::ConfirmQuitDialogState,
+) {
+    let text = format!(
+        "{} active sessions detected.\nQuit anyway?",
+        state.active_session_count
+    );
+    render_confirm_cancel_dialog(
+        frame,
+        area,
+        app,
+        ConfirmCancelDialogSpec {
+            title: "Confirm Quit",
+            text: &text,
+            confirm_label: "Quit",
+            confirm_destructive: true,
+            focused_field: state.focused_field,
+        },
+    );
+}
+
+struct ConfirmCancelDialogSpec<'a> {
+    title: &'a str,
+    text: &'a str,
+    confirm_label: &'a str,
+    confirm_destructive: bool,
+    focused_field: ConfirmCancelField,
+}
+
+fn render_confirm_cancel_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    spec: ConfirmCancelDialogSpec<'_>,
+) {
     let theme = app.theme;
     let surface = dialog_surface(theme);
 
-    let mut panel = dialog_panel("Delete Category", Alignment::Center, theme, surface)
-        .text([TextSpan::from("")]);
+    let mut panel =
+        dialog_panel(spec.title, Alignment::Center, theme, surface).text([TextSpan::from("")]);
     panel.view(frame, area);
 
     let panel_inner = inset_rect(area, 1, 1);
@@ -1085,21 +1372,12 @@ fn render_delete_category_dialog(
         ])
         .split(panel_inner);
 
-    let text = if state.task_count > 0 {
-        format!(
-            "Category '{}' contains {} tasks.\nEmpty the category before deleting.",
-            state.category_name, state.task_count
-        )
-    } else {
-        format!("Delete category '{}'?", state.category_name)
-    };
-
     let mut summary = Paragraph::default()
         .foreground(theme.base.text)
         .background(surface)
         .wrap(true)
         .alignment(Alignment::Center)
-        .text([TextSpan::from(text)]);
+        .text([TextSpan::from(spec.text.to_string())]);
     summary.view(frame, layout[0]);
 
     let buttons = Layout::default()
@@ -1110,22 +1388,22 @@ fn render_delete_category_dialog(
     render_action_button(
         frame,
         buttons[0],
-        "Delete",
-        matches!(state.focused_field, DeleteCategoryField::Delete),
-        true,
+        spec.confirm_label,
+        matches!(spec.focused_field, ConfirmCancelField::Confirm),
+        spec.confirm_destructive,
         app,
     );
     render_action_button(
         frame,
         buttons[1],
         "Cancel",
-        matches!(state.focused_field, DeleteCategoryField::Cancel),
+        matches!(spec.focused_field, ConfirmCancelField::Cancel),
         false,
         app,
     );
 
     let mut hint = Label::default()
-        .text("Tab: switch  Enter: confirm  Esc: cancel")
+        .text("Tab/Arrows/hjkl: switch  Enter: confirm  Esc: cancel")
         .alignment(Alignment::Center)
         .foreground(theme.base.text_muted)
         .background(surface);
@@ -1136,17 +1414,297 @@ fn render_new_project_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
-    state: &crate::app::NewProjectDialogState,
+    state: &NewProjectDialogState,
 ) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel =
+        dialog_panel("New Project", Alignment::Center, theme, surface).text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
     render_input_component(
         frame,
-        area,
-        "Project Name",
+        layout[0],
+        "Name",
         &state.name_input,
-        true,
-        dialog_surface(app.theme),
-        app.theme,
+        matches!(state.focused_field, NewProjectField::Name),
+        surface,
+        theme,
     );
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Create",
+        matches!(state.focused_field, NewProjectField::Create),
+        false,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, NewProjectField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Tab: next field  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
+fn render_rename_project_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &RenameProjectDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel = dialog_panel("Rename Project", Alignment::Center, theme, surface)
+        .text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
+    render_input_component(
+        frame,
+        layout[0],
+        "New Name",
+        &state.name_input,
+        matches!(state.focused_field, RenameProjectField::Name),
+        surface,
+        theme,
+    );
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Rename",
+        matches!(state.focused_field, RenameProjectField::Confirm),
+        false,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, RenameProjectField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Tab: next field  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
+fn render_delete_project_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &DeleteProjectDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel = dialog_panel("Delete Project", Alignment::Center, theme, surface)
+        .text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Length(2),
+        ])
+        .split(panel_inner);
+
+    let mut summary = Paragraph::default()
+        .foreground(theme.base.text)
+        .background(surface)
+        .wrap(true)
+        .alignment(Alignment::Center)
+        .text([TextSpan::from(format!(
+            "Permanently delete '{}'?\nAll tasks will be lost.",
+            state.project_name
+        ))]);
+    summary.view(frame, layout[0]);
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(frame, buttons[0], "Delete", true, true, app);
+    render_action_button(frame, buttons[1], "Cancel", false, false, app);
+
+    let mut hint = Label::default()
+        .text("Enter: confirm delete  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
+fn render_rename_repo_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &RenameRepoDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel =
+        dialog_panel("Rename Repo", Alignment::Center, theme, surface).text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
+    render_input_component(
+        frame,
+        layout[0],
+        "Display Name",
+        &state.name_input,
+        matches!(state.focused_field, RenameRepoField::Name),
+        surface,
+        theme,
+    );
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Rename",
+        matches!(state.focused_field, RenameRepoField::Confirm),
+        false,
+        app,
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, RenameRepoField::Cancel),
+        false,
+        app,
+    );
+
+    let mut hint = Label::default()
+        .text("Tab: next field  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
+}
+
+fn render_delete_repo_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &DeleteRepoDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel =
+        dialog_panel("Remove Repo", Alignment::Center, theme, surface).text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Length(2),
+        ])
+        .split(panel_inner);
+
+    let mut summary = Paragraph::default()
+        .foreground(theme.base.text)
+        .background(surface)
+        .wrap(true)
+        .alignment(Alignment::Center)
+        .text([TextSpan::from(format!(
+            "Remove repo '{}' from this project?\n(Only allowed if no tasks reference it.)",
+            state.repo_name
+        ))]);
+    summary.view(frame, layout[0]);
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[2]);
+
+    render_action_button(frame, buttons[0], "Remove", true, true, app);
+    render_action_button(frame, buttons[1], "Cancel", false, false, app);
+
+    let mut hint = Label::default()
+        .text("Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[3]);
 }
 
 fn render_category_color_dialog(
@@ -1850,6 +2408,15 @@ fn structured_log_kind_color(theme: Theme, kind: &str) -> Color {
     }
 }
 
+fn format_archive_time(iso_timestamp: &str) -> String {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(iso_timestamp) {
+        let local = dt.with_timezone(&Utc);
+        local.format("%Y-%m-%d %H:%M").to_string()
+    } else {
+        iso_timestamp.to_string()
+    }
+}
+
 fn clamp_text(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
@@ -2035,18 +2602,20 @@ fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .settings_view_state
         .as_ref()
         .map(|s| s.active_section)
-        .unwrap_or(SettingsSection::Theme);
+        .unwrap_or(SettingsSection::General);
 
     let mut rows = TableBuilder::default();
     for section in [
-        SettingsSection::Theme,
-        SettingsSection::Keybindings,
         SettingsSection::General,
+        SettingsSection::CategoryColors,
+        SettingsSection::Keybindings,
+        SettingsSection::Repos,
     ] {
         let label = match section {
-            SettingsSection::Theme => "Theme",
-            SettingsSection::Keybindings => "Keybindings",
             SettingsSection::General => "General",
+            SettingsSection::CategoryColors => "Category Colors",
+            SettingsSection::Keybindings => "Keybindings",
+            SettingsSection::Repos => "Repos",
         };
         let prefix = if section == active_section {
             "> "
@@ -2058,15 +2627,17 @@ fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     let selected_idx = match active_section {
-        SettingsSection::Theme => 0,
-        SettingsSection::Keybindings => 1,
-        SettingsSection::General => 2,
+        SettingsSection::General => 0,
+        SettingsSection::CategoryColors => 1,
+        SettingsSection::Keybindings => 2,
+        SettingsSection::Repos => 3,
     };
 
     let mut list = List::default()
         .title("Settings", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
+        .background(theme.base.surface)
         .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
         .scroll(false)
@@ -2081,42 +2652,49 @@ fn render_settings_active_section(frame: &mut Frame<'_>, area: Rect, app: &App) 
         .settings_view_state
         .as_ref()
         .map(|s| s.active_section)
-        .unwrap_or(SettingsSection::Theme);
+        .unwrap_or(SettingsSection::General);
     match active_section {
-        SettingsSection::Theme => render_settings_theme(frame, area, app),
-        SettingsSection::Keybindings => render_settings_keybindings(frame, area, app),
         SettingsSection::General => render_settings_general(frame, area, app),
+        SettingsSection::CategoryColors => render_settings_category_colors(frame, area, app),
+        SettingsSection::Keybindings => render_settings_keybindings(frame, area, app),
+        SettingsSection::Repos => render_settings_repos(frame, area, app),
     }
 }
-
-fn render_settings_theme(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_settings_category_colors(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = app.theme;
-    let current_theme = &app.settings.theme;
+    let selected_field = app
+        .settings_view_state
+        .as_ref()
+        .map(|s| s.category_color_selected)
+        .unwrap_or(0)
+        .min(app.categories.len().saturating_sub(1));
 
     let mut rows = TableBuilder::default();
-    for preset in ["default", "high-contrast", "mono"] {
-        let is_selected = current_theme == preset;
-        let prefix = if is_selected { " [x] " } else { " [ ] " };
-        rows.add_col(TextSpan::from(format!("{}{}", prefix, preset)))
+    if app.categories.is_empty() {
+        rows.add_col(TextSpan::from("No categories available"))
             .add_row();
+    } else {
+        for (index, category) in app.categories.iter().enumerate() {
+            let prefix = if index == selected_field { "> " } else { "  " };
+            let color_label = category_color_label(category.color.as_deref());
+            rows.add_col(
+                TextSpan::new(format!("{}{}: {}", prefix, category.name, color_label))
+                    .fg(theme.category_accent(category.color.as_deref())),
+            )
+            .add_row();
+        }
     }
 
-    let selected_idx = match current_theme.as_str() {
-        "default" => 0,
-        "high-contrast" => 1,
-        "mono" => 2,
-        _ => 0,
-    };
-
     let mut list = List::default()
-        .title("Theme", Alignment::Left)
+        .title("Category Colors", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
+        .background(theme.base.surface)
         .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
         .scroll(false)
         .rows(rows.build())
-        .selected_line(selected_idx);
+        .selected_line(selected_field);
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, area);
 }
@@ -2142,6 +2720,7 @@ fn render_settings_keybindings(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .title("Keybindings (View Only)", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
+        .background(theme.base.surface)
         .scroll(true)
         .rows(rows.build());
     list.attr(Attribute::Focus, AttrValue::Flag(true));
@@ -2156,36 +2735,208 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .map(|s| s.general_selected_field)
         .unwrap_or(0);
 
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(6), Constraint::Min(10)])
+        .split(area);
+
+    let field_rows: [(&str, String); 4] = [
+        ("Theme", app.settings.theme.clone()),
+        (
+            "Poll Interval",
+            format!("{} ms", app.settings.poll_interval_ms),
+        ),
+        (
+            "Side Panel Width",
+            format!("{}%", app.settings.side_panel_width),
+        ),
+        ("Default View", app.settings.default_view.clone()),
+    ];
+
     let mut rows = TableBuilder::default();
-
-    let poll_prefix = if selected_field == 0 { "> " } else { "  " };
-    rows.add_col(TextSpan::from(format!(
-        "{}Poll Interval: {} ms",
-        poll_prefix, app.settings.poll_interval_ms
-    )))
-    .add_row();
-
-    let width_prefix = if selected_field == 1 { "> " } else { "  " };
-    rows.add_col(TextSpan::from(format!(
-        "{}Side Panel Width: {}%",
-        width_prefix, app.settings.side_panel_width
-    )))
-    .add_row();
-
-    let default_view_prefix = if selected_field == 2 { "> " } else { "  " };
-    rows.add_col(TextSpan::from(format!(
-        "{}Default View: {}",
-        default_view_prefix, app.settings.default_view
-    )))
-    .add_row();
+    for (i, (label, value)) in field_rows.iter().enumerate() {
+        let is_selected = i == selected_field;
+        let bg = if is_selected {
+            theme.interactive.selected_bg
+        } else {
+            theme.base.surface
+        };
+        let fg = if is_selected {
+            theme.interactive.focus
+        } else {
+            theme.base.text
+        };
+        let text = format!("  {:<18} {}", label, value);
+        let span = if is_selected {
+            TextSpan::new(text).fg(fg).bg(bg).bold()
+        } else {
+            TextSpan::new(text).fg(fg).bg(bg)
+        };
+        rows.add_col(span).add_row();
+    }
 
     let mut list = List::default()
-        .title("General", Alignment::Left)
+        .title(
+            "General  (j/k: select  h/l: adjust  0: reset)",
+            Alignment::Left,
+        )
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
+        .scroll(false)
+        .rows(rows.build())
+        .selected_line(selected_field)
+        .inactive(Style::default().fg(theme.base.text_muted));
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, layout[0]);
+
+    let info_lines: Vec<TextSpan> = match selected_field {
+        0 => {
+            let current = &app.settings.theme;
+            let mut lines = vec![
+                TextSpan::new("Theme").fg(theme.base.header).bold(),
+                TextSpan::new("Color palette used throughout the app.").fg(theme.base.text),
+                TextSpan::new(""),
+            ];
+            for (preset, desc) in [
+                ("default", "Balanced colors for everyday use"),
+                ("high-contrast", "Enhanced visibility, bright on dark"),
+                ("mono", "Minimal monochrome aesthetic"),
+            ] {
+                let marker = if current == preset { "●" } else { "○" };
+                lines.push(
+                    TextSpan::new(format!("  {} {:<16}  {}", marker, preset, desc)).fg(
+                        if current == preset {
+                            theme.interactive.focus
+                        } else {
+                            theme.base.text_muted
+                        },
+                    ),
+                );
+            }
+            lines.push(TextSpan::new(""));
+            lines.push(TextSpan::new("  l / →    cycle forward").fg(theme.base.text_muted));
+            lines.push(TextSpan::new("  h / ←    cycle backward").fg(theme.base.text_muted));
+            lines.push(TextSpan::new("  0         reset to default").fg(theme.base.text_muted));
+            lines
+        }
+        1 => vec![
+            TextSpan::new("Poll Interval").fg(theme.base.header).bold(),
+            TextSpan::new(
+                "How often the app checks each session's status. \
+                 Lower values give faster updates but use more CPU.",
+            )
+            .fg(theme.base.text),
+            TextSpan::new(""),
+            TextSpan::new(format!("{:>8}: {}", "Range", "500 – 30 000 ms"))
+                .fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Step", "500 ms")).fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Default", "1 000 ms")).fg(theme.base.text_muted),
+            TextSpan::new(""),
+            TextSpan::new("  l / →    increase value").fg(theme.base.text_muted),
+            TextSpan::new("  h / ←    decrease value").fg(theme.base.text_muted),
+            TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
+        ],
+        2 => vec![
+            TextSpan::new("Side Panel Width")
+                .fg(theme.base.header)
+                .bold(),
+            TextSpan::new(
+                "Width of the left panel in split view (SidePanel mode). \
+                 Adjust to balance task list vs detail pane.",
+            )
+            .fg(theme.base.text),
+            TextSpan::new(""),
+            TextSpan::new(format!("{:>8}: {}", "Range", "20 – 80 %")).fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Step", "5 %")).fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Default", "40 %")).fg(theme.base.text_muted),
+            TextSpan::new(""),
+            TextSpan::new("  l / →    increase value").fg(theme.base.text_muted),
+            TextSpan::new("  h / ←    decrease value").fg(theme.base.text_muted),
+            TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
+        ],
+        3 => {
+            let current = &app.settings.default_view;
+            let mut lines = vec![
+                TextSpan::new("Default View").fg(theme.base.header).bold(),
+                TextSpan::new("View mode shown when opening a project.").fg(theme.base.text),
+                TextSpan::new(""),
+            ];
+            for (view, desc) in [
+                ("kanban", "Board with columns per category"),
+                ("detail", "Split view with task details"),
+            ] {
+                let marker = if current == view { "●" } else { "○" };
+                lines.push(
+                    TextSpan::new(format!("  {} {:<10}  {}", marker, view, desc)).fg(
+                        if current == view {
+                            theme.interactive.focus
+                        } else {
+                            theme.base.text_muted
+                        },
+                    ),
+                );
+            }
+            lines.push(TextSpan::new(""));
+            lines.push(TextSpan::new("  l / →    cycle forward").fg(theme.base.text_muted));
+            lines.push(TextSpan::new("  h / ←    cycle backward").fg(theme.base.text_muted));
+            lines.push(TextSpan::new("  0         reset to default").fg(theme.base.text_muted));
+            lines
+        }
+        _ => vec![],
+    };
+
+    let mut desc = Paragraph::default()
+        .title("Info", Alignment::Left)
+        .borders(rounded_borders(theme.base.text_muted))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
+        .wrap(true)
+        .text(info_lines);
+    desc.view(frame, layout[1]);
+}
+
+fn render_settings_repos(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let selected_field = app
+        .settings_view_state
+        .as_ref()
+        .map(|s| s.repos_selected_field)
+        .unwrap_or(0)
+        .min(app.repos.len().saturating_sub(1));
+
+    let mut rows = TableBuilder::default();
+
+    if app.repos.is_empty() {
+        rows.add_col(TextSpan::from("  No repos configured for this project"))
+            .add_row();
+    } else {
+        for (index, repo) in app.repos.iter().enumerate() {
+            let prefix = if index == selected_field { "> " } else { "  " };
+            let path_short = clamp_text(&repo.path, 45);
+            let base = repo
+                .default_base
+                .as_deref()
+                .filter(|b| !b.is_empty())
+                .unwrap_or("—");
+            rows.add_col(TextSpan::new(format!(
+                "{}{:<20} {} [{}]",
+                prefix,
+                clamp_text(&repo.name, 20),
+                path_short,
+                base
+            )))
+            .add_row();
+        }
+    }
+
+    let mut list = List::default()
+        .title("Repositories", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
         .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
-        .scroll(false)
+        .scroll(true)
         .rows(rows.build())
         .selected_line(selected_field);
     list.attr(Attribute::Focus, AttrValue::Flag(true));
@@ -2194,16 +2945,32 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_settings_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = app.theme;
+
+    if let Some(notice) = &app.footer_notice {
+        let mut footer = Label::default()
+            .text(notice.as_str())
+            .alignment(Alignment::Center)
+            .foreground(theme.base.header)
+            .background(theme.base.surface);
+        footer.view(frame, area);
+        return;
+    }
+
     let active_section = app
         .settings_view_state
         .as_ref()
         .map(|s| s.active_section)
-        .unwrap_or(SettingsSection::Theme);
+        .unwrap_or(SettingsSection::General);
 
     let help_text = match active_section {
-        SettingsSection::Theme => "Space/Enter: cycle theme  h/l: section  Esc: close",
-        SettingsSection::Keybindings => "h/l: section  Esc: close",
-        SettingsSection::General => "j/k: select  Space/Enter: cycle  h/l: section  Esc: close",
+        SettingsSection::General => {
+            "j/k: select  h/←: adjust  l/→: adjust  0: reset  Tab: section  Esc: close"
+        }
+        SettingsSection::CategoryColors => {
+            "j/k: select category  Space/Enter: cycle color  Tab: section  Esc: close"
+        }
+        SettingsSection::Keybindings => "j/k: scroll  Tab: section  Esc: close",
+        SettingsSection::Repos => "j/k: select  r: rename  x: remove  Tab: section  Esc: close",
     };
 
     let mut footer = Label::default()
@@ -2374,6 +3141,8 @@ mod tests {
             status_fetched_at: None,
             status_error: None,
             opencode_session_id: None,
+            archived: false,
+            archived_at: None,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }
