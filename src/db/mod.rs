@@ -129,9 +129,9 @@ impl Database {
                 "INSERT INTO tasks (
                     id, title, repo_id, branch, category_id, position, tmux_session_name,
                     worktree_path, tmux_status, status_source,
-                    status_fetched_at, status_error, opencode_session_id, session_todo_json,
+                    status_fetched_at, status_error, opencode_session_id,
                     created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     id.to_string(),
                     title,
@@ -143,7 +143,6 @@ impl Database {
                     Option::<String>::None,
                     DEFAULT_TMUX_STATUS,
                     DEFAULT_STATUS_SOURCE,
-                    Option::<String>::None,
                     Option::<String>::None,
                     Option::<String>::None,
                     Option::<String>::None,
@@ -161,7 +160,7 @@ impl Database {
             .query_row(
                 "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
                         worktree_path, tmux_status, status_source,
-                        status_fetched_at, status_error, opencode_session_id, session_todo_json,
+                        status_fetched_at, status_error, opencode_session_id,
                         created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 params![id.to_string()],
@@ -174,7 +173,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
                     worktree_path, tmux_status, status_source,
-                    status_fetched_at, status_error, opencode_session_id, session_todo_json,
+                    status_fetched_at, status_error, opencode_session_id,
                     created_at, updated_at
              FROM tasks ORDER BY category_id ASC, position ASC, created_at ASC",
         )?;
@@ -276,19 +275,6 @@ impl Database {
                 params![opencode_session_id, now_iso(), id.to_string()],
             )
             .context("failed to update task opencode session binding")?;
-        Ok(())
-    }
-
-    pub fn update_task_todo(&self, id: Uuid, session_todo_json: Option<String>) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE tasks
-                 SET session_todo_json = ?1,
-                     updated_at = ?2
-                 WHERE id = ?3",
-                params![session_todo_json, now_iso(), id.to_string()],
-            )
-            .context("failed to update task todo metadata")?;
         Ok(())
     }
 
@@ -443,7 +429,6 @@ impl Database {
                     status_fetched_at TEXT,
                     status_error TEXT,
                     opencode_session_id TEXT,
-                    session_todo_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(repo_id, branch)
@@ -495,20 +480,6 @@ impl Database {
                 }
             })
             .context("failed to migrate tasks.status_error")?;
-
-        self.conn
-            .execute(
-                "ALTER TABLE tasks ADD COLUMN session_todo_json TEXT",
-                params![],
-            )
-            .or_else(|err| {
-                if is_duplicate_column_err(&err) {
-                    Ok(0)
-                } else {
-                    Err(err)
-                }
-            })
-            .context("failed to migrate tasks.session_todo_json")?;
 
         self.conn
             .execute(
@@ -638,9 +609,8 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         status_fetched_at: row.get(10)?,
         status_error: row.get(11)?,
         opencode_session_id: row.get(12)?,
-        session_todo_json: row.get(13)?,
-        created_at: row.get(14)?,
-        updated_at: row.get(15)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -835,7 +805,6 @@ mod tests {
         assert_eq!(task.status_fetched_at, None);
         assert_eq!(task.status_error, None);
         assert_eq!(task.opencode_session_id, None);
-        assert_eq!(task.session_todo_json, None);
 
         let fetched = db.get_task(task.id)?;
         assert_eq!(fetched.id, task.id);
@@ -855,10 +824,6 @@ mod tests {
             Some("transient timeout".to_string()),
         )?;
         db.update_task_session_binding(task.id, Some("sid-task-crud".to_string()))?;
-        db.update_task_todo(
-            task.id,
-            Some("[{\"content\":\"Write docs\",\"completed\":false}]".to_string()),
-        )?;
 
         let updated = db.get_task(task.id)?;
         assert_eq!(updated.position, 1);
@@ -873,10 +838,6 @@ mod tests {
         assert_eq!(
             updated.opencode_session_id.as_deref(),
             Some("sid-task-crud")
-        );
-        assert_eq!(
-            updated.session_todo_json.as_deref(),
-            Some("[{\"content\":\"Write docs\",\"completed\":false}]")
         );
         assert_eq!(
             updated.tmux_session_name.as_deref(),
@@ -1080,7 +1041,6 @@ mod tests {
         assert_eq!(migrated_task.status_fetched_at, None);
         assert_eq!(migrated_task.status_error, None);
         assert_eq!(migrated_task.opencode_session_id, None);
-        assert_eq!(migrated_task.session_todo_json, None);
 
         let status_source_type: String = db.conn.query_row(
             "SELECT type FROM pragma_table_info('tasks') WHERE name = 'status_source'",
@@ -1088,12 +1048,6 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(status_source_type, "TEXT");
-        let session_todo_type: String = db.conn.query_row(
-            "SELECT type FROM pragma_table_info('tasks') WHERE name = 'session_todo_json'",
-            params![],
-            |row| row.get(0),
-        )?;
-        assert_eq!(session_todo_type, "TEXT");
         let opencode_session_id_type: String = db.conn.query_row(
             "SELECT type FROM pragma_table_info('tasks') WHERE name = 'opencode_session_id'",
             params![],

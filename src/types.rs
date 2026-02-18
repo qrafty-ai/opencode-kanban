@@ -38,29 +38,8 @@ pub struct Task {
     pub status_fetched_at: Option<String>,
     pub status_error: Option<String>,
     pub opencode_session_id: Option<String>,
-    pub session_todo_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-}
-
-impl Task {
-    pub fn session_todos(&self) -> Vec<SessionTodoItem> {
-        let Some(raw) = self.session_todo_json.as_deref() else {
-            return Vec::new();
-        };
-
-        serde_json::from_str(raw).unwrap_or_default()
-    }
-
-    pub fn session_todo_summary(&self) -> Option<(usize, usize)> {
-        let todos = self.session_todos();
-        if todos.is_empty() {
-            return None;
-        }
-
-        let completed = todos.iter().filter(|todo| todo.completed).count();
-        Some((completed, todos.len()))
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]

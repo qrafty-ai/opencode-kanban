@@ -2,7 +2,6 @@ use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
@@ -72,7 +71,28 @@ fn ensure_server_ready_with_config(config: ServerConfig) -> OpenCodeServerManage
     let manager = OpenCodeServerManager::new();
     let state = Arc::clone(&manager.state);
 
-    thread::spawn(move || {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let next_state = match tokio::task::spawn_blocking(move || {
+                let runtime = RealServerRuntime;
+                bootstrap_server(&runtime, &config)
+            })
+            .await
+            {
+                Ok(state) => state,
+                Err(err) => OpenCodeServerState::Failed(format!(
+                    "failed to bootstrap OpenCode server task: {err}"
+                )),
+            };
+
+            match state.lock() {
+                Ok(mut current) => *current = next_state,
+                Err(poisoned) => {
+                    *poisoned.into_inner() = next_state;
+                }
+            }
+        });
+    } else {
         let runtime = RealServerRuntime;
         let next_state = bootstrap_server(&runtime, &config);
 
@@ -82,7 +102,7 @@ fn ensure_server_ready_with_config(config: ServerConfig) -> OpenCodeServerManage
                 *poisoned.into_inner() = next_state;
             }
         }
-    });
+    }
 
     manager
 }
@@ -105,7 +125,17 @@ impl ServerRuntime for RealServerRuntime {
     }
 
     fn sleep(&self, duration: Duration) {
-        thread::sleep(duration);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.block_on(tokio::time::sleep(duration));
+            return;
+        }
+
+        if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+        {
+            runtime.block_on(tokio::time::sleep(duration));
+        }
     }
 }
 

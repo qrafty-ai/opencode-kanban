@@ -9,13 +9,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use tokio::task::JoinHandle;
 use tracing::warn;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::widgets::{ListState, ScrollbarState};
@@ -43,7 +43,7 @@ use crate::opencode::{
 use crate::projects::{self, ProjectInfo};
 use crate::theme::{Theme, ThemePreset};
 use crate::tmux::{tmux_capture_pane, tmux_kill_session};
-use crate::types::{Category, Repo, Task};
+use crate::types::{Category, Repo, SessionTodoItem, Task};
 
 use self::runtime::{
     CreateTaskRuntime, RealCreateTaskRuntime, RealRecoveryRuntime, RecoveryRuntime,
@@ -100,12 +100,13 @@ pub struct App {
     mouse_hint_shown: bool,
     _server_manager: OpenCodeServerManager,
     poller_stop: Arc<AtomicBool>,
-    poller_thread: Option<thread::JoinHandle<()>>,
+    poller_thread: Option<JoinHandle<()>>,
     pub view_mode: ViewMode,
     pub side_panel_width: u16,
     pub side_panel_selected_row: usize,
     pub collapsed_categories: HashSet<Uuid>,
     pub current_log_buffer: Option<String>,
+    pub session_todo_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionTodoItem>>>>,
     pub todo_visualization_mode: TodoVisualizationMode,
     pub keybindings: Keybindings,
     pub settings: crate::settings::Settings,
@@ -133,6 +134,7 @@ impl App {
         let db = Database::open(&db_path)?;
         let server_manager = ensure_server_ready();
         let poller_stop = Arc::new(AtomicBool::new(false));
+        let session_todo_cache = Arc::new(Mutex::new(HashMap::new()));
         let settings = crate::settings::Settings::load();
         let env_theme = std::env::var("OPENCODE_KANBAN_THEME")
             .ok()
@@ -184,6 +186,7 @@ impl App {
             side_panel_selected_row: 0,
             collapsed_categories: HashSet::new(),
             current_log_buffer: None,
+            session_todo_cache,
             todo_visualization_mode,
             keybindings: Keybindings::load(),
             settings,
@@ -212,6 +215,7 @@ impl App {
         app.poller_thread = Some(polling::spawn_status_poller(
             db_path,
             Arc::clone(&app.poller_stop),
+            Arc::clone(&app.session_todo_cache),
             app.settings.poll_interval_ms,
         ));
         Ok(app)
@@ -219,6 +223,24 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    pub fn session_todos(&self, task_id: Uuid) -> Vec<SessionTodoItem> {
+        self.session_todo_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&task_id).cloned())
+            .unwrap_or_default()
+    }
+
+    pub fn session_todo_summary(&self, task_id: Uuid) -> Option<(usize, usize)> {
+        let todos = self.session_todos(task_id);
+        if todos.is_empty() {
+            return None;
+        }
+
+        let completed = todos.iter().filter(|todo| todo.completed).count();
+        Some((completed, todos.len()))
     }
 
     fn poller_db_path(&self) -> PathBuf {
@@ -230,13 +252,14 @@ impl App {
     fn restart_status_poller(&mut self) {
         self.poller_stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.poller_thread.take() {
-            let _ = handle.join();
+            handle.abort();
         }
 
         self.poller_stop.store(false, Ordering::Relaxed);
         self.poller_thread = Some(polling::spawn_status_poller(
             self.poller_db_path(),
             Arc::clone(&self.poller_stop),
+            Arc::clone(&self.session_todo_cache),
             self.settings.poll_interval_ms,
         ));
     }
@@ -255,6 +278,10 @@ impl App {
             .list_categories()
             .context("failed to load categories")?;
         self.repos = self.db.list_repos().context("failed to load repos")?;
+
+        if let Ok(mut cache) = self.session_todo_cache.lock() {
+            cache.retain(|task_id, _| self.tasks.iter().any(|task| task.id == *task_id));
+        }
 
         self.collapsed_categories.retain(|category_id| {
             self.categories
@@ -313,17 +340,21 @@ impl App {
     pub fn switch_project(&mut self, path: PathBuf) -> Result<()> {
         self.poller_stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.poller_thread.take() {
-            let _ = handle.join();
+            handle.abort();
         }
 
         let db = Database::open(&path)?;
         self.db = db;
+        if let Ok(mut cache) = self.session_todo_cache.lock() {
+            cache.clear();
+        }
         self.refresh_data()?;
 
         self.poller_stop.store(false, Ordering::Relaxed);
         self.poller_thread = Some(polling::spawn_status_poller(
             path.clone(),
             Arc::clone(&self.poller_stop),
+            Arc::clone(&self.session_todo_cache),
             self.settings.poll_interval_ms,
         ));
 
@@ -1608,14 +1639,7 @@ impl Drop for App {
     fn drop(&mut self) {
         self.poller_stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.poller_thread.take() {
-            let deadline = Instant::now() + Duration::from_millis(200);
-            while !handle.is_finished() && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(10));
-            }
-
-            if handle.is_finished() {
-                let _ = handle.join();
-            }
+            handle.abort();
         }
     }
 }
@@ -2015,7 +2039,6 @@ mod tests {
             status_fetched_at: None,
             status_error: None,
             opencode_session_id: None,
-            session_todo_json: None,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }
@@ -2085,6 +2108,7 @@ mod tests {
             side_panel_selected_row: 0,
             collapsed_categories: HashSet::new(),
             current_log_buffer: None,
+            session_todo_cache: Arc::new(Mutex::new(HashMap::new())),
             todo_visualization_mode: TodoVisualizationMode::Checklist,
             keybindings: Keybindings::load(),
             settings: crate::settings::Settings::load(),

@@ -5,12 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::thread;
 use std::time::Duration;
-use std::{collections::VecDeque, env, io::Read, io::Write, net::TcpListener, time::SystemTime};
+use std::{collections::VecDeque, env, time::SystemTime};
 
 use anyhow::{Context, Result, bail};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener as TokioTcpListener;
 
 use opencode_kanban::app::App;
 use opencode_kanban::db::Database;
@@ -27,8 +28,8 @@ use opencode_kanban::types::{
 
 static INTEGRATION_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-#[test]
-fn integration_test_full_lifecycle() -> Result<()> {
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_test_full_lifecycle() -> Result<()> {
     if !tmux_available() {
         return Ok(());
     }
@@ -75,7 +76,7 @@ fn integration_test_full_lifecycle() -> Result<()> {
         Some(worktree_path.display().to_string()),
     )?;
 
-    thread::sleep(Duration::from_millis(250));
+    tokio::time::sleep(Duration::from_millis(250)).await;
     db.update_task_status(task.id, Status::Idle.as_str())?;
 
     let created = db.get_task(task.id)?;
@@ -105,8 +106,8 @@ fn integration_test_full_lifecycle() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Result<()> {
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Result<()> {
     if !tmux_available() {
         return Ok(());
     }
@@ -148,7 +149,8 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
             http_json_response("{\"sid-server-first\":{\"state\":\"running\"}}"),
             http_json_response("{}"),
         ],
-    )?;
+    )
+    .await?;
     let _port_guard = EnvVarGuard::set("OPENCODE_KANBAN_STATUS_PORT", mock_server.port.to_string());
 
     let db_path = kanban_db_path(&xdg_data_home);
@@ -180,7 +182,8 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
 
         wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
             current.status_source == "server" && current.status_error.is_none()
-        })?;
+        })
+        .await?;
 
         wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
             current.status_source == "none"
@@ -189,7 +192,8 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
                     .status_error
                     .as_deref()
                     .is_some_and(|error| error.starts_with("SESSION_NOT_FOUND:"))
-        })?;
+        })
+        .await?;
     }
 
     let updated = Database::open(&db_path)?.get_task(task.id)?;
@@ -204,8 +208,8 @@ fn integration_test_server_first_lifecycle_with_stale_binding_transition() -> Re
     Ok(())
 }
 
-#[test]
-fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Result<()> {
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Result<()> {
     if !tmux_available() {
         return Ok(());
     }
@@ -228,7 +232,8 @@ fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Re
     let mock_server = MockStatusServer::start(
         vec![http_json_response("[]")],
         vec![http_error_response(500)],
-    )?;
+    )
+    .await?;
     let _port_guard = EnvVarGuard::set("OPENCODE_KANBAN_STATUS_PORT", mock_server.port.to_string());
 
     let db_path = kanban_db_path(&xdg_data_home);
@@ -261,7 +266,8 @@ fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles() -> Re
                     .status_error
                     .as_deref()
                     .is_some_and(|error| error.starts_with("SERVER_"))
-        })?;
+        })
+        .await?;
     }
 
     tmux_kill_session(&session_name)?;
@@ -390,7 +396,7 @@ fn tmux_available() -> bool {
 }
 
 fn port_available(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
 fn cleanup_test_tmux_server() {
@@ -409,7 +415,7 @@ fn kanban_db_path(xdg_data_home: &Path) -> PathBuf {
         .join("opencode-kanban.sqlite")
 }
 
-fn wait_for_task(
+async fn wait_for_task(
     db_path: &Path,
     task_id: uuid::Uuid,
     timeout: Duration,
@@ -426,7 +432,7 @@ fn wait_for_task(
             }
         }
 
-        thread::sleep(Duration::from_millis(120));
+        tokio::time::sleep(Duration::from_millis(120)).await;
     }
 
     let task = Database::open(db_path)?.get_task(task_id)?;
@@ -476,28 +482,26 @@ fn http_error_response(status_code: u16) -> String {
 
 struct MockStatusServer {
     stop: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
     session_responses: Arc<Mutex<VecDeque<String>>>,
     session_status_responses: Arc<Mutex<VecDeque<String>>>,
     pub port: u16,
 }
 
 impl MockStatusServer {
-    fn start(
+    async fn start(
         session_responses: Vec<String>,
         session_status_responses: Vec<String>,
     ) -> Result<Self> {
         // Bind to port 0 to get an OS-assigned available port.
         // This avoids conflicts with local OpenCode processes on port 4096.
-        let listener = TcpListener::bind(("127.0.0.1", 0))
+        let listener = TokioTcpListener::bind(("127.0.0.1", 0))
+            .await
             .context("failed to bind mock status server on random available port")?;
         let port = listener
             .local_addr()
             .context("failed to get mock server port")?
             .port();
-        listener
-            .set_nonblocking(true)
-            .context("failed to make mock status server non-blocking")?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
@@ -507,21 +511,19 @@ impl MockStatusServer {
             Arc::new(Mutex::new(VecDeque::from(session_status_responses)));
         let session_status_response_queue = Arc::clone(&session_status_responses);
 
-        let handle = thread::spawn(move || {
+        let handle = tokio::spawn(async move {
             while !stop_flag.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+                match tokio::time::timeout(Duration::from_millis(15), listener.accept()).await {
+                    Ok(Ok((mut stream, _))) => {
                         let mut request = [0u8; 2048];
-                        let read = match stream.read(&mut request) {
-                            Ok(read) => read,
-                            Err(err)
-                                if err.kind() == std::io::ErrorKind::WouldBlock
-                                    || err.kind() == std::io::ErrorKind::TimedOut =>
-                            {
-                                0
-                            }
-                            Err(_) => 0,
+                        let read = match tokio::time::timeout(
+                            Duration::from_millis(150),
+                            stream.read(&mut request),
+                        )
+                        .await
+                        {
+                            Ok(Ok(read)) => read,
+                            Ok(Err(_)) | Err(_) => 0,
                         };
                         let request = String::from_utf8_lossy(&request[..read]);
 
@@ -546,13 +548,10 @@ impl MockStatusServer {
                             "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_string()
                         };
 
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.flush();
+                        let _ = stream.write_all(response.as_bytes()).await;
                     }
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(15));
-                    }
-                    Err(_) => break,
+                    Err(_) => continue,
+                    Ok(Err(_)) => break,
                 }
             }
         });
@@ -571,7 +570,7 @@ impl Drop for MockStatusServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            handle.abort();
         }
     }
 }

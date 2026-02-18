@@ -21,7 +21,7 @@ use crate::app::{
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
-use crate::types::{Category, Task};
+use crate::types::{Category, SessionTodoItem, Task};
 
 #[derive(Clone, Copy)]
 pub enum OverlayAnchor {
@@ -432,8 +432,8 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, 
         .unwrap_or_else(|| "unknown".to_string());
 
     let spinner = status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase);
-    let todo_summary = task
-        .session_todo_summary()
+    let todo_summary = app
+        .session_todo_summary(task.id)
         .map(|(done, total)| format!("{done}/{total}"))
         .unwrap_or_else(|| "--".to_string());
     let todo_view = app.todo_visualization_mode.as_str();
@@ -460,7 +460,8 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, 
     ];
 
     if app.todo_visualization_mode == TodoVisualizationMode::Checklist {
-        let checklist_lines = todo_checklist_lines(task);
+        let task_todos = app.session_todos(task.id);
+        let checklist_lines = todo_checklist_lines(&task_todos);
         if !checklist_lines.is_empty() {
             lines.push(TextSpan::new(""));
             lines.push(TextSpan::new("WORK PLAN").fg(theme.base.header).bold());
@@ -1429,7 +1430,7 @@ fn append_task_tile_rows(
 
 fn task_tile_status_line(app: &App, task: &Task) -> String {
     let spinner = status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase);
-    match task.session_todo_summary() {
+    match app.session_todo_summary(task.id) {
         Some((done, total)) => format!("{spinner}  todo {done}/{total}"),
         None => spinner.to_string(),
     }
@@ -1442,8 +1443,7 @@ enum TodoLineState {
     Pending,
 }
 
-fn todo_checklist_lines(task: &Task) -> Vec<(String, TodoLineState)> {
-    let todos = task.session_todos();
+fn todo_checklist_lines(todos: &[SessionTodoItem]) -> Vec<(String, TodoLineState)> {
     let active_index = todos.iter().position(|todo| !todo.completed);
 
     todos
@@ -1986,27 +1986,22 @@ mod tests {
 
     #[test]
     fn test_todo_checklist_lines_use_expected_markers() {
-        let category_id = Uuid::new_v4();
-        let mut task = test_task(category_id, 0);
-        task.session_todo_json = Some(
-            serde_json::to_string(&vec![
-                SessionTodoItem {
-                    content: "done".to_string(),
-                    completed: true,
-                },
-                SessionTodoItem {
-                    content: "active".to_string(),
-                    completed: false,
-                },
-                SessionTodoItem {
-                    content: "pending".to_string(),
-                    completed: false,
-                },
-            ])
-            .expect("todo json"),
-        );
+        let todos = vec![
+            SessionTodoItem {
+                content: "done".to_string(),
+                completed: true,
+            },
+            SessionTodoItem {
+                content: "active".to_string(),
+                completed: false,
+            },
+            SessionTodoItem {
+                content: "pending".to_string(),
+                completed: false,
+            },
+        ];
 
-        let lines = todo_checklist_lines(&task);
+        let lines = todo_checklist_lines(&todos);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].0.contains("[✓] done"));
         assert_eq!(lines[0].1, TodoLineState::Completed);
@@ -2018,23 +2013,18 @@ mod tests {
 
     #[test]
     fn test_todo_checklist_lines_show_pending_when_all_incomplete() {
-        let category_id = Uuid::new_v4();
-        let mut task = test_task(category_id, 0);
-        task.session_todo_json = Some(
-            serde_json::to_string(&vec![
-                SessionTodoItem {
-                    content: "first".to_string(),
-                    completed: false,
-                },
-                SessionTodoItem {
-                    content: "second".to_string(),
-                    completed: false,
-                },
-            ])
-            .expect("todo json"),
-        );
+        let todos = vec![
+            SessionTodoItem {
+                content: "first".to_string(),
+                completed: false,
+            },
+            SessionTodoItem {
+                content: "second".to_string(),
+                completed: false,
+            },
+        ];
 
-        let lines = todo_checklist_lines(&task);
+        let lines = todo_checklist_lines(&todos);
         assert!(lines[0].0.contains("[•] first"));
         assert!(lines[1].0.contains("[ ] second"));
     }
@@ -2054,7 +2044,6 @@ mod tests {
             status_fetched_at: None,
             status_error: None,
             opencode_session_id: None,
-            session_todo_json: None,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }
