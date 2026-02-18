@@ -2,8 +2,13 @@ name: Publish npm
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*.*.*"
+  pull_request:
+    branches:
+      - main
   release:
     types:
       - published
@@ -28,6 +33,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       npm_tag: ${{ steps.version.outputs.npm_tag }}
+      dry_run: ${{ steps.version.outputs.dry_run }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,13 +48,19 @@ jobs:
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             version="${{ inputs.version }}"
+            dry_run="false"
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             version="${RELEASE_TAG#v}"
+            dry_run="false"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            version="0.0.0-dryrun"
+            dry_run="true"
           else
             version="${GITHUB_REF_NAME#v}"
+            dry_run="false"
           fi
 
-          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$ ]]; then
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$ ]] && [[ "${dry_run}" != "true" ]]; then
             echo "Unsupported version format: ${version}"
             exit 1
           fi
@@ -60,6 +72,7 @@ jobs:
 
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "npm_tag=${npm_tag}" >> "$GITHUB_OUTPUT"
+          echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
 
   build-binaries:
     name: Build ${{ matrix.platform_tag }}
@@ -130,7 +143,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --locked --target "${{ matrix.target }}"
+          cargo build --release --target "${{ matrix.target }}"
 
       - name: Stage vendor payload
         shell: bash
@@ -197,6 +210,7 @@ jobs:
     needs:
       - determine-version
       - package-tarballs
+    if: needs.determine-version.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
