@@ -1,0 +1,278 @@
+name: Publish npm
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (example: 0.1.0 or 0.1.0-alpha.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  determine-version:
+    name: Determine version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      npm_tag: ${{ steps.version.outputs.npm_tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve and validate version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            version="${RELEASE_TAG#v}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$ ]]; then
+            echo "Unsupported version format: ${version}"
+            exit 1
+          fi
+
+          npm_tag=""
+          if [[ "${version}" =~ -alpha\.[0-9]+$ ]]; then
+            npm_tag="alpha"
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "npm_tag=${npm_tag}" >> "$GITHUB_OUTPUT"
+
+  build-binaries:
+    name: Build ${{ matrix.platform_tag }}
+    needs: determine-version
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs_on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform_tag: linux-x64
+          - runs_on: macos-14
+            target: aarch64-apple-darwin
+            platform_tag: darwin-arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Set Cargo package version from release version
+        env:
+          VERSION: ${{ needs.determine-version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          cargo_toml_path = Path("Cargo.toml")
+          lines = cargo_toml_path.read_text(encoding="utf-8").splitlines()
+
+          in_package_section = False
+          updated = False
+
+          for index, line in enumerate(lines):
+              stripped = line.strip()
+              if stripped == "[package]":
+                  in_package_section = True
+                  continue
+
+              if in_package_section and stripped.startswith("[") and stripped != "[package]":
+                  in_package_section = False
+
+              if in_package_section and line.lstrip().startswith("version ="):
+                  indent = line[: len(line) - len(line.lstrip())]
+                  lines[index] = f'{indent}version = "{version}"'
+                  updated = True
+                  break
+
+          if not updated:
+              raise SystemExit("Could not find [package] version in Cargo.toml")
+
+          cargo_toml_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Stage vendor payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_path="target/${{ matrix.target }}/release/opencode-kanban"
+          if [[ ! -f "${source_path}" ]]; then
+            echo "Binary not found: ${source_path}"
+            exit 1
+          fi
+
+          destination_dir="vendor/${{ matrix.target }}/opencode-kanban"
+          mkdir -p "${destination_dir}"
+          cp "${source_path}" "${destination_dir}/opencode-kanban"
+          chmod +x "${destination_dir}/opencode-kanban"
+
+      - name: Upload vendor payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor-${{ matrix.platform_tag }}
+          path: vendor/${{ matrix.target }}
+          if-no-files-found: error
+
+  package-tarballs:
+    name: Package npm tarballs
+    needs:
+      - determine-version
+      - build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Download vendor payloads
+        uses: actions/download-artifact@v7
+        with:
+          pattern: vendor-*
+          merge-multiple: true
+          path: vendor
+
+      - name: Build npm packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 npm/scripts/build_npm_package.py \
+            --version "${{ needs.determine-version.outputs.version }}" \
+            --vendor-src vendor \
+            --out-dir dist/npm
+
+      - name: Upload npm tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarballs
+          path: dist/npm/*.tgz
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm
+    needs:
+      - determine-version
+      - package-tarballs
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Download npm tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: npm-tarballs
+          path: dist/npm
+
+      - name: Publish tarballs
+        env:
+          VERSION: ${{ needs.determine-version.outputs.version }}
+          NPM_TAG: ${{ needs.determine-version.outputs.npm_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          prefix=""
+          if [[ -n "${NPM_TAG}" ]]; then
+            prefix="${NPM_TAG}-"
+          fi
+
+          shopt -s nullglob
+          tarballs=(dist/npm/*.tgz)
+          if [[ ${#tarballs[@]} -eq 0 ]]; then
+            echo "No npm tarballs found"
+            exit 1
+          fi
+
+          for tarball in "${tarballs[@]}"; do
+            filename="$(basename "${tarball}")"
+            publish_tag=""
+
+            case "${filename}" in
+              qrafty-ai-opencode-kanban-npm-"${VERSION}".tgz)
+                publish_tag="${NPM_TAG}"
+                ;;
+              qrafty-ai-opencode-kanban-npm-linux-x64-"${VERSION}".tgz|qrafty-ai-opencode-kanban-npm-darwin-x64-"${VERSION}".tgz|qrafty-ai-opencode-kanban-npm-darwin-arm64-"${VERSION}".tgz)
+                platform="${filename#qrafty-ai-opencode-kanban-npm-}"
+                platform="${platform%-${VERSION}.tgz}"
+                publish_tag="${prefix}${platform}"
+                ;;
+              *)
+                echo "Unexpected tarball name: ${filename}"
+                exit 1
+                ;;
+            esac
+
+            publish_cmd=(npm publish "${tarball}" --access public --provenance)
+            if [[ -n "${publish_tag}" ]]; then
+              publish_cmd+=(--tag "${publish_tag}")
+            fi
+
+            echo "+ ${publish_cmd[*]}"
+            set +e
+            publish_output="$("${publish_cmd[@]}" 2>&1)"
+            publish_status=$?
+            set -e
+
+            echo "${publish_output}"
+            if [[ ${publish_status} -eq 0 ]]; then
+              continue
+            fi
+
+            if grep -qiE "previously published|cannot publish over|version already exists" <<< "${publish_output}"; then
+              echo "Skipping already-published package version for ${filename}"
+              continue
+            fi
+
+            exit "${publish_status}"
+          done

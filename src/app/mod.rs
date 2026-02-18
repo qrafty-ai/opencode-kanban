@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod dialogs;
+pub mod interaction;
 pub mod messages;
 pub mod polling;
 pub mod runtime;
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use nucleo::{Config, Matcher, Utf32Str};
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -23,6 +24,7 @@ use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::widgets::{ListState, ScrollbarState};
 use uuid::Uuid;
 
+use self::interaction::{InteractionKind, InteractionMap};
 pub use self::messages::Message;
 pub use self::state::{
     ActiveDialog, ArchiveTaskDialogState, CATEGORY_COLOR_PALETTE, CategoryColorDialogState,
@@ -106,7 +108,7 @@ pub struct App {
     pub column_scroll_states: Vec<ScrollbarState>,
     pub active_dialog: ActiveDialog,
     pub footer_notice: Option<String>,
-    pub hit_test_map: Vec<(Rect, Message)>,
+    pub interaction_map: InteractionMap,
     pub hovered_message: Option<Message>,
     pub context_menu: Option<ContextMenuState>,
     pub current_view: View,
@@ -142,6 +144,7 @@ pub struct App {
     pub settings_view_state: Option<SettingsViewState>,
     pub category_edit_mode: bool,
     pub project_detail_cache: Option<ProjectDetailCache>,
+    last_click: Option<(u16, u16, Instant)>,
 }
 
 fn load_project_detail(info: &crate::projects::ProjectInfo) -> Option<ProjectDetailCache> {
@@ -221,7 +224,7 @@ impl App {
             column_scroll_states: Vec::new(),
             active_dialog: ActiveDialog::None,
             footer_notice: None,
-            hit_test_map: Vec::new(),
+            interaction_map: InteractionMap::default(),
             hovered_message: None,
             context_menu: None,
             current_view: View::ProjectList,
@@ -257,6 +260,7 @@ impl App {
             settings_view_state: None,
             category_edit_mode: false,
             project_detail_cache: None,
+            last_click: None,
         };
 
         app.refresh_data()?;
@@ -548,7 +552,7 @@ impl App {
             Message::Resize(w, h) => {
                 self.viewport = (w, h);
                 self.layout_epoch = self.layout_epoch.saturating_add(1);
-                self.hit_test_map.clear();
+                self.interaction_map.clear();
                 self.context_menu = None;
                 self.hovered_message = None;
             }
@@ -839,6 +843,30 @@ impl App {
                     self.save_settings_with_notice();
                 }
             }
+            Message::SettingsSelectSection(section) => {
+                if let Some(state) = &mut self.settings_view_state {
+                    state.active_section = section;
+                }
+            }
+            Message::SettingsSelectGeneralField(index) => {
+                if let Some(state) = &mut self.settings_view_state {
+                    state.active_section = SettingsSection::General;
+                    state.general_selected_field = index.min(3);
+                }
+            }
+            Message::SettingsSelectCategoryColor(index) => {
+                if let Some(state) = &mut self.settings_view_state {
+                    state.active_section = SettingsSection::CategoryColors;
+                    state.category_color_selected =
+                        index.min(self.categories.len().saturating_sub(1));
+                }
+            }
+            Message::SettingsSelectRepo(index) => {
+                if let Some(state) = &mut self.settings_view_state {
+                    state.active_section = SettingsSection::Repos;
+                    state.repos_selected_field = index.min(self.repos.len().saturating_sub(1));
+                }
+            }
             Message::FocusColumn(index) => {
                 if index < self.categories.len() {
                     self.focused_column = index;
@@ -854,6 +882,10 @@ impl App {
             Message::SelectTaskInSidePanel(index) => {
                 let rows = self.side_panel_rows();
                 self.sync_side_panel_selection_at(&rows, index, true);
+                self.detail_focus = DetailFocus::List;
+            }
+            Message::FocusSidePanel(focus) => {
+                self.detail_focus = focus;
             }
             Message::ToggleSidePanelCategoryCollapse => self.toggle_side_panel_category_collapse(),
             Message::OpenAddCategoryDialog => {
@@ -1559,7 +1591,221 @@ impl App {
         Ok(())
     }
 
-    fn handle_mouse(&mut self, _mouse: MouseEvent) -> Result<()> {
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+        self.mouse_seen = true;
+        self.last_mouse_event = Some(mouse);
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.hovered_message = None;
+
+                if let Some((lc, lr, lt)) = self.last_click
+                    && lc == mouse.column
+                    && lr == mouse.row
+                    && lt.elapsed() < Duration::from_millis(400)
+                {
+                    self.last_click = None;
+                    return self.update(Message::AttachSelectedTask);
+                }
+                self.last_click = Some((mouse.column, mouse.row, Instant::now()));
+
+                let hit = self.interaction_map.resolve_message(
+                    mouse.column,
+                    mouse.row,
+                    InteractionKind::LeftClick,
+                );
+
+                if let Some(msg) = hit {
+                    self.context_menu = None;
+                    self.update(msg)?;
+                }
+            }
+
+            MouseEventKind::Down(MouseButton::Right) => {
+                let mut found_task = false;
+                if let Some(Message::SelectTask(col, task_idx)) = self
+                    .interaction_map
+                    .resolve_message(mouse.column, mouse.row, InteractionKind::RightClick)
+                {
+                    let category = self.categories.get(col);
+                    if let Some(category) = category {
+                        let mut tasks: Vec<Task> = self
+                            .tasks
+                            .iter()
+                            .filter(|t| t.category_id == category.id)
+                            .cloned()
+                            .collect();
+                        tasks.sort_by_key(|t| t.position);
+                        if let Some(task) = tasks.get(task_idx) {
+                            self.context_menu = Some(ContextMenuState {
+                                position: (mouse.column, mouse.row),
+                                task_id: task.id,
+                                task_column: col,
+                                items: vec![
+                                    ContextMenuItem::Attach,
+                                    ContextMenuItem::Delete,
+                                    ContextMenuItem::Move,
+                                ],
+                                selected_index: 0,
+                            });
+                            found_task = true;
+                        }
+                    }
+                }
+                if !found_task {
+                    self.context_menu = None;
+                }
+            }
+
+            MouseEventKind::Moved => {
+                let hit = self.interaction_map.resolve_message(
+                    mouse.column,
+                    mouse.row,
+                    InteractionKind::Hover,
+                );
+                self.hovered_message = hit;
+            }
+
+            MouseEventKind::ScrollDown => {
+                self.handle_scroll(mouse.column, mouse.row, 1)?;
+            }
+            MouseEventKind::ScrollUp => {
+                self.handle_scroll(mouse.column, mouse.row, -1)?;
+            }
+
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn handle_scroll(&mut self, col: u16, row: u16, delta: i32) -> Result<()> {
+        match self.current_view {
+            View::Board => {
+                if self.view_mode == ViewMode::SidePanel {
+                    let hovered =
+                        self.interaction_map
+                            .resolve_message(col, row, InteractionKind::Hover);
+                    match hovered {
+                        Some(Message::SelectTaskInSidePanel(index)) => {
+                            self.detail_focus = DetailFocus::List;
+                            let rows = self.side_panel_rows();
+                            if !rows.is_empty() {
+                                let current = index.min(rows.len() - 1);
+                                let next = if delta > 0 {
+                                    (current + 1).min(rows.len() - 1)
+                                } else {
+                                    current.saturating_sub(1)
+                                };
+                                self.sync_side_panel_selection_at(&rows, next, true);
+                            }
+                            return Ok(());
+                        }
+                        Some(Message::FocusSidePanel(DetailFocus::List)) => {
+                            self.detail_focus = DetailFocus::List;
+                            let rows = self.side_panel_rows();
+                            if !rows.is_empty() {
+                                let current = self.side_panel_selected_row.min(rows.len() - 1);
+                                let next = if delta > 0 {
+                                    (current + 1).min(rows.len() - 1)
+                                } else {
+                                    current.saturating_sub(1)
+                                };
+                                self.sync_side_panel_selection_at(&rows, next, true);
+                            }
+                            return Ok(());
+                        }
+                        Some(Message::FocusSidePanel(DetailFocus::Details)) => {
+                            self.detail_focus = DetailFocus::Details;
+                            if delta > 0 {
+                                self.scroll_details_down(1);
+                            } else {
+                                self.scroll_details_up(1);
+                            }
+                            return Ok(());
+                        }
+                        Some(Message::FocusSidePanel(DetailFocus::Log)) => {
+                            self.detail_focus = DetailFocus::Log;
+                            if delta > 0 {
+                                self.scroll_log_down(1);
+                            } else {
+                                self.scroll_log_up(1);
+                            }
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+
+                    let rows = self.side_panel_rows();
+                    match self.detail_focus {
+                        DetailFocus::List => {
+                            if !rows.is_empty() {
+                                let current = self.side_panel_selected_row.min(rows.len() - 1);
+                                let next = if delta > 0 {
+                                    (current + 1).min(rows.len() - 1)
+                                } else {
+                                    current.saturating_sub(1)
+                                };
+                                self.sync_side_panel_selection_at(&rows, next, true);
+                            }
+                        }
+                        DetailFocus::Details => {
+                            if delta > 0 {
+                                self.scroll_details_down(1);
+                            } else {
+                                self.scroll_details_up(1);
+                            }
+                        }
+                        DetailFocus::Log => {
+                            if delta > 0 {
+                                self.scroll_log_down(1);
+                            } else {
+                                self.scroll_log_up(1);
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+
+                if let Some(Message::SelectTask(column, _) | Message::FocusColumn(column)) = self
+                    .interaction_map
+                    .resolve_message(col, row, InteractionKind::Hover)
+                {
+                    self.focused_column = column;
+                }
+                let max = self.max_scroll_offset_for_column(self.focused_column);
+                let offset = self
+                    .scroll_offset_per_column
+                    .entry(self.focused_column)
+                    .or_insert(0);
+                if delta > 0 {
+                    *offset = (*offset + 1).min(max);
+                } else {
+                    *offset = offset.saturating_sub(1);
+                }
+            }
+            View::ProjectList => {
+                if delta > 0 {
+                    self.update(Message::ProjectListSelectDown)?;
+                } else {
+                    self.update(Message::ProjectListSelectUp)?;
+                }
+            }
+            View::Archive => {
+                if delta > 0 {
+                    self.update(Message::ArchiveSelectDown)?;
+                } else {
+                    self.update(Message::ArchiveSelectUp)?;
+                }
+            }
+            View::Settings => {
+                if delta > 0 {
+                    self.update(Message::SettingsNextItem)?;
+                } else {
+                    self.update(Message::SettingsPrevItem)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3009,13 +3255,16 @@ fn repo_selection_bonus(
 
 #[cfg(test)]
 mod tests {
+    use super::interaction::InteractionLayer;
     use super::*;
 
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use tempfile::TempDir;
     use tuirealm::ratatui::widgets::ListState;
 
@@ -3147,6 +3396,14 @@ mod tests {
         Ok(())
     }
 
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
     fn category_positions(app: &App) -> Vec<(Uuid, i64)> {
         app.categories
             .iter()
@@ -3180,7 +3437,7 @@ mod tests {
             column_scroll_states: Vec::new(),
             active_dialog: ActiveDialog::None,
             footer_notice: None,
-            hit_test_map: Vec::new(),
+            interaction_map: InteractionMap::default(),
             hovered_message: None,
             context_menu: None,
             current_view: View::Board,
@@ -3216,6 +3473,7 @@ mod tests {
             settings_view_state: None,
             category_edit_mode: false,
             project_detail_cache: None,
+            last_click: None,
         };
 
         app.refresh_data()?;
@@ -3415,6 +3673,115 @@ mod tests {
             Some(0)
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_left_click_selects_task_from_interaction_map() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        app.focused_column = 0;
+        app.interaction_map.register_task(
+            InteractionLayer::Base,
+            Rect::new(10, 5, 20, 5),
+            Message::SelectTask(1, 0),
+        );
+
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 12, 6))?;
+
+        assert_eq!(app.focused_column, 1);
+        assert_eq!(app.selected_task_per_column.get(&1).copied(), Some(0));
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_scroll_down_moves_board_column_offset() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, category_ids) = test_app_with_middle_task()?;
+        let repo_id = app.repos[0].id;
+        app.db
+            .add_task(repo_id, "feature/scroll-1", "Scroll 1", category_ids[1])?;
+        app.db
+            .add_task(repo_id, "feature/scroll-2", "Scroll 2", category_ids[1])?;
+        app.refresh_data()?;
+        app.focused_column = 1;
+
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 20, 10))?;
+
+        assert_eq!(app.clamped_scroll_offset_for_column(1), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_right_click_opens_context_menu_for_task() -> Result<()> {
+        let (mut app, _repo_dir, task_id, _category_ids) = test_app_with_middle_task()?;
+        app.interaction_map.register_task(
+            InteractionLayer::Base,
+            Rect::new(10, 5, 20, 5),
+            Message::SelectTask(1, 0),
+        );
+
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Right), 12, 6))?;
+
+        assert!(app.context_menu.is_some());
+        let menu = app
+            .context_menu
+            .as_ref()
+            .expect("context menu should exist");
+        assert_eq!(menu.task_column, 1);
+        assert_eq!(menu.task_id, task_id);
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_click_selects_side_panel_row() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        app.view_mode = ViewMode::SidePanel;
+        app.detail_focus = DetailFocus::Details;
+
+        app.interaction_map.register_click(
+            InteractionLayer::Base,
+            Rect::new(8, 8, 20, 1),
+            Message::SelectTaskInSidePanel(2),
+        );
+
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 9, 8))?;
+
+        assert_eq!(app.side_panel_selected_row, 2);
+        assert_eq!(app.detail_focus, DetailFocus::List);
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_scroll_moves_side_panel_selection_when_in_side_panel_mode() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        app.view_mode = ViewMode::SidePanel;
+        app.detail_focus = DetailFocus::List;
+        app.side_panel_selected_row = 0;
+
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 20, 10))?;
+        assert_eq!(app.side_panel_selected_row, 1);
+
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 20, 10))?;
+        assert_eq!(app.side_panel_selected_row, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_scroll_over_side_panel_list_area_forces_list_scroll() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        app.view_mode = ViewMode::SidePanel;
+        app.detail_focus = DetailFocus::Details;
+        app.side_panel_selected_row = 0;
+
+        app.interaction_map.register_click(
+            InteractionLayer::Base,
+            Rect::new(4, 4, 30, 10),
+            Message::FocusSidePanel(DetailFocus::List),
+        );
+
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 5, 5))?;
+
+        assert_eq!(app.detail_focus, DetailFocus::List);
+        assert_eq!(app.side_panel_selected_row, 1);
         Ok(())
     }
 
