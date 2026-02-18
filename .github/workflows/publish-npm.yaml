@@ -2,20 +2,13 @@ name: Publish npm
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*.*.*"
   pull_request:
     branches:
       - main
-  release:
-    types:
-      - published
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to publish (example: 0.1.0 or 0.1.0-alpha.1)"
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -25,56 +18,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  determine-version:
-    name: Determine version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      npm_tag: ${{ steps.version.outputs.npm_tag }}
-      dry_run: ${{ steps.version.outputs.dry_run }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Resolve and validate version
-        id: version
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            version="${{ inputs.version }}"
-            dry_run="false"
-          elif [[ "${{ github.event_name }}" == "release" ]]; then
-            version="${RELEASE_TAG#v}"
-            dry_run="false"
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            version="0.0.0-dryrun"
-            dry_run="true"
-          else
-            version="${GITHUB_REF_NAME#v}"
-            dry_run="false"
-          fi
-
-          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$ ]] && [[ "${dry_run}" != "true" ]]; then
-            echo "Unsupported version format: ${version}"
-            exit 1
-          fi
-
-          npm_tag=""
-          if [[ "${version}" =~ -alpha\.[0-9]+$ ]]; then
-            npm_tag="alpha"
-          fi
-
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "npm_tag=${npm_tag}" >> "$GITHUB_OUTPUT"
-          echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
-
   build-binaries:
     name: Build ${{ matrix.platform_tag }}
-    needs: determine-version
     runs-on: ${{ matrix.runs_on }}
     strategy:
       fail-fast: false
@@ -97,11 +42,17 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Set Cargo package version from release version
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
-          VERSION: ${{ needs.determine-version.outputs.version }}
+          VERSION: ${{ github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$ ]]; then
+            echo "Unsupported tag format: ${VERSION}"
+            exit 1
+          fi
+          VERSION="${VERSION#v}"
           python3 - <<'PY'
           import os
           from pathlib import Path
@@ -164,9 +115,8 @@ jobs:
 
   package-tarballs:
     name: Package npm tarballs
-    needs:
-      - determine-version
-      - build-binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-binaries
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -188,8 +138,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$ ]]; then
+            echo "Unsupported tag version: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
           python3 npm/scripts/build_npm_package.py \
-            --version "${{ needs.determine-version.outputs.version }}" \
+            --version "${version}" \
             --vendor-src vendor \
             --out-dir dist/npm
 
@@ -202,10 +157,8 @@ jobs:
 
   publish:
     name: Publish to npm
-    needs:
-      - determine-version
-      - package-tarballs
-    if: needs.determine-version.outputs.dry_run != 'true'
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package-tarballs
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -227,13 +180,27 @@ jobs:
           name: npm-tarballs
           path: dist/npm
 
-      - name: Publish tarballs
-        env:
-          VERSION: ${{ needs.determine-version.outputs.version }}
-          NPM_TAG: ${{ needs.determine-version.outputs.npm_tag }}
+      - name: Resolve npm dist-tag
+        id: npm_tag
         shell: bash
         run: |
           set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "${version}" =~ -alpha\.[0-9]+$ ]]; then
+            echo "npm_tag=alpha" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm_tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish tarballs
+        env:
+          VERSION: ${{ github.ref_name }}
+          NPM_TAG: ${{ steps.npm_tag.outputs.npm_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${VERSION#v}"
 
           prefix=""
           if [[ -n "${NPM_TAG}" ]]; then

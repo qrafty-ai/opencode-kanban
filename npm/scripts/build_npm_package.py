@@ -142,6 +142,13 @@ def stage_platform_package(
     destination_vendor_root.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(vendor_src / target, destination_vendor_root)
 
+    staged_binary_path = destination_vendor_root / "opencode-kanban" / "opencode-kanban"
+    if not staged_binary_path.exists():
+        raise RuntimeError(
+            f"Missing staged binary for target {target}: {staged_binary_path}"
+        )
+    staged_binary_path.chmod(0o755)
+
     readme_src = ROOT / "README.md"
     if readme_src.exists():
         shutil.copy2(readme_src, staging_dir / "README.md")

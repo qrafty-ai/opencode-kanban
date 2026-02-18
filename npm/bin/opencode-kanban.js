@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,6 +74,28 @@ if (!vendorRoot) {
 }
 
 const binaryPath = path.join(vendorRoot, targetTriple, "opencode-kanban", binaryName);
+
+function ensureExecutable(pathToBinary) {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  try {
+    accessSync(pathToBinary, constants.X_OK);
+    return;
+  } catch {
+  }
+
+  try {
+    chmodSync(pathToBinary, 0o755);
+    accessSync(pathToBinary, constants.X_OK);
+  } catch (error) {
+    throw new Error(`Binary is not executable: ${pathToBinary}`, { cause: error });
+  }
+}
+
+ensureExecutable(binaryPath);
+
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
   env: process.env,
