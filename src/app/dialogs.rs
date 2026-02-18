@@ -2,7 +2,11 @@
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
+use crate::db::Database;
 use crate::types::{Category, Repo};
 
 use super::messages::Message;
@@ -11,15 +15,15 @@ use super::state::{
     CategoryInputDialogState, CategoryInputField, ConfirmCancelField, ConfirmQuitDialogState,
     DeleteCategoryDialogState, DeleteTaskDialogState, DeleteTaskField, NewProjectDialogState,
     NewProjectField, NewTaskDialogState, NewTaskField, RenameProjectDialogState,
-    RenameProjectField, RenameRepoDialogState, RenameRepoField, WorktreeNotFoundDialogState,
-    WorktreeNotFoundField,
+    RenameProjectField, RenameRepoDialogState, RenameRepoField, RepoSuggestionItem,
+    RepoSuggestionKind, WorktreeNotFoundDialogState, WorktreeNotFoundField,
 };
 
 /// Handle key events when a dialog is active
 pub fn handle_dialog_key(
     dialog: &mut ActiveDialog,
     key: KeyEvent,
-    _db: &crate::db::Database,
+    db: &crate::db::Database,
     repos: &mut [Repo],
     _categories: &mut [Category],
     _focused_column: &mut usize,
@@ -28,7 +32,7 @@ pub fn handle_dialog_key(
 
     match dialog {
         ActiveDialog::NewTask(state) => {
-            handle_new_task_dialog_key(state, key, repos, &mut follow_up);
+            handle_new_task_dialog_key(state, key, repos, db, &mut follow_up);
         }
         ActiveDialog::NewProject(state) => {
             handle_new_project_dialog_key(state, key, &mut follow_up);
@@ -135,8 +139,14 @@ fn handle_new_task_dialog_key(
     state: &mut NewTaskDialogState,
     key: KeyEvent,
     repos: &mut [Repo],
+    db: &Database,
     follow_up: &mut Option<Message>,
 ) {
+    if state.repo_picker.is_some() {
+        handle_repo_picker_key(state, key, repos, db);
+        return;
+    }
+
     let fields = [
         NewTaskField::Repo,
         NewTaskField::Branch,
@@ -172,7 +182,6 @@ fn handle_new_task_dialog_key(
         }
         KeyCode::Left if state.focused_field == NewTaskField::Repo => {
             if !repos.is_empty() {
-                state.repo_input.clear();
                 state.repo_idx = state.repo_idx.saturating_sub(1);
                 if let Some(repo) = repos.get(state.repo_idx) {
                     state.base_input = repo_default_base(repo);
@@ -181,7 +190,6 @@ fn handle_new_task_dialog_key(
         }
         KeyCode::Right if state.focused_field == NewTaskField::Repo => {
             if !repos.is_empty() {
-                state.repo_input.clear();
                 state.repo_idx = (state.repo_idx + 1).min(repos.len() - 1);
                 if let Some(repo) = repos.get(state.repo_idx) {
                     state.base_input = repo_default_base(repo);
@@ -200,9 +208,6 @@ fn handle_new_task_dialog_key(
             state.ensure_base_up_to_date = !state.ensure_base_up_to_date;
         }
         KeyCode::Backspace => match state.focused_field {
-            NewTaskField::Repo => {
-                state.repo_input.pop();
-            }
             NewTaskField::Branch => {
                 state.branch_input.pop();
             }
@@ -215,13 +220,16 @@ fn handle_new_task_dialog_key(
             _ => {}
         },
         KeyCode::Enter => {
-            *follow_up = Some(match state.focused_field {
-                NewTaskField::Cancel => Message::DismissDialog,
-                _ => Message::CreateTask,
-            });
+            if state.focused_field == NewTaskField::Repo {
+                open_repo_picker(state, repos, db);
+            } else {
+                *follow_up = Some(match state.focused_field {
+                    NewTaskField::Cancel => Message::DismissDialog,
+                    _ => Message::CreateTask,
+                });
+            }
         }
         KeyCode::Char(ch) => match state.focused_field {
-            NewTaskField::Repo => state.repo_input.push(ch),
             NewTaskField::Branch => state.branch_input.push(ch),
             NewTaskField::Base => state.base_input.push(ch),
             NewTaskField::Title => state.title_input.push(ch),
@@ -229,6 +237,321 @@ fn handle_new_task_dialog_key(
         },
         _ => {}
     }
+}
+
+fn open_repo_picker(state: &mut NewTaskDialogState, repos: &[Repo], db: &Database) {
+    let query = if !state.repo_input.trim().is_empty() {
+        state.repo_input.clone()
+    } else {
+        repos
+            .get(state.repo_idx)
+            .map(|repo| repo.path.clone())
+            .unwrap_or_default()
+    };
+
+    let mut picker = super::state::RepoPickerDialogState {
+        query,
+        selected_index: 0,
+        suggestions: Vec::new(),
+    };
+    refresh_repo_picker_suggestions(&mut picker, repos, db);
+    state.repo_picker = Some(picker);
+}
+
+fn handle_repo_picker_key(
+    state: &mut NewTaskDialogState,
+    key: KeyEvent,
+    repos: &[Repo],
+    db: &Database,
+) {
+    let mut apply: Option<RepoSuggestionItem> = None;
+    let mut dismiss = false;
+
+    {
+        let Some(picker) = state.repo_picker.as_mut() else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Esc => dismiss = true,
+            KeyCode::Enter => {
+                apply = picker.suggestions.get(picker.selected_index).cloned();
+                dismiss = true;
+            }
+            KeyCode::Tab => {
+                if let Some(selected) = picker.suggestions.get(picker.selected_index) {
+                    picker.query = selected.value.clone();
+                    refresh_repo_picker_suggestions(picker, repos, db);
+                }
+            }
+            KeyCode::Up => move_picker_selection(picker, -1),
+            KeyCode::Down => move_picker_selection(picker, 1),
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                move_picker_selection(picker, -1)
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                move_picker_selection(picker, 1)
+            }
+            KeyCode::Backspace => {
+                picker.query.pop();
+                refresh_repo_picker_suggestions(picker, repos, db);
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                picker.query.push(ch);
+                refresh_repo_picker_suggestions(picker, repos, db);
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(suggestion) = apply {
+        apply_repo_suggestion(state, repos, &suggestion);
+    }
+    if dismiss {
+        state.repo_picker = None;
+    }
+}
+
+fn refresh_repo_picker_suggestions(
+    picker: &mut super::state::RepoPickerDialogState,
+    repos: &[Repo],
+    db: &Database,
+) {
+    let previous_value = picker
+        .suggestions
+        .get(picker.selected_index)
+        .map(|candidate| candidate.value.clone());
+    picker.suggestions = build_repo_suggestions(picker.query.trim(), repos, db);
+    if picker.suggestions.is_empty() {
+        picker.selected_index = 0;
+        return;
+    }
+
+    picker.selected_index = previous_value
+        .and_then(|value| {
+            picker
+                .suggestions
+                .iter()
+                .position(|candidate| candidate.value == value)
+        })
+        .unwrap_or(0)
+        .min(picker.suggestions.len() - 1);
+}
+
+fn move_picker_selection(picker: &mut super::state::RepoPickerDialogState, delta: isize) {
+    if picker.suggestions.is_empty() {
+        picker.selected_index = 0;
+        return;
+    }
+
+    let len = picker.suggestions.len() as isize;
+    let next = (picker.selected_index as isize + delta).rem_euclid(len);
+    picker.selected_index = next as usize;
+}
+
+fn apply_repo_suggestion(
+    state: &mut NewTaskDialogState,
+    repos: &[Repo],
+    suggestion: &RepoSuggestionItem,
+) {
+    state.repo_input = suggestion.value.clone();
+
+    let repo_idx_from_suggestion = match suggestion.kind {
+        RepoSuggestionKind::KnownRepo { repo_idx } => Some(repo_idx),
+        RepoSuggestionKind::FolderPath => find_repo_idx_by_path_value(repos, &suggestion.value),
+    };
+
+    if let Some(repo_idx) = repo_idx_from_suggestion {
+        state.repo_idx = repo_idx;
+        if let Some(repo) = repos.get(repo_idx) {
+            state.base_input = repo_default_base(repo);
+        }
+    }
+}
+
+fn find_repo_idx_by_path_value(repos: &[Repo], value: &str) -> Option<usize> {
+    let normalized_value = normalize_path_value(value);
+    repos
+        .iter()
+        .position(|repo| normalize_path_value(&repo.path) == normalized_value)
+}
+
+fn normalize_path_value(value: &str) -> String {
+    value
+        .trim_end_matches(std::path::MAIN_SEPARATOR)
+        .to_string()
+}
+
+fn build_repo_suggestions(query: &str, repos: &[Repo], db: &Database) -> Vec<RepoSuggestionItem> {
+    let mut suggestions = Vec::new();
+    let mut seen_values = HashSet::new();
+    let normalized_query = query.trim();
+
+    for folder_path in folder_suggestion_paths(normalized_query) {
+        let key = normalize_path_value(&folder_path).to_ascii_lowercase();
+        if seen_values.insert(key) {
+            suggestions.push(RepoSuggestionItem {
+                label: folder_label(&folder_path),
+                value: folder_path,
+                kind: RepoSuggestionKind::FolderPath,
+            });
+        }
+    }
+
+    let usage = super::repo_selection_usage_map(db);
+    for repo_idx in super::rank_repos_for_query(normalized_query, repos, &usage) {
+        if let Some(repo) = repos.get(repo_idx)
+            && seen_values.insert(normalize_path_value(&repo.path).to_ascii_lowercase())
+        {
+            suggestions.push(RepoSuggestionItem {
+                label: repo.name.clone(),
+                value: repo.path.clone(),
+                kind: RepoSuggestionKind::KnownRepo { repo_idx },
+            });
+        }
+    }
+
+    suggestions
+}
+
+fn folder_label(path: &str) -> String {
+    let path = Path::new(path);
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn folder_suggestion_paths(query: &str) -> Vec<String> {
+    let expanded = expand_home_prefix(query);
+    if expanded.is_empty() {
+        return Vec::new();
+    }
+
+    let path = PathBuf::from(&expanded);
+    if path.is_dir() {
+        if expanded.ends_with(std::path::MAIN_SEPARATOR) {
+            return list_directory_suggestions(&path, None);
+        }
+
+        return parent_and_matching_directory_suggestions(&path);
+    }
+
+    let Some(parent) = path.parent() else {
+        return Vec::new();
+    };
+    let prefix = path
+        .file_name()
+        .and_then(|segment| segment.to_str())
+        .unwrap_or_default();
+    list_directory_suggestions(parent, Some(prefix))
+}
+
+fn list_directory_suggestions(parent: &Path, prefix: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = fs::read_dir(parent)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+
+            if let Some(prefix) = prefix {
+                let file_name = path.file_name()?.to_str()?;
+                if !file_name.starts_with(prefix) {
+                    return None;
+                }
+            }
+
+            Some(path)
+        })
+        .map(|path| format!("{}{sep}", path.display(), sep = std::path::MAIN_SEPARATOR))
+        .collect();
+
+    out.sort();
+    out
+}
+
+fn parent_and_matching_directory_suggestions(path: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut push_unique = |value: String| {
+        let key = value.to_ascii_lowercase();
+        if seen.insert(key) {
+            out.push(value);
+        }
+    };
+
+    push_unique(format!(
+        "{}{sep}",
+        path.display(),
+        sep = std::path::MAIN_SEPARATOR
+    ));
+
+    if let Some(parent) = path.parent() {
+        push_unique(format!(
+            "{}{sep}",
+            parent.display(),
+            sep = std::path::MAIN_SEPARATOR
+        ));
+
+        let prefix = path
+            .file_name()
+            .and_then(|segment| segment.to_str())
+            .unwrap_or_default();
+        let exact_name = prefix.to_ascii_lowercase();
+        let mut candidates = list_directory_suggestions(parent, Some(prefix));
+        candidates.sort_by(|left, right| {
+            let left_name = Path::new(left)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let right_name = Path::new(right)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+
+            let left_exact = left_name == exact_name;
+            let right_exact = right_name == exact_name;
+            right_exact
+                .cmp(&left_exact)
+                .then_with(|| left_name.len().cmp(&right_name.len()))
+                .then_with(|| left_name.cmp(&right_name))
+        });
+
+        for candidate in candidates {
+            push_unique(candidate);
+        }
+    }
+
+    out
+}
+
+fn expand_home_prefix(value: &str) -> String {
+    if let Some(stripped) = value.strip_prefix('~') {
+        if stripped.is_empty() {
+            if let Some(home) = dirs::home_dir() {
+                return home.display().to_string();
+            }
+            return value.to_string();
+        }
+
+        if let Some(remainder) = stripped.strip_prefix(std::path::MAIN_SEPARATOR)
+            && let Some(home) = dirs::home_dir()
+        {
+            return home.join(remainder).display().to_string();
+        }
+    }
+
+    value.to_string()
 }
 
 fn handle_new_project_dialog_key(
@@ -720,4 +1043,243 @@ fn repo_default_base(repo: &Repo) -> String {
                 std::path::Path::new(&repo.path),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crossterm::event::KeyModifiers;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    fn key_tab() -> KeyEvent {
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::empty())
+    }
+
+    fn key_down() -> KeyEvent {
+        KeyEvent::new(KeyCode::Down, KeyModifiers::empty())
+    }
+
+    fn key_enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())
+    }
+
+    fn test_repo(id: Uuid, name: &str, default_base: &str) -> Repo {
+        Repo {
+            id,
+            path: format!("/tmp/{name}"),
+            name: name.to_string(),
+            default_base: Some(default_base.to_string()),
+            remote_url: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
+    }
+
+    fn repo_focused_state() -> NewTaskDialogState {
+        NewTaskDialogState {
+            repo_idx: 0,
+            repo_input: String::new(),
+            repo_picker: None,
+            branch_input: String::new(),
+            base_input: "main".to_string(),
+            title_input: String::new(),
+            ensure_base_up_to_date: true,
+            loading_message: None,
+            focused_field: NewTaskField::Repo,
+        }
+    }
+
+    #[test]
+    fn enter_on_repo_opens_picker_overlay() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let mut repos = vec![
+            test_repo(Uuid::new_v4(), "frontend-app", "main"),
+            test_repo(Uuid::new_v4(), "backend-api", "develop"),
+        ];
+        let mut state = repo_focused_state();
+        let mut follow_up = None;
+
+        handle_new_task_dialog_key(
+            &mut state,
+            key_enter(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+
+        assert!(state.repo_picker.is_some());
+        assert_eq!(state.focused_field, NewTaskField::Repo);
+        assert!(follow_up.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn picker_enter_selects_highlighted_repo() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let first = test_repo(Uuid::new_v4(), "frontend-app", "main");
+        let second = test_repo(Uuid::new_v4(), "backend-api", "release");
+        let mut repos = vec![first, second.clone()];
+
+        let mut state = repo_focused_state();
+        state.repo_input = "backend".to_string();
+        let mut follow_up = None;
+
+        handle_new_task_dialog_key(
+            &mut state,
+            key_enter(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+        handle_new_task_dialog_key(
+            &mut state,
+            key_enter(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+
+        assert_eq!(state.repo_idx, 1);
+        assert_eq!(state.base_input, "release");
+        assert_eq!(state.repo_input, second.path);
+        assert!(state.repo_picker.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn picker_down_moves_selection_and_enter_applies() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let first = test_repo(Uuid::new_v4(), "api-admin", "main");
+        let second = test_repo(Uuid::new_v4(), "api-gateway", "develop");
+        let mut repos = vec![first, second.clone()];
+
+        let mut state = repo_focused_state();
+        state.repo_input = "api".to_string();
+
+        let mut follow_up = None;
+        handle_new_task_dialog_key(
+            &mut state,
+            key_enter(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+        handle_new_task_dialog_key(
+            &mut state,
+            key_down(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+        handle_new_task_dialog_key(
+            &mut state,
+            key_enter(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+
+        assert_eq!(state.repo_idx, 1);
+        assert_eq!(state.base_input, "develop");
+        assert_eq!(state.repo_input, second.path);
+        assert!(follow_up.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn picker_tab_completes_to_selected_suggestion_value() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let first = test_repo(Uuid::new_v4(), "frontend-app", "main");
+        let second = test_repo(Uuid::new_v4(), "backend-api", "develop");
+        let mut repos = vec![first, second.clone()];
+
+        let mut state = repo_focused_state();
+        state.repo_input = "back".to_string();
+        let mut follow_up = None;
+
+        handle_new_task_dialog_key(
+            &mut state,
+            key_enter(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+        handle_new_task_dialog_key(
+            &mut state,
+            key_tab(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+
+        let picker = state
+            .repo_picker
+            .as_ref()
+            .expect("picker should remain open");
+        assert_eq!(picker.query, second.path);
+        Ok(())
+    }
+
+    #[test]
+    fn folder_suggestion_paths_completes_matching_directory_prefix() -> Result<()> {
+        let temp = TempDir::new()?;
+        let target = temp.path().join("codes");
+        std::fs::create_dir_all(&target)?;
+
+        let query = format!("{}/co", temp.path().display());
+        let suggestions = folder_suggestion_paths(&query);
+        let expected = format!("{}{sep}", target.display(), sep = std::path::MAIN_SEPARATOR);
+        assert!(suggestions.contains(&expected));
+        Ok(())
+    }
+
+    #[test]
+    fn folder_suggestion_paths_lists_all_directories_under_path() -> Result<()> {
+        let temp = TempDir::new()?;
+        let root = temp.path().join("workspace");
+        let alpha = root.join("alpha");
+        let beta = root.join("beta");
+        let file = root.join("README.md");
+        std::fs::create_dir_all(&alpha)?;
+        std::fs::create_dir_all(&beta)?;
+        std::fs::write(&file, "not-a-folder")?;
+
+        let query = format!("{}{sep}", root.display(), sep = std::path::MAIN_SEPARATOR);
+        let suggestions = folder_suggestion_paths(&query);
+        let alpha_entry = format!("{}{sep}", alpha.display(), sep = std::path::MAIN_SEPARATOR);
+        let beta_entry = format!("{}{sep}", beta.display(), sep = std::path::MAIN_SEPARATOR);
+
+        assert_eq!(suggestions.len(), 2);
+        assert!(suggestions.contains(&alpha_entry));
+        assert!(suggestions.contains(&beta_entry));
+        Ok(())
+    }
+
+    #[test]
+    fn folder_suggestion_paths_existing_dir_without_slash_includes_parent_and_self() -> Result<()> {
+        let temp = TempDir::new()?;
+        let root = temp.path().join("workspace");
+        let tea = root.join("tea");
+        let tea_worktrees = root.join("tea-worktrees");
+        let tea_new = root.join("tea_new_description");
+        let cache = tea.join(".cache");
+        std::fs::create_dir_all(&tea_worktrees)?;
+        std::fs::create_dir_all(&tea_new)?;
+        std::fs::create_dir_all(&cache)?;
+
+        let query = tea.display().to_string();
+        let suggestions = folder_suggestion_paths(&query);
+
+        let parent_entry = format!("{}{sep}", root.display(), sep = std::path::MAIN_SEPARATOR);
+        let tea_entry = format!("{}{sep}", tea.display(), sep = std::path::MAIN_SEPARATOR);
+        let cache_entry = format!("{}{sep}", cache.display(), sep = std::path::MAIN_SEPARATOR);
+
+        assert_eq!(suggestions.first(), Some(&tea_entry));
+        assert!(suggestions.contains(&parent_entry));
+        assert!(suggestions.contains(&tea_entry));
+        assert!(!suggestions.contains(&cache_entry));
+        Ok(())
+    }
 }

@@ -1,6 +1,7 @@
 use crate::app::Message;
+use crate::matching::recency_frequency_bonus;
 use crate::types::CommandFrequency;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use nucleo::{Config, Matcher, Utf32Str};
 use std::collections::HashMap;
 
@@ -129,23 +130,13 @@ pub fn rank_commands(
 fn frequency_bonus(
     command_id: &str,
     frequencies: &HashMap<String, CommandFrequency>,
-    now: DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
 ) -> f64 {
     let Some(freq) = frequencies.get(command_id) else {
         return 0.0;
     };
 
-    let normalized_freq = (1.0 + freq.use_count.max(0) as f64).ln();
-    let recency_bonus = DateTime::parse_from_rfc3339(&freq.last_used)
-        .ok()
-        .map(|last_used| {
-            let hours_since_last_used =
-                (now - last_used.with_timezone(&Utc)).num_seconds().max(0) as f64 / 3600.0;
-            2f64.powf(-hours_since_last_used / 24.0)
-        })
-        .unwrap_or(0.0);
-
-    (normalized_freq * 0.3 + recency_bonus * 0.7) * 100.0
+    recency_frequency_bonus(freq.use_count, &freq.last_used, now, 0.3, 0.7, 24.0, 100.0)
 }
 
 pub fn all_commands() -> Vec<CommandDef> {

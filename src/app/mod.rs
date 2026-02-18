@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use nucleo::{Config, Matcher, Utf32Str};
 use tokio::task::JoinHandle;
 use tracing::warn;
 use tuirealm::ratatui::layout::Rect;
@@ -33,27 +34,33 @@ pub use self::state::{
     DeleteTaskDialogState, DeleteTaskField, DetailFocus, ErrorDialogState, MoveTaskDialogState,
     NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
     RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
-    RepoUnavailableDialogState, SettingsSection, SettingsViewState, TodoVisualizationMode, View,
-    ViewMode, WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
+    RepoPickerDialogState, RepoSuggestionItem, RepoSuggestionKind, RepoUnavailableDialogState,
+    SettingsSection, SettingsViewState, TodoVisualizationMode, View, ViewMode,
+    WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
 };
 
 use crate::command_palette::{CommandPaletteState, all_commands};
 use crate::db::Database;
 use crate::git::{derive_worktree_path, git_delete_branch, git_remove_worktree};
 use crate::keybindings::{KeyAction, KeyContext, Keybindings};
+use crate::matching::recency_frequency_bonus;
 use crate::opencode::{
     OpenCodeServerManager, Status, ensure_server_ready, opencode_attach_command,
 };
 use crate::projects::{self, ProjectInfo};
 use crate::theme::{Theme, ThemePreset};
 use crate::tmux::tmux_kill_session;
-use crate::types::{Category, Repo, SessionMessageItem, SessionState, SessionTodoItem, Task};
+use crate::types::{
+    Category, CommandFrequency, Repo, SessionMessageItem, SessionState, SessionTodoItem, Task,
+};
 
 use self::runtime::{
     CreateTaskRuntime, RealCreateTaskRuntime, RealRecoveryRuntime, RecoveryRuntime,
     next_available_session_name, next_available_session_name_by, worktrees_root_for_repo,
 };
 use self::state::{AttachTaskResult, CreateTaskOutcome, DesiredTaskState, ObservedTaskState};
+
+const REPO_SELECTION_USAGE_PREFIX: &str = "repo-selection:";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum SidePanelRow {
@@ -575,14 +582,18 @@ impl App {
             }
             Message::AttachSelectedTask => self.attach_selected_task()?,
             Message::OpenNewTaskDialog => {
+                let usage = repo_selection_usage_map(&self.db);
+                let ranked_repo_indexes = rank_repos_for_query("", &self.repos, &usage);
+                let preferred_repo_idx = ranked_repo_indexes.first().copied().unwrap_or(0);
                 let default_base = self
                     .repos
-                    .first()
+                    .get(preferred_repo_idx)
                     .and_then(|repo| repo.default_base.clone())
                     .unwrap_or_else(|| "main".to_string());
                 self.active_dialog = ActiveDialog::NewTask(NewTaskDialogState {
-                    repo_idx: 0,
+                    repo_idx: preferred_repo_idx,
                     repo_input: String::new(),
+                    repo_picker: None,
                     branch_input: String::new(),
                     base_input: default_base,
                     title_input: String::new(),
@@ -3016,6 +3027,14 @@ fn create_task_pipeline_with_runtime(
         db.update_task_status(task.id, Status::Idle.as_str())
             .context("failed to save task runtime status")?;
 
+        if let Err(err) = db.increment_command_usage(&repo_selection_command_id(repo.id)) {
+            warn!(
+                error = %err,
+                repo_id = %repo.id,
+                "failed to persist repo selection usage"
+            );
+        }
+
         Ok(())
     };
 
@@ -3042,34 +3061,196 @@ fn resolve_repo_for_creation(
     let repo_path_input = state.repo_input.trim();
     if !repo_path_input.is_empty() {
         let path = PathBuf::from(repo_path_input);
-        if !path.exists() {
-            anyhow::bail!("repo path does not exist: {}", path.display());
+        let path_exists = path.exists();
+        if path_exists && runtime.git_is_valid_repo(&path) {
+            let canonical = fs::canonicalize(&path)
+                .with_context(|| format!("failed to canonicalize repo path {}", path.display()))?;
+            if let Some(existing) = repos
+                .iter()
+                .find(|repo| Path::new(&repo.path) == canonical)
+                .cloned()
+            {
+                return Ok(existing);
+            }
+
+            let repo = db
+                .add_repo(&canonical)
+                .with_context(|| format!("failed to save repo {}", canonical.display()))?;
+            repos.push(repo.clone());
+            return Ok(repo);
         }
-        if !runtime.git_is_valid_repo(&path) {
+
+        let usage = repo_selection_usage_map(db);
+        if let Some(repo_idx) = rank_repos_for_query(repo_path_input, repos, &usage)
+            .first()
+            .copied()
+        {
+            return Ok(repos[repo_idx].clone());
+        }
+
+        if path_exists {
             anyhow::bail!("not a git repository: {}", path.display());
         }
 
-        let canonical = fs::canonicalize(&path)
-            .with_context(|| format!("failed to canonicalize repo path {}", path.display()))?;
-        if let Some(existing) = repos
-            .iter()
-            .find(|repo| Path::new(&repo.path) == canonical)
-            .cloned()
-        {
-            return Ok(existing);
-        }
-
-        let repo = db
-            .add_repo(&canonical)
-            .with_context(|| format!("failed to save repo {}", canonical.display()))?;
-        repos.push(repo.clone());
-        return Ok(repo);
+        anyhow::bail!("repo path does not exist: {}", path.display());
     }
 
     repos
         .get(state.repo_idx)
         .cloned()
         .context("select a repo or enter a repository path")
+}
+
+fn repo_selection_command_id(repo_id: Uuid) -> String {
+    format!("{REPO_SELECTION_USAGE_PREFIX}{repo_id}")
+}
+
+fn repo_selection_usage_map(db: &Database) -> HashMap<Uuid, CommandFrequency> {
+    db.get_command_frequencies()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(command_id, frequency)| {
+            let raw_repo_id = command_id.strip_prefix(REPO_SELECTION_USAGE_PREFIX)?;
+            let repo_id = Uuid::parse_str(raw_repo_id).ok()?;
+            Some((repo_id, frequency))
+        })
+        .collect()
+}
+
+fn rank_repos_for_query(
+    query: &str,
+    repos: &[Repo],
+    usage: &HashMap<Uuid, CommandFrequency>,
+) -> Vec<usize> {
+    if repos.is_empty() {
+        return Vec::new();
+    }
+
+    let now = Utc::now();
+    let query = query.trim();
+    let mut ranked: Vec<(usize, f64)> = Vec::with_capacity(repos.len());
+
+    if query.is_empty() {
+        for (repo_idx, repo) in repos.iter().enumerate() {
+            ranked.push((repo_idx, repo_selection_bonus(repo.id, usage, now)));
+        }
+    } else {
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut query_buf = Vec::new();
+        let query_utf32 = Utf32Str::new(query, &mut query_buf);
+        let mut candidate_buf = Vec::new();
+        let mut matched_indices = Vec::new();
+
+        for (repo_idx, repo) in repos.iter().enumerate() {
+            let mut best_match_score: Option<f64> = None;
+
+            for (candidate, candidate_bonus) in repo_match_candidates(repo) {
+                matched_indices.clear();
+                let candidate_utf32 = Utf32Str::new(candidate.as_str(), &mut candidate_buf);
+                if let Some(fuzzy_score) =
+                    matcher.fuzzy_indices(candidate_utf32, query_utf32, &mut matched_indices)
+                {
+                    let score = f64::from(fuzzy_score) + candidate_bonus;
+                    best_match_score = Some(match best_match_score {
+                        Some(current) => current.max(score),
+                        None => score,
+                    });
+                }
+            }
+
+            if let Some(best_match_score) = best_match_score {
+                let score = best_match_score + repo_selection_bonus(repo.id, usage, now);
+                ranked.push((repo_idx, score));
+            }
+        }
+    }
+
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    ranked.into_iter().map(|(repo_idx, _)| repo_idx).collect()
+}
+
+fn repo_match_candidates(repo: &Repo) -> Vec<(String, f64)> {
+    let mut out: Vec<(String, f64)> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut add = |value: String, bonus: f64| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let normalized = trimmed.to_ascii_lowercase();
+        if seen.insert(normalized) {
+            out.push((trimmed.to_string(), bonus));
+        }
+    };
+
+    add(repo.name.clone(), 90.0);
+    add(repo.path.clone(), 65.0);
+
+    let path = Path::new(&repo.path);
+    if let Some(file_name) = path.file_name().and_then(|value| value.to_str()) {
+        add(file_name.to_string(), 85.0);
+    }
+
+    let segments: Vec<String> = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(segment) => Some(segment.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    for segment in &segments {
+        add(segment.to_string(), 80.0);
+    }
+
+    if segments.len() >= 2 {
+        let suffix = format!(
+            "{}/{}",
+            segments[segments.len() - 2],
+            segments[segments.len() - 1]
+        );
+        add(suffix, 88.0);
+    }
+
+    if segments.len() >= 3 {
+        let suffix = format!(
+            "{}/{}/{}",
+            segments[segments.len() - 3],
+            segments[segments.len() - 2],
+            segments[segments.len() - 1]
+        );
+        add(suffix, 92.0);
+    }
+
+    out
+}
+
+fn repo_selection_bonus(
+    repo_id: Uuid,
+    usage: &HashMap<Uuid, CommandFrequency>,
+    now: DateTime<Utc>,
+) -> f64 {
+    let Some(freq) = usage.get(&repo_id) else {
+        return 0.0;
+    };
+
+    recency_frequency_bonus(
+        freq.use_count,
+        &freq.last_used,
+        now,
+        0.35,
+        0.65,
+        48.0,
+        120.0,
+    )
 }
 
 #[cfg(test)]
@@ -3135,6 +3316,86 @@ mod tests {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())
     }
 
+    fn test_repo(name: &str, path: &str) -> Repo {
+        Repo {
+            id: Uuid::new_v4(),
+            path: path.to_string(),
+            name: name.to_string(),
+            default_base: Some("main".to_string()),
+            remote_url: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
+    }
+
+    #[test]
+    fn rank_repos_for_query_matches_folder_segments() {
+        let repos = vec![
+            test_repo("frontend-app", "/work/acme/frontend-app"),
+            test_repo("backend-api", "/work/acme/backend-api"),
+        ];
+
+        let ranked = rank_repos_for_query("backend", &repos, &HashMap::new());
+        assert_eq!(ranked.first().copied(), Some(1));
+
+        let ranked = rank_repos_for_query("acme/frontend", &repos, &HashMap::new());
+        assert_eq!(ranked.first().copied(), Some(0));
+    }
+
+    #[test]
+    fn rank_repos_for_query_empty_prefers_recent_selection_history() {
+        let repos = vec![
+            test_repo("frontend-app", "/work/acme/frontend-app"),
+            test_repo("backend-api", "/work/acme/backend-api"),
+        ];
+
+        let mut usage = HashMap::new();
+        usage.insert(
+            repos[1].id,
+            CommandFrequency {
+                command_id: repo_selection_command_id(repos[1].id),
+                use_count: 10,
+                last_used: (Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+            },
+        );
+
+        let ranked = rank_repos_for_query("", &repos, &usage);
+        assert_eq!(ranked.first().copied(), Some(1));
+    }
+
+    #[test]
+    fn resolve_repo_for_creation_accepts_fuzzy_existing_repo_query() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let temp = TempDir::new()?;
+        let frontend = temp.path().join("acme").join("frontend-app");
+        let backend = temp.path().join("acme").join("backend-api");
+        fs::create_dir_all(&frontend)?;
+        fs::create_dir_all(&backend)?;
+
+        let _frontend_repo = db.add_repo(&frontend)?;
+        let backend_repo = db.add_repo(&backend)?;
+        db.increment_command_usage(&repo_selection_command_id(backend_repo.id))?;
+        db.increment_command_usage(&repo_selection_command_id(backend_repo.id))?;
+
+        let mut repos = db.list_repos()?;
+        let state = NewTaskDialogState {
+            repo_idx: 0,
+            repo_input: "backend".to_string(),
+            repo_picker: None,
+            branch_input: String::new(),
+            base_input: String::new(),
+            title_input: String::new(),
+            ensure_base_up_to_date: true,
+            loading_message: None,
+            focused_field: NewTaskField::Repo,
+        };
+
+        let runtime = RealCreateTaskRuntime;
+        let selected = resolve_repo_for_creation(&db, &mut repos, &state, &runtime)?;
+        assert_eq!(selected.id, backend_repo.id);
+        Ok(())
+    }
+
     fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind,
@@ -3143,7 +3404,6 @@ mod tests {
             modifiers: KeyModifiers::empty(),
         }
     }
-
     fn category_positions(app: &App) -> Vec<(Uuid, i64)> {
         app.categories
             .iter()
