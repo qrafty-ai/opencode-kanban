@@ -26,11 +26,6 @@ PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
         "os": "linux",
         "cpu": "x64",
     },
-    "darwin-x64": {
-        "target": "x86_64-apple-darwin",
-        "os": "darwin",
-        "cpu": "x64",
-    },
     "darwin-arm64": {
         "target": "aarch64-apple-darwin",
         "os": "darwin",

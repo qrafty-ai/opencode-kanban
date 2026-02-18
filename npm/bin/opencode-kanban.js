@@ -12,7 +12,6 @@ const require = createRequire(import.meta.url);
 
 const PLATFORM_PACKAGE_BY_TARGET = {
   "x86_64-unknown-linux-gnu": "opencode-kanban-linux-x64",
-  "x86_64-apple-darwin": "opencode-kanban-darwin-x64",
   "aarch64-apple-darwin": "opencode-kanban-darwin-arm64",
 };
 
@@ -24,7 +23,7 @@ function detectTargetTriple() {
   }
 
   if (platform === "darwin" && arch === "x64") {
-    return "x86_64-apple-darwin";
+    throw new Error("darwin-x64 is not supported. Please use macOS with Apple Silicon (arm64).");
   }
 
   if (platform === "darwin" && arch === "arm64") {

@@ -256,7 +256,7 @@ jobs:
               qrafty-ai-opencode-kanban-npm-"${VERSION}".tgz)
                 publish_tag="${NPM_TAG}"
                 ;;
-              qrafty-ai-opencode-kanban-npm-linux-x64-"${VERSION}".tgz|qrafty-ai-opencode-kanban-npm-darwin-x64-"${VERSION}".tgz|qrafty-ai-opencode-kanban-npm-darwin-arm64-"${VERSION}".tgz)
+              qrafty-ai-opencode-kanban-npm-linux-x64-"${VERSION}".tgz|qrafty-ai-opencode-kanban-npm-darwin-arm64-"${VERSION}".tgz)
                 platform="${filename#qrafty-ai-opencode-kanban-npm-}"
                 platform="${platform%-${VERSION}.tgz}"
                 publish_tag="${prefix}${platform}"
