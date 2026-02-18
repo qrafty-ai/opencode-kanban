@@ -11,7 +11,14 @@ ROOT = Path(__file__).resolve().parents[2]
 NPM_ROOT = ROOT / "npm"
 PACKAGE_TEMPLATE_PATH = NPM_ROOT / "package.json"
 BIN_SOURCE_PATH = NPM_ROOT / "bin" / "opencode-kanban.js"
-PACKAGE_NAME = "opencode-kanban"
+PACKAGE_NAME = "@qrafty-ai/opencode-kanban"
+
+
+def package_name_to_filename(name: str) -> str:
+    return name.replace("@", "").replace("/", "-")
+
+
+PACKAGE_FILENAME = package_name_to_filename(PACKAGE_NAME)
 
 PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
     "linux-x64": {
@@ -99,7 +106,7 @@ def stage_main_package(
     package_json["version"] = version
     package_json["files"] = ["bin"]
     package_json["optionalDependencies"] = {
-        f"{PACKAGE_NAME}-{platform_tag}": f"npm:{PACKAGE_NAME}@{version}-{platform_tag}"
+        f"{PACKAGE_FILENAME}-{platform_tag}": f"npm:{PACKAGE_NAME}@{version}-{platform_tag}"
         for platform_tag in PLATFORM_PACKAGES
     }
 
@@ -108,7 +115,7 @@ def stage_main_package(
     run_npm_pack(
         staging_dir=staging_dir,
         out_dir=out_dir,
-        output_name=f"{PACKAGE_NAME}-npm-{version}.tgz",
+        output_name=f"{PACKAGE_FILENAME}-npm-{version}.tgz",
     )
 
     for platform in PLATFORM_PACKAGES.values():
@@ -169,7 +176,7 @@ def stage_platform_package(
     run_npm_pack(
         staging_dir=staging_dir,
         out_dir=out_dir,
-        output_name=f"{PACKAGE_NAME}-npm-{platform_tag}-{version}.tgz",
+        output_name=f"{PACKAGE_FILENAME}-npm-{platform_tag}-{version}.tgz",
     )
 
 

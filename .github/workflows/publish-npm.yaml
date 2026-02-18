@@ -242,11 +242,11 @@ jobs:
             publish_tag=""
 
             case "${filename}" in
-              opencode-kanban-npm-"${VERSION}".tgz)
+              qrafty-ai-opencode-kanban-npm-"${VERSION}".tgz)
                 publish_tag="${NPM_TAG}"
                 ;;
-              opencode-kanban-npm-linux-x64-"${VERSION}".tgz|opencode-kanban-npm-darwin-x64-"${VERSION}".tgz|opencode-kanban-npm-darwin-arm64-"${VERSION}".tgz)
-                platform="${filename#opencode-kanban-npm-}"
+              qrafty-ai-opencode-kanban-npm-linux-x64-"${VERSION}".tgz|qrafty-ai-opencode-kanban-npm-darwin-x64-"${VERSION}".tgz|qrafty-ai-opencode-kanban-npm-darwin-arm64-"${VERSION}".tgz)
+                platform="${filename#qrafty-ai-opencode-kanban-npm-}"
                 platform="${platform%-${VERSION}.tgz}"
                 publish_tag="${prefix}${platform}"
                 ;;

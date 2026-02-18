@@ -1,0 +1,28 @@
+{
+  "name": "@qrafty-ai/opencode-kanban",
+  "version": "0.0.0-dev",
+  "description": "Terminal kanban board for managing OpenCode tmux sessions",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "opencode-kanban": "npm/bin/opencode-kanban.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "npm/bin",
+    "vendor"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qrafty-ai/opencode-kanban.git"
+  },
+  "homepage": "https://github.com/qrafty-ai/opencode-kanban#readme",
+  "bugs": {
+    "url": "https://github.com/qrafty-ai/opencode-kanban/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
