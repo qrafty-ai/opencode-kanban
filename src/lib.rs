@@ -5,6 +5,7 @@ pub mod git;
 pub mod input;
 pub mod keybindings;
 pub mod logging;
+pub mod matching;
 pub mod opencode;
 pub mod projects;
 pub mod realm;

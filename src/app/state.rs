@@ -19,9 +19,30 @@ pub enum NewTaskField {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub enum RepoSuggestionKind {
+    KnownRepo { repo_idx: usize },
+    FolderPath,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RepoSuggestionItem {
+    pub label: String,
+    pub value: String,
+    pub kind: RepoSuggestionKind,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RepoPickerDialogState {
+    pub query: String,
+    pub selected_index: usize,
+    pub suggestions: Vec<RepoSuggestionItem>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NewTaskDialogState {
     pub repo_idx: usize,
     pub repo_input: String,
+    pub repo_picker: Option<RepoPickerDialogState>,
     pub branch_input: String,
     pub base_input: String,
     pub title_input: String,

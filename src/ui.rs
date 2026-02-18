@@ -934,7 +934,12 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(Clear, dialog_area);
 
     match &app.active_dialog {
-        ActiveDialog::NewTask(state) => render_new_task_dialog(frame, dialog_area, app, state),
+        ActiveDialog::NewTask(state) => {
+            render_new_task_dialog(frame, dialog_area, app, state);
+            if let Some(picker) = &state.repo_picker {
+                render_repo_picker_dialog(frame, app, picker);
+            }
+        }
         ActiveDialog::DeleteTask(state) => {
             render_delete_task_dialog(frame, dialog_area, app, state)
         }
@@ -1021,18 +1026,21 @@ fn render_new_task_dialog(
         ])
         .split(panel_inner);
 
-    render_input_component(
+    let repo_display = if state.repo_input.trim().is_empty() {
+        app.repos
+            .get(state.repo_idx)
+            .map(|repo| repo.path.as_str())
+            .unwrap_or("")
+    } else {
+        state.repo_input.as_str()
+    };
+
+    render_repo_picker_input_component(
         frame,
         layout[0],
         "Repo",
-        if state.repo_input.is_empty() {
-            app.repos
-                .get(state.repo_idx)
-                .map(|repo| repo.name.as_str())
-                .unwrap_or("")
-        } else {
-            state.repo_input.as_str()
-        },
+        repo_display,
+        state.repo_picker.is_some(),
         state.focused_field == NewTaskField::Repo,
         surface,
         theme,
@@ -1102,8 +1110,14 @@ fn render_new_task_dialog(
         app,
     );
 
+    let hint_text = if state.repo_input.trim().is_empty() {
+        "Repo is picker input: press Enter to browse folders/repos".to_string()
+    } else {
+        "Repo is picker input: press Enter to change selection".to_string()
+    };
+
     let mut hint = Label::default()
-        .text("Tab/Up/Down: move focus  Enter: confirm  Esc: cancel")
+        .text(&hint_text)
         .alignment(Alignment::Center)
         .foreground(theme.base.text_muted)
         .background(surface);
@@ -1889,6 +1903,7 @@ fn render_command_palette_dialog(
         .title("Results", Alignment::Left)
         .borders(dialog_border(theme))
         .foreground(theme.base.text)
+        .background(dialog_surface(theme))
         .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
         .headers(["Command", "Key"])
@@ -2020,6 +2035,113 @@ fn render_input_component(
         .value(value.to_string());
     input.attr(Attribute::Focus, AttrValue::Flag(focused));
     input.view(frame, area);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_repo_picker_input_component(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    value: &str,
+    editing: bool,
+    focused: bool,
+    background: Color,
+    theme: Theme,
+) {
+    let suffix = if editing {
+        " [Selecting...]"
+    } else {
+        " [Enter to select]"
+    };
+    let title = format!("{title}{suffix}");
+
+    let mut input = Input::default()
+        .title(&title, Alignment::Left)
+        .borders(rounded_borders(dialog_input_border(
+            theme,
+            focused || editing,
+        )))
+        .foreground(theme.base.text)
+        .background(background)
+        .inactive(Style::default().fg(theme.base.text_muted))
+        .input_type(InputType::Text)
+        .value(value.to_string());
+    input.attr(Attribute::Focus, AttrValue::Flag(focused || editing));
+    input.view(frame, area);
+}
+
+fn render_repo_picker_dialog(
+    frame: &mut Frame<'_>,
+    app: &App,
+    picker: &crate::app::RepoPickerDialogState,
+) {
+    let theme = app.theme;
+    let overlay = calculate_overlay_area(OverlayAnchor::Top, 88, 62, frame.area());
+    frame.render_widget(Clear, overlay);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(overlay);
+
+    render_input_component(
+        frame,
+        chunks[0],
+        "Select Repository Folder",
+        &picker.query,
+        true,
+        dialog_surface(theme),
+        theme,
+    );
+
+    let mut hint = Label::default()
+        .text("Type path/name. Up/Down move, Enter accept, Tab complete, Esc close")
+        .alignment(Alignment::Left)
+        .foreground(theme.base.text_muted)
+        .background(dialog_surface(theme));
+    hint.view(frame, chunks[1]);
+
+    let mut rows = TableBuilder::default();
+    for suggestion in &picker.suggestions {
+        let kind = match suggestion.kind {
+            crate::app::RepoSuggestionKind::KnownRepo { .. } => "Repo",
+            crate::app::RepoSuggestionKind::FolderPath => "Folder",
+        };
+        rows.add_col(TextSpan::from(kind.to_string()))
+            .add_col(TextSpan::from(suggestion.label.clone()))
+            .add_col(TextSpan::from(suggestion.value.clone()))
+            .add_row();
+    }
+
+    if picker.suggestions.is_empty() {
+        rows.add_col(TextSpan::from(""))
+            .add_col(TextSpan::from("No matching folders or repositories"))
+            .add_col(TextSpan::from(""))
+            .add_row();
+    }
+
+    let selected = picker
+        .selected_index
+        .min(picker.suggestions.len().saturating_sub(1));
+    let mut table = Table::default()
+        .title("Suggestions", Alignment::Left)
+        .borders(dialog_border(theme))
+        .foreground(theme.base.text)
+        .background(dialog_surface(theme))
+        .highlighted_color(theme.interactive.focus)
+        .highlighted_str("> ")
+        .headers(["Type", "Name", "Path"])
+        .widths(&[12, 24, 64])
+        .scroll(true)
+        .table(rows.build())
+        .selected_line(selected)
+        .inactive(Style::default().fg(theme.base.text_muted));
+    table.attr(Attribute::Focus, AttrValue::Flag(true));
+    table.view(frame, chunks[2]);
 }
 
 fn tasks_for_category(app: &App, category_id: uuid::Uuid) -> Vec<Task> {
