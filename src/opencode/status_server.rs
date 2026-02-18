@@ -1,16 +1,14 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
+use reqwest::Client;
 use reqwest::StatusCode;
-use reqwest::blocking::Client;
 use serde_json::Value;
 use urlencoding::encode;
 
 use crate::types::{
     SessionState, SessionStatus, SessionStatusError, SessionStatusSource, SessionTodoItem,
 };
-
-use super::StatusProvider;
 
 #[derive(Debug, Clone)]
 pub struct ServerStatusProvider {
@@ -91,19 +89,20 @@ impl ServerStatusProvider {
         format!("{}/session/{}/todo", self.base_url(), encode(session_id))
     }
 
-    pub fn list_all_sessions(&self) -> Result<Vec<(String, String)>, SessionStatusError> {
-        let records = self.list_all_session_records()?;
+    pub async fn list_all_sessions(&self) -> Result<Vec<(String, String)>, SessionStatusError> {
+        let records = self.list_all_session_records().await?;
         Ok(records
             .into_iter()
             .map(|record| (record.session_id, record.directory))
             .collect())
     }
 
-    pub fn list_all_session_records(&self) -> Result<Vec<SessionRecord>, SessionStatusError> {
+    pub async fn list_all_session_records(&self) -> Result<Vec<SessionRecord>, SessionStatusError> {
         let response = self
             .client
             .get(self.session_url())
             .send()
+            .await
             .map_err(|err| map_reqwest_error(err, "SERVER_CONNECT_FAILED"))?;
 
         let status_code = response.status();
@@ -122,34 +121,35 @@ impl ServerStatusProvider {
 
         let body = response
             .text()
+            .await
             .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
 
         parse_session_records_body(&body)
     }
 
-    pub fn fetch_session_parent_map(
+    pub async fn fetch_session_parent_map(
         &self,
     ) -> Result<HashMap<String, Option<String>>, SessionStatusError> {
-        let records = self.list_all_session_records()?;
+        let records = self.list_all_session_records().await?;
         Ok(records
             .into_iter()
             .map(|record| (record.session_id, record.parent_session_id))
             .collect())
     }
 
-    pub fn fetch_all_statuses(
+    pub async fn fetch_all_statuses(
         &self,
         fetched_at: SystemTime,
         directory: Option<&str>,
     ) -> Result<HashMap<String, SessionStatus>, SessionStatusError> {
-        let status_matches = self.fetch_status_matches(fetched_at, directory)?;
+        let status_matches = self.fetch_status_matches(fetched_at, directory).await?;
         Ok(status_matches
             .into_iter()
             .map(|status_match| (status_match.session_id, status_match.status))
             .collect())
     }
 
-    pub fn fetch_status_matches(
+    pub async fn fetch_status_matches(
         &self,
         fetched_at: SystemTime,
         directory: Option<&str>,
@@ -168,6 +168,7 @@ impl ServerStatusProvider {
             .client
             .get(status_url)
             .send()
+            .await
             .map_err(|err| map_reqwest_error(err, "SERVER_CONNECT_FAILED"))?;
 
         let status_code = response.status();
@@ -186,12 +187,13 @@ impl ServerStatusProvider {
 
         let body = response
             .text()
+            .await
             .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
 
         parse_status_matches_body(&body, fetched_at)
     }
 
-    pub fn fetch_session_todo(
+    pub async fn fetch_session_todo(
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionTodoItem>, SessionStatusError> {
@@ -199,6 +201,7 @@ impl ServerStatusProvider {
             .client
             .get(self.session_todo_url(session_id))
             .send()
+            .await
             .map_err(|err| map_reqwest_error(err, "SERVER_CONNECT_FAILED"))?;
 
         let status_code = response.status();
@@ -221,47 +224,10 @@ impl ServerStatusProvider {
 
         let body = response
             .text()
+            .await
             .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
 
         parse_session_todo_body(&body)
-    }
-}
-
-impl StatusProvider for ServerStatusProvider {
-    fn get_status(&self, session_id: &str) -> SessionStatus {
-        self.list_statuses(&[session_id.to_string()])
-            .into_iter()
-            .next()
-            .map(|(_, status)| status)
-            .unwrap_or_else(|| status_with_error(SystemTime::now(), missing_error(session_id)))
-    }
-
-    fn list_statuses(&self, session_ids: &[String]) -> Vec<(String, SessionStatus)> {
-        if session_ids.is_empty() {
-            return Vec::new();
-        }
-
-        let fetched_at = SystemTime::now();
-        match self.fetch_all_statuses(fetched_at, None) {
-            Ok(status_map) => session_ids
-                .iter()
-                .map(|session_id| {
-                    let status = status_map.get(session_id).cloned().unwrap_or_else(|| {
-                        status_with_error(fetched_at, missing_error(session_id))
-                    });
-                    (session_id.clone(), status)
-                })
-                .collect(),
-            Err(err) => session_ids
-                .iter()
-                .map(|session_id| {
-                    (
-                        session_id.clone(),
-                        status_with_error(fetched_at, err.clone()),
-                    )
-                })
-                .collect(),
-        }
     }
 }
 
@@ -443,7 +409,7 @@ fn parse_session_state(value: &Value) -> Result<SessionState, &'static str> {
             return match typ {
                 "idle" => Ok(SessionState::Idle),
                 "busy" => Ok(SessionState::Running),
-                "retry" => Ok(SessionState::Waiting),
+                "retry" => Ok(SessionState::Idle),
                 _ => Err("unrecognized session type value"),
             };
         }
@@ -461,30 +427,11 @@ fn parse_session_state(value: &Value) -> Result<SessionState, &'static str> {
 }
 
 fn parse_state_str(state: &str) -> Result<SessionState, &'static str> {
-    let normalized = state.trim().to_ascii_lowercase();
-    match normalized.as_str() {
+    match state.trim().to_ascii_lowercase().as_str() {
         "running" | "active" | "thinking" | "processing" => Ok(SessionState::Running),
-        "waiting" | "blocked" | "prompt" | "paused" => Ok(SessionState::Waiting),
-        "idle" | "ready" => Ok(SessionState::Idle),
-        "dead" | "stopped" | "offline" | "completed" => Ok(SessionState::Dead),
-        "unknown" => Ok(SessionState::Idle),
+        "waiting" | "blocked" | "prompt" | "paused" | "idle" | "ready" | "dead" | "stopped"
+        | "offline" | "completed" | "unknown" => Ok(SessionState::Idle),
         _ => Err("unrecognized session state value"),
-    }
-}
-
-fn status_with_error(fetched_at: SystemTime, error: SessionStatusError) -> SessionStatus {
-    SessionStatus {
-        state: SessionState::Idle,
-        source: SessionStatusSource::None,
-        fetched_at,
-        error: Some(error),
-    }
-}
-
-fn missing_error(session_id: &str) -> SessionStatusError {
-    SessionStatusError {
-        code: "SERVER_STATUS_MISSING".to_string(),
-        message: format!("/session/status did not include session id {session_id}"),
     }
 }
 
@@ -503,73 +450,78 @@ fn map_reqwest_error(err: reqwest::Error, default_code: &str) -> SessionStatusEr
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Read, Write};
-    use std::net::TcpListener;
-    use std::thread;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     use super::*;
 
-    #[test]
-    fn list_statuses_server_success_marks_server_source() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_statuses_server_success_marks_server_source() {
         let port = spawn_single_response_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"sid-1\":{\"state\":\"running\"},\"sid-2\":\"idle\"}".to_string(),
-        );
+        )
+        .await;
         let provider = ServerStatusProvider::new(ServerStatusConfig {
             port,
             request_timeout: Duration::from_millis(500),
             ..ServerStatusConfig::default()
         });
 
-        let results = provider.list_statuses(&["sid-1".to_string(), "sid-2".to_string()]);
+        let results = provider
+            .fetch_all_statuses(SystemTime::UNIX_EPOCH, None)
+            .await
+            .expect("status fetch should succeed");
 
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].1.state, SessionState::Running);
-        assert_eq!(results[0].1.source, SessionStatusSource::Server);
-        assert!(results[0].1.error.is_none());
-        assert_eq!(results[1].1.state, SessionState::Idle);
-        assert_eq!(results[1].1.source, SessionStatusSource::Server);
-        assert!(results[1].1.error.is_none());
+        assert_eq!(results["sid-1"].state, SessionState::Running);
+        assert_eq!(results["sid-1"].source, SessionStatusSource::Server);
+        assert!(results["sid-1"].error.is_none());
+        assert_eq!(results["sid-2"].state, SessionState::Idle);
+        assert_eq!(results["sid-2"].source, SessionStatusSource::Server);
+        assert!(results["sid-2"].error.is_none());
     }
 
-    #[test]
-    fn list_statuses_partial_response_marks_missing_entries() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_statuses_partial_response_marks_missing_entries() {
         let port = spawn_single_response_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"sid-1\":{\"state\":\"running\"}}".to_string(),
-        );
+        )
+        .await;
         let provider = ServerStatusProvider::new(ServerStatusConfig {
             port,
             request_timeout: Duration::from_millis(500),
             ..ServerStatusConfig::default()
         });
 
-        let results = provider.list_statuses(&["sid-1".to_string(), "sid-2".to_string()]);
+        let results = provider
+            .fetch_all_statuses(SystemTime::UNIX_EPOCH, None)
+            .await
+            .expect("status fetch should succeed");
 
-        assert_eq!(results[0].1.source, SessionStatusSource::Server);
-        assert!(results[0].1.error.is_none());
-
-        let missing = &results[1].1;
-        assert_eq!(missing.source, SessionStatusSource::None);
-        assert_eq!(missing.state, SessionState::Idle);
-        assert_eq!(
-            missing.error.as_ref().map(|err| err.code.as_str()),
-            Some("SERVER_STATUS_MISSING")
-        );
+        assert_eq!(results["sid-1"].source, SessionStatusSource::Server);
+        assert!(results["sid-1"].error.is_none());
+        assert!(!results.contains_key("sid-2"));
     }
 
-    #[test]
-    fn list_statuses_timeout_sets_timeout_error() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listener should bind");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_statuses_timeout_sets_timeout_error() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("listener should bind");
         let port = listener
             .local_addr()
             .expect("listener should have local addr")
             .port();
 
-        thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("server should accept one socket");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("server should accept one socket");
             let mut request = [0u8; 512];
-            let _ = stream.read(&mut request);
-            thread::sleep(Duration::from_millis(200));
-            let _ = stream.write_all(b"");
+            let _ = stream.read(&mut request).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = stream.write_all(b"").await;
         });
 
         let provider = ServerStatusProvider::new(ServerStatusConfig {
@@ -578,42 +530,38 @@ mod tests {
             ..ServerStatusConfig::default()
         });
 
-        let results = provider.list_statuses(&["sid-1".to_string()]);
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1.source, SessionStatusSource::None);
-        assert_eq!(
-            results[0].1.error.as_ref().map(|err| err.code.as_str()),
-            Some("SERVER_TIMEOUT")
-        );
+        let err = provider
+            .fetch_all_statuses(SystemTime::UNIX_EPOCH, None)
+            .await
+            .expect_err("status fetch should time out");
+        assert_eq!(Some(err.code.as_str()), Some("SERVER_TIMEOUT"));
     }
 
-    #[test]
-    fn list_statuses_auth_error_sets_auth_code() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_statuses_auth_error_sets_auth_code() {
         let port = spawn_single_response_server(
             "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"unauthorized\"}".to_string(),
-        );
+        )
+        .await;
         let provider = ServerStatusProvider::new(ServerStatusConfig {
             port,
             request_timeout: Duration::from_millis(500),
             ..ServerStatusConfig::default()
         });
 
-        let results = provider.list_statuses(&["sid-1".to_string()]);
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1.source, SessionStatusSource::None);
-        assert_eq!(
-            results[0].1.error.as_ref().map(|err| err.code.as_str()),
-            Some("SERVER_AUTH_ERROR")
-        );
+        let err = provider
+            .fetch_all_statuses(SystemTime::UNIX_EPOCH, None)
+            .await
+            .expect_err("status fetch should fail with auth");
+        assert_eq!(Some(err.code.as_str()), Some("SERVER_AUTH_ERROR"));
     }
 
-    #[test]
-    fn fetch_status_matches_parses_parent_session_id() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_status_matches_parses_parent_session_id() {
         let port = spawn_single_response_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"root\":{\"state\":\"running\"},\"sub\":{\"state\":\"idle\",\"parentSessionId\":\"root\"}}".to_string(),
-        );
+        )
+        .await;
         let provider = ServerStatusProvider::new(ServerStatusConfig {
             port,
             request_timeout: Duration::from_millis(500),
@@ -622,6 +570,7 @@ mod tests {
 
         let matches = provider
             .fetch_status_matches(SystemTime::UNIX_EPOCH, None)
+            .await
             .expect("status matches should parse");
 
         let root = matches
@@ -637,11 +586,12 @@ mod tests {
         assert_eq!(sub.parent_session_id.as_deref(), Some("root"));
     }
 
-    #[test]
-    fn list_all_session_records_parses_parent_session_id() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_all_session_records_parses_parent_session_id() {
         let port = spawn_single_response_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[{\"id\":\"root\",\"directory\":\"/repo\"},{\"id\":\"sub\",\"directory\":\"/repo\",\"parentSessionId\":\"root\"}]".to_string(),
-        );
+        )
+        .await;
         let provider = ServerStatusProvider::new(ServerStatusConfig {
             port,
             request_timeout: Duration::from_millis(500),
@@ -650,6 +600,7 @@ mod tests {
 
         let records = provider
             .list_all_session_records()
+            .await
             .expect("session records should parse");
 
         let root = records
@@ -665,11 +616,12 @@ mod tests {
         assert_eq!(sub.parent_session_id.as_deref(), Some("root"));
     }
 
-    #[test]
-    fn fetch_session_todo_parses_todo_array() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_session_todo_parses_todo_array() {
         let port = spawn_single_response_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[{\"content\":\"Write tests\",\"completed\":false},{\"title\":\"Ship release\",\"status\":\"done\"}]".to_string(),
-        );
+        )
+        .await;
         let provider = ServerStatusProvider::new(ServerStatusConfig {
             port,
             request_timeout: Duration::from_millis(500),
@@ -678,6 +630,7 @@ mod tests {
 
         let todos = provider
             .fetch_session_todo("sid-1")
+            .await
             .expect("todo response should parse");
 
         assert_eq!(todos.len(), 2);
@@ -687,23 +640,29 @@ mod tests {
         assert!(todos[1].completed);
     }
 
-    fn spawn_single_response_server(response: String) -> u16 {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listener should bind");
+    async fn spawn_single_response_server(response: String) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("listener should bind");
         let port = listener
             .local_addr()
             .expect("listener should have local addr")
             .port();
 
-        thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("server should accept one socket");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("server should accept one socket");
             let mut request = [0u8; 512];
-            match stream.read(&mut request) {
+            match stream.read(&mut request).await {
                 Ok(_) => {}
-                Err(err) if err.kind() == io::ErrorKind::ConnectionReset => {}
+                Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => {}
                 Err(err) => panic!("server should read request: {err}"),
             }
             stream
                 .write_all(response.as_bytes())
+                .await
                 .expect("server should write response");
         });
 

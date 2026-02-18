@@ -356,8 +356,16 @@ fn ensure_success(output: &std::process::Output, operation: &str) -> Result<()> 
 mod tests {
     use super::*;
     use std::process::Command;
-    use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn sleep_for(duration: Duration) {
+        if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+        {
+            runtime.block_on(tokio::time::sleep(duration));
+        }
+    }
 
     struct SessionCleanup {
         name: String,
@@ -383,7 +391,7 @@ mod tests {
             if tmux_session_exists(session_name) {
                 return true;
             }
-            thread::sleep(Duration::from_millis(50));
+            sleep_for(Duration::from_millis(50));
         }
         false
     }
@@ -394,7 +402,7 @@ mod tests {
             if let Some(pid) = tmux_get_pane_pid(session_name) {
                 return Some(pid);
             }
-            thread::sleep(Duration::from_millis(50));
+            sleep_for(Duration::from_millis(50));
         }
         None
     }

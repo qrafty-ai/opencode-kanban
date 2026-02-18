@@ -41,7 +41,8 @@ struct Cli {
     theme: Option<String>,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let log_path = init_logging().expect("Failed to initialize logging");
     install_panic_hook_with_log(log_path.clone());
 

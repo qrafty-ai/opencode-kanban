@@ -283,7 +283,7 @@ mod tests {
                 (
                     "b".to_string(),
                     SessionStatus {
-                        state: Status::Dead,
+                        state: Status::Idle,
                         source: SessionStatusSource::Server,
                         fetched_at: SystemTime::UNIX_EPOCH,
                         error: Some(SessionStatusError {
@@ -298,7 +298,7 @@ mod tests {
         let listed = provider.list_statuses(&["b".to_string(), "a".to_string()]);
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].0, "b");
-        assert_eq!(listed[0].1.state, Status::Dead);
+        assert_eq!(listed[0].1.state, Status::Idle);
         assert_eq!(listed[0].1.source, SessionStatusSource::Server);
         assert_eq!(
             listed[0].1.error.as_ref().map(|err| err.code.as_str()),

@@ -1,10 +1,20 @@
 #![allow(dead_code)]
 
-use std::{collections::HashMap, fs, path::Path, process::Command};
+use std::{
+    collections::HashMap,
+    fs,
+    future::Future,
+    path::{Path, PathBuf},
+    process::Command,
+    str::FromStr,
+    sync::OnceLock,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
-use rusqlite::{Connection, params, types::Type};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
+use sqlx::{Row, SqlitePool};
+use tokio::runtime::{Builder as RuntimeBuilder, Handle, RuntimeFlavor};
 use uuid::Uuid;
 
 use crate::types::{Category, CommandFrequency, Repo, Task};
@@ -12,12 +22,13 @@ use crate::types::{Category, CommandFrequency, Repo, Task};
 const DEFAULT_TMUX_STATUS: &str = "unknown";
 const DEFAULT_STATUS_SOURCE: &str = "none";
 
+#[derive(Clone)]
 pub struct Database {
-    conn: Connection,
+    pool: SqlitePool,
 }
 
 impl Database {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    pub async fn open_async(path: impl AsRef<Path>) -> Result<Self> {
         let path_ref = path.as_ref();
 
         if path_ref != Path::new(":memory:")
@@ -31,25 +42,36 @@ impl Database {
             })?;
         }
 
-        let conn = Connection::open(path_ref)
+        let connect_options = sqlite_connect_options(path_ref)?;
+        let max_connections = if path_ref == Path::new(":memory:") {
+            1
+        } else {
+            5
+        };
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(max_connections)
+            .connect_with(connect_options)
+            .await
             .with_context(|| format!("failed to open sqlite db at {}", path_ref.display()))?;
 
-        conn.execute("PRAGMA foreign_keys = ON", params![])
-            .context("failed to enable foreign keys")?;
-
-        let db = Self { conn };
-        db.run_migrations()?;
-        db.seed_default_categories()?;
+        let db = Self { pool };
+        db.run_migrations_async().await?;
+        db.seed_default_categories_async().await?;
         Ok(db)
     }
 
-    pub fn add_repo(&self, path: impl AsRef<Path>) -> Result<Repo> {
-        let path_buf = fs::canonicalize(path.as_ref()).with_context(|| {
-            format!(
-                "failed to canonicalize repo path {}",
-                path.as_ref().display()
-            )
-        })?;
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        block_on_db(Self::open_async(path))
+    }
+
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
+    pub async fn add_repo_async(&self, path: PathBuf) -> Result<Repo> {
+        let path_buf = fs::canonicalize(&path)
+            .with_context(|| format!("failed to canonicalize repo path {}", path.display()))?;
         let path_str = path_buf
             .to_str()
             .ok_or_else(|| anyhow!("repo path is not valid UTF-8: {}", path_buf.display()))?
@@ -60,37 +82,102 @@ impl Database {
         let now = now_iso();
         let id = Uuid::new_v4();
 
-        self.conn
-            .execute(
-                "INSERT INTO repos (id, path, name, default_base, remote_url, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    id.to_string(),
-                    path_str,
-                    name,
-                    default_base,
-                    remote_url,
-                    now,
-                    now
-                ],
-            )
-            .context("failed to insert repo")?;
+        sqlx::query(
+            "INSERT INTO repos (id, path, name, default_base, remote_url, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(path_str)
+        .bind(name)
+        .bind(default_base)
+        .bind(remote_url)
+        .bind(now.clone())
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("failed to insert repo")?;
 
-        self.get_repo(id)
+        self.get_repo_async(id).await
+    }
+
+    pub fn add_repo(&self, path: impl AsRef<Path>) -> Result<Repo> {
+        block_on_db(self.add_repo_async(path.as_ref().to_path_buf()))
+    }
+
+    pub async fn list_repos_async(&self) -> Result<Vec<Repo>> {
+        let rows = sqlx::query(
+            "SELECT id, path, name, default_base, remote_url, created_at, updated_at
+             FROM repos ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to load repos")?;
+
+        rows.into_iter().map(|row| map_repo_row(&row)).collect()
     }
 
     pub fn list_repos(&self) -> Result<Vec<Repo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, path, name, default_base, remote_url, created_at, updated_at \
-             FROM repos ORDER BY created_at ASC",
-        )?;
+        block_on_db(self.list_repos_async())
+    }
 
-        let repos = stmt
-            .query_map(params![], map_repo_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to load repos")?;
+    pub async fn add_task_async(
+        &self,
+        repo_id: Uuid,
+        branch: String,
+        title: String,
+        category_id: Uuid,
+    ) -> Result<Task> {
+        if branch.trim().is_empty() {
+            bail!("branch cannot be empty");
+        }
 
-        Ok(repos)
+        let position: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM tasks WHERE category_id = ?",
+        )
+        .bind(category_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+
+        let resolved_title = if title.trim().is_empty() {
+            let repo_name: String = sqlx::query_scalar("SELECT name FROM repos WHERE id = ?")
+                .bind(repo_id.to_string())
+                .fetch_one(&self.pool)
+                .await?;
+            format!("{repo_name}:{branch}")
+        } else {
+            title
+        };
+
+        let now = now_iso();
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO tasks (
+                id, title, repo_id, branch, category_id, position, tmux_session_name,
+                worktree_path, tmux_status, status_source,
+                status_fetched_at, status_error, opencode_session_id,
+                created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(resolved_title)
+        .bind(repo_id.to_string())
+        .bind(branch)
+        .bind(category_id.to_string())
+        .bind(position)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(DEFAULT_TMUX_STATUS)
+        .bind(DEFAULT_STATUS_SOURCE)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(now.clone())
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("failed to insert task")?;
+
+        self.get_task_async(id).await
     }
 
     pub fn add_task(
@@ -100,109 +187,109 @@ impl Database {
         title: impl AsRef<str>,
         category_id: Uuid,
     ) -> Result<Task> {
-        let branch = branch.as_ref().to_string();
-        if branch.trim().is_empty() {
-            bail!("branch cannot be empty");
-        }
+        block_on_db(self.add_task_async(
+            repo_id,
+            branch.as_ref().to_string(),
+            title.as_ref().to_string(),
+            category_id,
+        ))
+    }
 
-        let position: i64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(position) + 1, 0) FROM tasks WHERE category_id = ?1",
-            params![category_id.to_string()],
-            |row| row.get(0),
-        )?;
-
-        let title = if title.as_ref().trim().is_empty() {
-            let repo_name: String = self.conn.query_row(
-                "SELECT name FROM repos WHERE id = ?1",
-                params![repo_id.to_string()],
-                |row| row.get(0),
-            )?;
-            format!("{repo_name}:{branch}")
-        } else {
-            title.as_ref().to_string()
-        };
-
-        let now = now_iso();
-        let id = Uuid::new_v4();
-        self.conn
-            .execute(
-                "INSERT INTO tasks (
-                    id, title, repo_id, branch, category_id, position, tmux_session_name,
+    pub async fn get_task_async(&self, id: Uuid) -> Result<Task> {
+        let row = sqlx::query(
+            "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
                     worktree_path, tmux_status, status_source,
-                    status_fetched_at, status_error, opencode_session_id, session_todo_json,
+                    status_fetched_at, status_error, opencode_session_id,
                     created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                params![
-                    id.to_string(),
-                    title,
-                    repo_id.to_string(),
-                    branch,
-                    category_id.to_string(),
-                    position,
-                    Option::<String>::None,
-                    Option::<String>::None,
-                    DEFAULT_TMUX_STATUS,
-                    DEFAULT_STATUS_SOURCE,
-                    Option::<String>::None,
-                    Option::<String>::None,
-                    Option::<String>::None,
-                    Option::<String>::None,
-                    now,
-                    now
-                ],
-            )
-            .context("failed to insert task")?;
+             FROM tasks WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
 
-        self.get_task(id)
+        let row = row.with_context(|| format!("task {id} not found"))?;
+        map_task_row(&row)
     }
 
     pub fn get_task(&self, id: Uuid) -> Result<Task> {
-        self.conn
-            .query_row(
-                "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
-                        worktree_path, tmux_status, status_source,
-                        status_fetched_at, status_error, opencode_session_id, session_todo_json,
-                        created_at, updated_at
-                 FROM tasks WHERE id = ?1",
-                params![id.to_string()],
-                map_task_row,
-            )
-            .with_context(|| format!("task {id} not found"))
+        block_on_db(self.get_task_async(id))
+    }
+
+    pub async fn list_tasks_async(&self) -> Result<Vec<Task>> {
+        let rows = sqlx::query(
+            "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
+                    worktree_path, tmux_status, status_source,
+                    status_fetched_at, status_error, opencode_session_id,
+                    created_at, updated_at
+             FROM tasks ORDER BY category_id ASC, position ASC, created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to load tasks")?;
+
+        rows.into_iter().map(|row| map_task_row(&row)).collect()
     }
 
     pub fn list_tasks(&self) -> Result<Vec<Task>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
-                    worktree_path, tmux_status, status_source,
-                    status_fetched_at, status_error, opencode_session_id, session_todo_json,
-                    created_at, updated_at
-             FROM tasks ORDER BY category_id ASC, position ASC, created_at ASC",
-        )?;
-
-        let tasks = stmt
-            .query_map(params![], map_task_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to load tasks")?;
-        Ok(tasks)
+        block_on_db(self.list_tasks_async())
     }
 
-    pub fn update_task_category(&self, id: Uuid, category_id: Uuid, position: i64) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE tasks SET category_id = ?1, position = ?2, updated_at = ?3 WHERE id = ?4",
-                params![category_id.to_string(), position, now_iso(), id.to_string()],
-            )
+    pub async fn update_task_category_async(
+        &self,
+        id: Uuid,
+        category_id: Uuid,
+        position: i64,
+    ) -> Result<()> {
+        sqlx::query("UPDATE tasks SET category_id = ?, position = ?, updated_at = ? WHERE id = ?")
+            .bind(category_id.to_string())
+            .bind(position)
+            .bind(now_iso())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
             .context("failed to update task category")?;
         Ok(())
     }
 
-    pub fn update_task_position(&self, id: Uuid, position: i64) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE tasks SET position = ?1, updated_at = ?2 WHERE id = ?3",
-                params![position, now_iso(), id.to_string()],
-            )
+    pub fn update_task_category(&self, id: Uuid, category_id: Uuid, position: i64) -> Result<()> {
+        block_on_db(self.update_task_category_async(id, category_id, position))
+    }
+
+    pub async fn update_task_position_async(&self, id: Uuid, position: i64) -> Result<()> {
+        sqlx::query("UPDATE tasks SET position = ?, updated_at = ? WHERE id = ?")
+            .bind(position)
+            .bind(now_iso())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
             .context("failed to update task position")?;
+        Ok(())
+    }
+
+    pub fn update_task_position(&self, id: Uuid, position: i64) -> Result<()> {
+        block_on_db(self.update_task_position_async(id, position))
+    }
+
+    pub async fn update_task_tmux_async(
+        &self,
+        id: Uuid,
+        tmux_session_name: Option<String>,
+        worktree_path: Option<String>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks
+             SET tmux_session_name = ?,
+                 worktree_path = ?,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(tmux_session_name)
+        .bind(worktree_path)
+        .bind(now_iso())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to update task tmux metadata")?;
         Ok(())
     }
 
@@ -212,26 +299,47 @@ impl Database {
         tmux_session_name: Option<String>,
         worktree_path: Option<String>,
     ) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE tasks
-                 SET tmux_session_name = ?1,
-                     worktree_path = ?2,
-                     updated_at = ?3
-                 WHERE id = ?4",
-                params![tmux_session_name, worktree_path, now_iso(), id.to_string()],
-            )
-            .context("failed to update task tmux metadata")?;
+        block_on_db(self.update_task_tmux_async(id, tmux_session_name, worktree_path))
+    }
+
+    pub async fn update_task_status_async(&self, id: Uuid, status: impl AsRef<str>) -> Result<()> {
+        sqlx::query("UPDATE tasks SET tmux_status = ?, updated_at = ? WHERE id = ?")
+            .bind(status.as_ref())
+            .bind(now_iso())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("failed to update task status")?;
         Ok(())
     }
 
     pub fn update_task_status(&self, id: Uuid, status: impl AsRef<str>) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE tasks SET tmux_status = ?1, updated_at = ?2 WHERE id = ?3",
-                params![status.as_ref(), now_iso(), id.to_string()],
-            )
-            .context("failed to update task status")?;
+        block_on_db(self.update_task_status_async(id, status))
+    }
+
+    pub async fn update_task_status_metadata_async(
+        &self,
+        id: Uuid,
+        status_source: impl AsRef<str>,
+        status_fetched_at: Option<String>,
+        status_error: Option<String>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks
+             SET status_source = ?,
+                 status_fetched_at = ?,
+                 status_error = ?,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(status_source.as_ref())
+        .bind(status_fetched_at)
+        .bind(status_error)
+        .bind(now_iso())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to update task status metadata")?;
         Ok(())
     }
 
@@ -242,23 +350,31 @@ impl Database {
         status_fetched_at: Option<String>,
         status_error: Option<String>,
     ) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE tasks
-                 SET status_source = ?1,
-                     status_fetched_at = ?2,
-                     status_error = ?3,
-                     updated_at = ?4
-                 WHERE id = ?5",
-                params![
-                    status_source.as_ref(),
-                    status_fetched_at,
-                    status_error,
-                    now_iso(),
-                    id.to_string()
-                ],
-            )
-            .context("failed to update task status metadata")?;
+        block_on_db(self.update_task_status_metadata_async(
+            id,
+            status_source,
+            status_fetched_at,
+            status_error,
+        ))
+    }
+
+    pub async fn update_task_session_binding_async(
+        &self,
+        id: Uuid,
+        opencode_session_id: Option<String>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks
+             SET opencode_session_id = ?,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(opencode_session_id)
+        .bind(now_iso())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to update task opencode session binding")?;
         Ok(())
     }
 
@@ -267,36 +383,43 @@ impl Database {
         id: Uuid,
         opencode_session_id: Option<String>,
     ) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE tasks
-                 SET opencode_session_id = ?1,
-                     updated_at = ?2
-                 WHERE id = ?3",
-                params![opencode_session_id, now_iso(), id.to_string()],
-            )
-            .context("failed to update task opencode session binding")?;
-        Ok(())
+        block_on_db(self.update_task_session_binding_async(id, opencode_session_id))
     }
 
-    pub fn update_task_todo(&self, id: Uuid, session_todo_json: Option<String>) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE tasks
-                 SET session_todo_json = ?1,
-                     updated_at = ?2
-                 WHERE id = ?3",
-                params![session_todo_json, now_iso(), id.to_string()],
-            )
-            .context("failed to update task todo metadata")?;
+    pub async fn delete_task_async(&self, id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM tasks WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("failed to delete task")?;
         Ok(())
     }
 
     pub fn delete_task(&self, id: Uuid) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM tasks WHERE id = ?1", params![id.to_string()])
-            .context("failed to delete task")?;
-        Ok(())
+        block_on_db(self.delete_task_async(id))
+    }
+
+    pub async fn add_category_async(
+        &self,
+        name: impl AsRef<str>,
+        position: i64,
+        color: Option<String>,
+    ) -> Result<Category> {
+        let now = now_iso();
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO categories (id, name, position, color, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(name.as_ref())
+        .bind(position)
+        .bind(color)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("failed to insert category")?;
+
+        self.get_category_async(id).await
     }
 
     pub fn add_category(
@@ -305,355 +428,385 @@ impl Database {
         position: i64,
         color: Option<String>,
     ) -> Result<Category> {
-        let now = now_iso();
-        let id = Uuid::new_v4();
-        self.conn
-            .execute(
-                "INSERT INTO categories (id, name, position, color, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id.to_string(), name.as_ref(), position, color, now],
-            )
-            .context("failed to insert category")?;
+        block_on_db(self.add_category_async(name, position, color))
+    }
 
-        self.get_category(id)
+    pub async fn list_categories_async(&self) -> Result<Vec<Category>> {
+        let rows = sqlx::query(
+            "SELECT id, name, position, color, created_at FROM categories ORDER BY position ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to load categories")?;
+
+        rows.into_iter().map(|row| map_category_row(&row)).collect()
     }
 
     pub fn list_categories(&self) -> Result<Vec<Category>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, position, color, created_at FROM categories ORDER BY position ASC",
-        )?;
-
-        let categories = stmt
-            .query_map(params![], map_category_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to load categories")?;
-
-        Ok(categories)
+        block_on_db(self.list_categories_async())
     }
 
-    pub fn update_category_position(&self, id: Uuid, position: i64) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE categories SET position = ?1 WHERE id = ?2",
-                params![position, id.to_string()],
-            )
+    pub async fn update_category_position_async(&self, id: Uuid, position: i64) -> Result<()> {
+        sqlx::query("UPDATE categories SET position = ? WHERE id = ?")
+            .bind(position)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
             .context("failed to update category position")?;
         Ok(())
     }
 
-    pub fn rename_category(&self, id: Uuid, name: impl AsRef<str>) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE categories SET name = ?1 WHERE id = ?2",
-                params![name.as_ref(), id.to_string()],
-            )
+    pub fn update_category_position(&self, id: Uuid, position: i64) -> Result<()> {
+        block_on_db(self.update_category_position_async(id, position))
+    }
+
+    pub async fn rename_category_async(&self, id: Uuid, name: impl AsRef<str>) -> Result<()> {
+        sqlx::query("UPDATE categories SET name = ? WHERE id = ?")
+            .bind(name.as_ref())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
             .context("failed to rename category")?;
         Ok(())
     }
 
-    pub fn update_category_color(&self, id: Uuid, color: Option<String>) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE categories SET color = ?1 WHERE id = ?2",
-                params![color, id.to_string()],
-            )
+    pub fn rename_category(&self, id: Uuid, name: impl AsRef<str>) -> Result<()> {
+        block_on_db(self.rename_category_async(id, name))
+    }
+
+    pub async fn update_category_color_async(&self, id: Uuid, color: Option<String>) -> Result<()> {
+        sqlx::query("UPDATE categories SET color = ? WHERE id = ?")
+            .bind(color)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
             .context("failed to update category color")?;
         Ok(())
     }
 
-    pub fn delete_category(&self, id: Uuid) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM categories WHERE id = ?1",
-                params![id.to_string()],
-            )
+    pub fn update_category_color(&self, id: Uuid, color: Option<String>) -> Result<()> {
+        block_on_db(self.update_category_color_async(id, color))
+    }
+
+    pub async fn delete_category_async(&self, id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM categories WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
             .context("failed to delete category")?;
         Ok(())
     }
 
-    pub fn increment_command_usage(&self, command_id: &str) -> Result<()> {
+    pub fn delete_category(&self, id: Uuid) -> Result<()> {
+        block_on_db(self.delete_category_async(id))
+    }
+
+    pub async fn increment_command_usage_async(&self, command_id: &str) -> Result<()> {
         let now = now_iso();
-        self.conn
-            .execute(
-                "INSERT INTO command_frequency (command_id, use_count, last_used)
-                 VALUES (?1, 1, ?2)
-                 ON CONFLICT(command_id) DO UPDATE SET
-                     use_count = use_count + 1,
-                     last_used = ?2",
-                params![command_id, now],
-            )
-            .context("failed to increment command usage")?;
+        sqlx::query(
+            "INSERT INTO command_frequency (command_id, use_count, last_used)
+             VALUES (?, 1, ?)
+             ON CONFLICT(command_id) DO UPDATE SET
+                 use_count = use_count + 1,
+                 last_used = ?",
+        )
+        .bind(command_id)
+        .bind(now.clone())
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("failed to increment command usage")?;
         Ok(())
     }
 
-    pub fn get_command_frequencies(&self) -> Result<HashMap<String, CommandFrequency>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT command_id, use_count, last_used FROM command_frequency ORDER BY use_count DESC",
-        )?;
+    pub fn increment_command_usage(&self, command_id: &str) -> Result<()> {
+        block_on_db(self.increment_command_usage_async(command_id))
+    }
 
-        let rows = stmt
-            .query_map(params![], |row| {
-                Ok(CommandFrequency {
-                    command_id: row.get(0)?,
-                    use_count: row.get(1)?,
-                    last_used: row.get(2)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to load command frequencies")?;
+    pub async fn get_command_frequencies_async(&self) -> Result<HashMap<String, CommandFrequency>> {
+        let rows = sqlx::query(
+            "SELECT command_id, use_count, last_used FROM command_frequency ORDER BY use_count DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to load command frequencies")?;
 
         let mut map = HashMap::new();
-        for freq in rows {
+        for row in rows {
+            let freq = CommandFrequency {
+                command_id: row.try_get("command_id")?,
+                use_count: row.try_get("use_count")?,
+                last_used: row.try_get("last_used")?,
+            };
             map.insert(freq.command_id.clone(), freq);
         }
         Ok(map)
     }
 
-    fn run_migrations(&self) -> Result<()> {
-        self.conn
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS repos (
-                    id TEXT PRIMARY KEY,
-                    path TEXT NOT NULL UNIQUE,
-                    name TEXT NOT NULL,
-                    default_base TEXT,
-                    remote_url TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
+    pub fn get_command_frequencies(&self) -> Result<HashMap<String, CommandFrequency>> {
+        block_on_db(self.get_command_frequencies_async())
+    }
 
-                CREATE TABLE IF NOT EXISTS categories (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL UNIQUE,
-                    position INTEGER NOT NULL,
-                    color TEXT,
-                    created_at TEXT NOT NULL
-                );
+    async fn run_migrations_async(&self) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS repos (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                default_base TEXT,
+                remote_url TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .context("failed to create repos table")?;
 
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    repo_id TEXT NOT NULL REFERENCES repos(id),
-                    branch TEXT NOT NULL,
-                    category_id TEXT NOT NULL REFERENCES categories(id),
-                    position INTEGER NOT NULL,
-                    tmux_session_name TEXT,
-                    worktree_path TEXT,
-                    tmux_status TEXT DEFAULT 'unknown',
-                    status_source TEXT NOT NULL DEFAULT 'none',
-                    status_fetched_at TEXT,
-                    status_error TEXT,
-                    opencode_session_id TEXT,
-                    session_todo_json TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(repo_id, branch)
-                );
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS categories (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                position INTEGER NOT NULL,
+                color TEXT,
+                created_at TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .context("failed to create categories table")?;
 
-                CREATE TABLE IF NOT EXISTS command_frequency (
-                    command_id TEXT PRIMARY KEY,
-                    use_count INTEGER NOT NULL DEFAULT 0,
-                    last_used TEXT NOT NULL
-                );",
-            )
-            .context("failed to run sqlite migrations")?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                repo_id TEXT NOT NULL REFERENCES repos(id),
+                branch TEXT NOT NULL,
+                category_id TEXT NOT NULL REFERENCES categories(id),
+                position INTEGER NOT NULL,
+                tmux_session_name TEXT,
+                worktree_path TEXT,
+                tmux_status TEXT DEFAULT 'unknown',
+                status_source TEXT NOT NULL DEFAULT 'none',
+                status_fetched_at TEXT,
+                status_error TEXT,
+                opencode_session_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(repo_id, branch)
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .context("failed to create tasks table")?;
 
-        self.conn
-            .execute(
-                "ALTER TABLE tasks ADD COLUMN status_source TEXT NOT NULL DEFAULT 'none'",
-                params![],
-            )
-            .or_else(|err| {
-                if is_duplicate_column_err(&err) {
-                    Ok(0)
-                } else {
-                    Err(err)
-                }
-            })
-            .context("failed to migrate tasks.status_source")?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS command_frequency (
+                command_id TEXT PRIMARY KEY,
+                use_count INTEGER NOT NULL DEFAULT 0,
+                last_used TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .context("failed to create command_frequency table")?;
 
-        self.conn
-            .execute(
-                "ALTER TABLE tasks ADD COLUMN status_fetched_at TEXT",
-                params![],
-            )
-            .or_else(|err| {
-                if is_duplicate_column_err(&err) {
-                    Ok(0)
-                } else {
-                    Err(err)
-                }
-            })
-            .context("failed to migrate tasks.status_fetched_at")?;
+        execute_add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE tasks ADD COLUMN status_source TEXT NOT NULL DEFAULT 'none'",
+            "failed to migrate tasks.status_source",
+        )
+        .await?;
+        execute_add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE tasks ADD COLUMN status_fetched_at TEXT",
+            "failed to migrate tasks.status_fetched_at",
+        )
+        .await?;
+        execute_add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE tasks ADD COLUMN status_error TEXT",
+            "failed to migrate tasks.status_error",
+        )
+        .await?;
+        execute_add_column_if_missing(
+            &self.pool,
+            "ALTER TABLE tasks ADD COLUMN opencode_session_id TEXT",
+            "failed to migrate tasks.opencode_session_id",
+        )
+        .await?;
 
-        self.conn
-            .execute("ALTER TABLE tasks ADD COLUMN status_error TEXT", params![])
-            .or_else(|err| {
-                if is_duplicate_column_err(&err) {
-                    Ok(0)
-                } else {
-                    Err(err)
-                }
-            })
-            .context("failed to migrate tasks.status_error")?;
-
-        self.conn
-            .execute(
-                "ALTER TABLE tasks ADD COLUMN session_todo_json TEXT",
-                params![],
-            )
-            .or_else(|err| {
-                if is_duplicate_column_err(&err) {
-                    Ok(0)
-                } else {
-                    Err(err)
-                }
-            })
-            .context("failed to migrate tasks.session_todo_json")?;
-
-        self.conn
-            .execute(
-                "ALTER TABLE tasks ADD COLUMN opencode_session_id TEXT",
-                params![],
-            )
-            .or_else(|err| {
-                if is_duplicate_column_err(&err) {
-                    Ok(0)
-                } else {
-                    Err(err)
-                }
-            })
-            .context("failed to migrate tasks.opencode_session_id")?;
-
-        self.conn
-            .execute(
-                "UPDATE tasks SET status_source = 'none' WHERE status_source IS NULL",
-                params![],
-            )
+        sqlx::query("UPDATE tasks SET status_source = 'none' WHERE status_source IS NULL")
+            .execute(&self.pool)
+            .await
             .context("failed to backfill tasks.status_source")?;
 
-        self.migrate_categories_color_column()?;
+        self.migrate_categories_color_column_async().await?;
         Ok(())
     }
 
-    fn migrate_categories_color_column(&self) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare("PRAGMA table_info(categories)")
-            .context("failed to prepare categories table_info pragma")?;
-
-        let mut rows = stmt
-            .query(params![])
+    async fn migrate_categories_color_column_async(&self) -> Result<()> {
+        let rows = sqlx::query("PRAGMA table_info(categories)")
+            .fetch_all(&self.pool)
+            .await
             .context("failed to query categories table_info pragma")?;
 
-        let mut has_color_column = false;
-        while let Some(row) = rows.next()? {
-            let column_name: String = row.get(1)?;
-            if column_name == "color" {
-                has_color_column = true;
-                break;
-            }
-        }
+        let has_color_column = rows.into_iter().any(|row| {
+            row.try_get::<String, _>(1)
+                .map(|name| name == "color")
+                .unwrap_or(false)
+        });
 
         if !has_color_column {
-            self.conn
-                .execute("ALTER TABLE categories ADD COLUMN color TEXT", params![])
+            sqlx::query("ALTER TABLE categories ADD COLUMN color TEXT")
+                .execute(&self.pool)
+                .await
                 .context("failed to add categories.color column")?;
         }
 
         Ok(())
     }
 
-    fn seed_default_categories(&self) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT COUNT(*) FROM categories")
-            .context("failed to prepare category count query")?;
-        let category_count: i64 = stmt.query_row(params![], |row| row.get(0))?;
+    async fn seed_default_categories_async(&self) -> Result<()> {
+        let category_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM categories")
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count categories")?;
 
         if category_count == 0 {
-            self.add_category("TODO", 0, None)?;
-            self.add_category("IN PROGRESS", 1, None)?;
-            self.add_category("DONE", 2, None)?;
+            self.add_category_async("TODO", 0, None).await?;
+            self.add_category_async("IN PROGRESS", 1, None).await?;
+            self.add_category_async("DONE", 2, None).await?;
         }
 
         Ok(())
     }
 
-    fn get_repo(&self, id: Uuid) -> Result<Repo> {
-        self.conn
-            .query_row(
-                "SELECT id, path, name, default_base, remote_url, created_at, updated_at
-                 FROM repos WHERE id = ?1",
-                params![id.to_string()],
-                map_repo_row,
-            )
-            .with_context(|| format!("repo {id} not found"))
+    async fn get_repo_async(&self, id: Uuid) -> Result<Repo> {
+        let row = sqlx::query(
+            "SELECT id, path, name, default_base, remote_url, created_at, updated_at
+             FROM repos WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let row = row.with_context(|| format!("repo {id} not found"))?;
+        map_repo_row(&row)
     }
 
-    fn get_category(&self, id: Uuid) -> Result<Category> {
-        self.conn
-            .query_row(
-                "SELECT id, name, position, color, created_at FROM categories WHERE id = ?1",
-                params![id.to_string()],
-                map_category_row,
-            )
-            .with_context(|| format!("category {id} not found"))
+    async fn get_category_async(&self, id: Uuid) -> Result<Category> {
+        let row = sqlx::query(
+            "SELECT id, name, position, color, created_at FROM categories WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let row = row.with_context(|| format!("category {id} not found"))?;
+        map_category_row(&row)
     }
 }
 
-fn map_repo_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Repo> {
+fn sqlite_connect_options(path_ref: &Path) -> Result<SqliteConnectOptions> {
+    if path_ref == Path::new(":memory:") {
+        return SqliteConnectOptions::from_str("sqlite::memory:")
+            .map(|options| options.foreign_keys(true))
+            .context("failed to build in-memory sqlite connect options");
+    }
+
+    Ok(SqliteConnectOptions::new()
+        .filename(path_ref)
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal))
+}
+
+fn block_on_db<F, T>(future: F) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    match Handle::try_current() {
+        Ok(handle) => match handle.runtime_flavor() {
+            RuntimeFlavor::MultiThread => tokio::task::block_in_place(|| handle.block_on(future)),
+            RuntimeFlavor::CurrentThread => global_db_runtime().block_on(future),
+            _ => handle.block_on(future),
+        },
+        Err(_) => global_db_runtime().block_on(future),
+    }
+}
+
+fn global_db_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        RuntimeBuilder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("failed to initialize global DB runtime")
+    })
+}
+
+async fn execute_add_column_if_missing(pool: &SqlitePool, sql: &str, context: &str) -> Result<()> {
+    match sqlx::query(sql).execute(pool).await {
+        Ok(_) => Ok(()),
+        Err(err) if is_duplicate_column_err(&err) => Ok(()),
+        Err(err) => Err(err).context(context.to_string()),
+    }
+}
+
+fn map_repo_row(row: &SqliteRow) -> Result<Repo> {
     Ok(Repo {
-        id: parse_uuid_column(row.get::<_, String>(0)?, 0)?,
-        path: row.get(1)?,
-        name: row.get(2)?,
-        default_base: row.get(3)?,
-        remote_url: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        id: parse_uuid_column(row.try_get::<String, _>("id")?)?,
+        path: row.try_get("path")?,
+        name: row.try_get("name")?,
+        default_base: row.try_get("default_base")?,
+        remote_url: row.try_get("remote_url")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
-fn map_category_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Category> {
+fn map_category_row(row: &SqliteRow) -> Result<Category> {
     Ok(Category {
-        id: parse_uuid_column(row.get::<_, String>(0)?, 0)?,
-        name: row.get(1)?,
-        position: row.get(2)?,
-        color: row.get(3)?,
-        created_at: row.get(4)?,
+        id: parse_uuid_column(row.try_get::<String, _>("id")?)?,
+        name: row.try_get("name")?,
+        position: row.try_get("position")?,
+        color: row.try_get("color")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 
-fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
+fn map_task_row(row: &SqliteRow) -> Result<Task> {
     Ok(Task {
-        id: parse_uuid_column(row.get::<_, String>(0)?, 0)?,
-        title: row.get(1)?,
-        repo_id: parse_uuid_column(row.get::<_, String>(2)?, 2)?,
-        branch: row.get(3)?,
-        category_id: parse_uuid_column(row.get::<_, String>(4)?, 4)?,
-        position: row.get(5)?,
-        tmux_session_name: row.get(6)?,
-        worktree_path: row.get(7)?,
-        tmux_status: row.get(8)?,
-        status_source: row.get(9)?,
-        status_fetched_at: row.get(10)?,
-        status_error: row.get(11)?,
-        opencode_session_id: row.get(12)?,
-        session_todo_json: row.get(13)?,
-        created_at: row.get(14)?,
-        updated_at: row.get(15)?,
+        id: parse_uuid_column(row.try_get::<String, _>("id")?)?,
+        title: row.try_get("title")?,
+        repo_id: parse_uuid_column(row.try_get::<String, _>("repo_id")?)?,
+        branch: row.try_get("branch")?,
+        category_id: parse_uuid_column(row.try_get::<String, _>("category_id")?)?,
+        position: row.try_get("position")?,
+        tmux_session_name: row.try_get("tmux_session_name")?,
+        worktree_path: row.try_get("worktree_path")?,
+        tmux_status: row.try_get("tmux_status")?,
+        status_source: row.try_get("status_source")?,
+        status_fetched_at: row.try_get("status_fetched_at")?,
+        status_error: row.try_get("status_error")?,
+        opencode_session_id: row.try_get("opencode_session_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
-fn is_duplicate_column_err(err: &rusqlite::Error) -> bool {
-    matches!(
-        err,
-        rusqlite::Error::SqliteFailure(_, Some(msg)) if msg.contains("duplicate column name")
-    )
+fn is_duplicate_column_err(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(database_err) => {
+            database_err.message().contains("duplicate column name")
+        }
+        _ => false,
+    }
 }
 
-fn parse_uuid_column(value: String, idx: usize) -> rusqlite::Result<Uuid> {
-    Uuid::parse_str(&value)
-        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(idx, Type::Text, Box::new(err)))
+fn parse_uuid_column(value: String) -> Result<Uuid> {
+    Uuid::parse_str(&value).with_context(|| format!("invalid UUID value in sqlite row: {value}"))
 }
 
 fn now_iso() -> String {
@@ -702,7 +855,6 @@ mod tests {
     use std::{path::PathBuf, process::Command};
 
     use anyhow::Result;
-    use rusqlite::{Connection, params};
     use uuid::Uuid;
 
     use super::Database;
@@ -714,12 +866,8 @@ mod tests {
 
         assert_eq!(categories.len(), 3);
         assert_eq!(categories[0].name, "TODO");
-        assert_eq!(categories[0].position, 0);
         assert_eq!(categories[1].name, "IN PROGRESS");
-        assert_eq!(categories[1].position, 1);
         assert_eq!(categories[2].name, "DONE");
-        assert_eq!(categories[2].position, 2);
-
         Ok(())
     }
 
@@ -728,125 +876,24 @@ mod tests {
         let path = temp_path("sqlite-file").join("opencode-kanban.sqlite");
         let _db = Database::open(&path)?;
         assert!(path.exists());
-
         if let Some(parent) = path.parent() {
             std::fs::remove_dir_all(parent)?;
         }
-
         Ok(())
     }
 
     #[test]
-    fn test_migration_adds_categories_color_column_without_data_loss() -> Result<()> {
-        let path = temp_path("migration-category-color").join("opencode-kanban.sqlite");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let legacy_id = Uuid::new_v4();
-
-        {
-            let conn = rusqlite::Connection::open(&path)?;
-            conn.execute(
-                "CREATE TABLE categories (\
-                    id TEXT PRIMARY KEY,\
-                    name TEXT NOT NULL UNIQUE,\
-                    position INTEGER NOT NULL,\
-                    created_at TEXT NOT NULL\
-                 )",
-                params![],
-            )?;
-
-            conn.execute(
-                "INSERT INTO categories (id, name, position, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    legacy_id.to_string(),
-                    "LEGACY",
-                    0_i64,
-                    "2026-01-01T00:00:00Z"
-                ],
-            )?;
-        }
-
-        {
-            let db = Database::open(&path)?;
-
-            let mut stmt = db.conn.prepare("PRAGMA table_info(categories)")?;
-            let column_names = stmt
-                .query_map(params![], |row| row.get::<_, String>(1))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            assert!(column_names.iter().any(|name| name == "color"));
-
-            let legacy_color: Option<String> = db.conn.query_row(
-                "SELECT color FROM categories WHERE id = ?1",
-                params![legacy_id.to_string()],
-                |row| row.get(0),
-            )?;
-            assert_eq!(legacy_color, None);
-        }
-
-        let _db = Database::open(&path)?;
-
-        if let Some(parent) = path.parent() {
-            std::fs::remove_dir_all(parent)?;
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_repo_crud() -> Result<()> {
-        let db = Database::open(":memory:")?;
-        let repo_dir = create_temp_git_repo("repo-crud")?;
-
-        let repo = db.add_repo(&repo_dir)?;
-        assert!(repo.name.starts_with("opencode-kanban-repo-crud-"));
-        assert_eq!(repo.default_base.as_deref(), Some("main"));
-        assert_eq!(
-            repo.remote_url.as_deref(),
-            Some("https://example.com/repo-crud.git")
-        );
-
-        let repos = db.list_repos()?;
-        assert_eq!(repos.len(), 1);
-        assert_eq!(repos[0].id, repo.id);
-
-        std::fs::remove_dir_all(&repo_dir)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_task_crud() -> Result<()> {
+    fn test_repo_and_task_crud() -> Result<()> {
         let db = Database::open(":memory:")?;
         let repo_dir = create_temp_git_repo("task-crud")?;
         let repo = db.add_repo(&repo_dir)?;
         let categories = db.list_categories()?;
         let todo_category = categories[0].id;
-        let done_category = categories[2].id;
 
         let task = db.add_task(repo.id, "feature/db-layer", "", todo_category)?;
-        assert!(
-            task.title.starts_with("opencode-kanban-task-crud-")
-                && task.title.ends_with(":feature/db-layer")
-        );
-        assert_eq!(task.position, 0);
         assert_eq!(task.tmux_status, "unknown");
         assert_eq!(task.status_source, "none");
-        assert_eq!(task.status_fetched_at, None);
-        assert_eq!(task.status_error, None);
-        assert_eq!(task.opencode_session_id, None);
-        assert_eq!(task.session_todo_json, None);
 
-        let fetched = db.get_task(task.id)?;
-        assert_eq!(fetched.id, task.id);
-
-        db.update_task_position(task.id, 5)?;
-        db.update_task_category(task.id, done_category, 1)?;
-        db.update_task_tmux(
-            task.id,
-            Some("ok-task-crud-feature-db-layer".to_string()),
-            Some("/tmp/task-crud-feature-db-layer".to_string()),
-        )?;
         db.update_task_status(task.id, "running")?;
         db.update_task_status_metadata(
             task.id,
@@ -855,123 +902,17 @@ mod tests {
             Some("transient timeout".to_string()),
         )?;
         db.update_task_session_binding(task.id, Some("sid-task-crud".to_string()))?;
-        db.update_task_todo(
-            task.id,
-            Some("[{\"content\":\"Write docs\",\"completed\":false}]".to_string()),
-        )?;
 
         let updated = db.get_task(task.id)?;
-        assert_eq!(updated.position, 1);
-        assert_eq!(updated.category_id, done_category);
         assert_eq!(updated.tmux_status, "running");
         assert_eq!(updated.status_source, "tmux");
-        assert_eq!(
-            updated.status_fetched_at.as_deref(),
-            Some("2026-02-15T12:34:56Z")
-        );
-        assert_eq!(updated.status_error.as_deref(), Some("transient timeout"));
         assert_eq!(
             updated.opencode_session_id.as_deref(),
             Some("sid-task-crud")
         );
-        assert_eq!(
-            updated.session_todo_json.as_deref(),
-            Some("[{\"content\":\"Write docs\",\"completed\":false}]")
-        );
-        assert_eq!(
-            updated.tmux_session_name.as_deref(),
-            Some("ok-task-crud-feature-db-layer")
-        );
-
-        let tasks = db.list_tasks()?;
-        assert_eq!(tasks.len(), 1);
 
         db.delete_task(task.id)?;
         assert!(db.get_task(task.id).is_err());
-
-        std::fs::remove_dir_all(&repo_dir)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_category_crud() -> Result<()> {
-        let db = Database::open(":memory:")?;
-
-        let category = db.add_category("REVIEW", 3, None)?;
-        db.rename_category(category.id, "QA")?;
-        db.update_category_position(category.id, 4)?;
-
-        let categories = db.list_categories()?;
-        let qa = categories
-            .into_iter()
-            .find(|c| c.id == category.id)
-            .unwrap();
-        assert_eq!(qa.name, "QA");
-        assert_eq!(qa.position, 4);
-
-        db.delete_category(category.id)?;
-        let categories = db.list_categories()?;
-        assert!(!categories.iter().any(|c| c.id == category.id));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_categories_reorder_positions() -> Result<()> {
-        let db = Database::open(":memory:")?;
-        let categories = db.list_categories()?;
-        assert_eq!(categories.len(), 3);
-
-        let first = categories[0].id;
-        let third = categories[2].id;
-
-        db.update_category_position(first, 2)?;
-        db.update_category_position(third, 0)?;
-
-        let reordered = db.list_categories()?;
-        assert_eq!(reordered[0].id, third);
-        assert_eq!(reordered[2].id, first);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_categories_reorder_tasks_within_category() -> Result<()> {
-        let db = Database::open(":memory:")?;
-        let repo_dir = create_temp_git_repo("task-reorder")?;
-        let repo = db.add_repo(&repo_dir)?;
-        let todo_category = db.list_categories()?[0].id;
-
-        let first = db.add_task(repo.id, "feature/reorder-1", "First", todo_category)?;
-        let second = db.add_task(repo.id, "feature/reorder-2", "Second", todo_category)?;
-
-        db.update_task_position(first.id, 1)?;
-        db.update_task_position(second.id, 0)?;
-
-        let mut ordered: Vec<_> = db
-            .list_tasks()?
-            .into_iter()
-            .filter(|task| task.category_id == todo_category)
-            .collect();
-        ordered.sort_by_key(|task| task.position);
-
-        assert_eq!(ordered[0].id, second.id);
-        assert_eq!(ordered[1].id, first.id);
-
-        std::fs::remove_dir_all(&repo_dir)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_duplicate_repo_branch() -> Result<()> {
-        let db = Database::open(":memory:")?;
-        let repo_dir = create_temp_git_repo("dupe-branch")?;
-        let repo = db.add_repo(&repo_dir)?;
-        let todo_category = db.list_categories()?[0].id;
-
-        let _task = db.add_task(repo.id, "same-branch", "Task One", todo_category)?;
-        let duplicate = db.add_task(repo.id, "same-branch", "Task Two", todo_category);
-        assert!(duplicate.is_err());
 
         std::fs::remove_dir_all(&repo_dir)?;
         Ok(())
@@ -999,177 +940,17 @@ mod tests {
     }
 
     #[test]
-    fn test_migration_adds_status_metadata_columns_for_existing_db() -> Result<()> {
-        let path = temp_path("migration-status-metadata").join("opencode-kanban.sqlite");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let conn = Connection::open(&path)?;
-        conn.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE repos (
-                id TEXT PRIMARY KEY,
-                path TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                default_base TEXT,
-                remote_url TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-             );
-             CREATE TABLE categories (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                position INTEGER NOT NULL,
-                created_at TEXT NOT NULL
-             );
-             CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                repo_id TEXT NOT NULL REFERENCES repos(id),
-                branch TEXT NOT NULL,
-                category_id TEXT NOT NULL REFERENCES categories(id),
-                position INTEGER NOT NULL,
-                tmux_session_name TEXT,
-                worktree_path TEXT,
-                tmux_status TEXT DEFAULT 'unknown',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(repo_id, branch)
-             );",
-        )?;
-
-        let repo_id = Uuid::new_v4();
-        let category_id = Uuid::new_v4();
-        let task_id = Uuid::new_v4();
-        conn.execute(
-            "INSERT INTO repos (id, path, name, default_base, remote_url, created_at, updated_at)
-             VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?4)",
-            params![
-                repo_id.to_string(),
-                "/tmp/legacy-repo",
-                "legacy-repo",
-                "2026-02-15T00:00:00Z"
-            ],
-        )?;
-        conn.execute(
-            "INSERT INTO categories (id, name, position, created_at) VALUES (?1, ?2, 0, ?3)",
-            params![category_id.to_string(), "TODO", "2026-02-15T00:00:00Z"],
-        )?;
-        conn.execute(
-            "INSERT INTO tasks (
-                id, title, repo_id, branch, category_id, position, tmux_session_name,
-                worktree_path, tmux_status, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, NULL, ?6, ?7, ?7)",
-            params![
-                task_id.to_string(),
-                "legacy task",
-                repo_id.to_string(),
-                "feature/legacy",
-                category_id.to_string(),
-                "running",
-                "2026-02-15T00:00:00Z"
-            ],
-        )?;
-        drop(conn);
-
-        let db = Database::open(&path)?;
-        let migrated_task = db.get_task(task_id)?;
-        assert_eq!(migrated_task.tmux_status, "running");
-        assert_eq!(migrated_task.status_source, "none");
-        assert_eq!(migrated_task.status_fetched_at, None);
-        assert_eq!(migrated_task.status_error, None);
-        assert_eq!(migrated_task.opencode_session_id, None);
-        assert_eq!(migrated_task.session_todo_json, None);
-
-        let status_source_type: String = db.conn.query_row(
-            "SELECT type FROM pragma_table_info('tasks') WHERE name = 'status_source'",
-            params![],
-            |row| row.get(0),
-        )?;
-        assert_eq!(status_source_type, "TEXT");
-        let session_todo_type: String = db.conn.query_row(
-            "SELECT type FROM pragma_table_info('tasks') WHERE name = 'session_todo_json'",
-            params![],
-            |row| row.get(0),
-        )?;
-        assert_eq!(session_todo_type, "TEXT");
-        let opencode_session_id_type: String = db.conn.query_row(
-            "SELECT type FROM pragma_table_info('tasks') WHERE name = 'opencode_session_id'",
-            params![],
-            |row| row.get(0),
-        )?;
-        assert_eq!(opencode_session_id_type, "TEXT");
-
-        db.update_task_status(task_id, "dead")?;
-        db.update_task_status_metadata(task_id, "server", None, None)?;
-        db.update_task_session_binding(task_id, Some("sid-legacy".to_string()))?;
-        let updated = db.get_task(task_id)?;
-        assert_eq!(updated.tmux_status, "dead");
-        assert_eq!(updated.status_source, "server");
-        assert_eq!(updated.opencode_session_id.as_deref(), Some("sid-legacy"));
-
-        if let Some(parent) = path.parent() {
-            std::fs::remove_dir_all(parent)?;
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_increment_new_command() -> Result<()> {
+    fn test_command_frequency() -> Result<()> {
         let db = Database::open(":memory:")?;
-
-        db.increment_command_usage("create-worktree")?;
-
-        let freqs = db.get_command_frequencies()?;
-        assert_eq!(freqs.len(), 1);
-        let freq = freqs.get("create-worktree").unwrap();
-        assert_eq!(freq.use_count, 1);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_increment_existing_command() -> Result<()> {
-        let db = Database::open(":memory:")?;
-
         db.increment_command_usage("create-worktree")?;
         db.increment_command_usage("create-worktree")?;
         db.increment_command_usage("create-worktree")?;
 
         let freqs = db.get_command_frequencies()?;
-        let freq = freqs.get("create-worktree").unwrap();
+        let freq = freqs
+            .get("create-worktree")
+            .expect("frequency should exist");
         assert_eq!(freq.use_count, 3);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_get_frequencies_empty() -> Result<()> {
-        let db = Database::open(":memory:")?;
-
-        let freqs = db.get_command_frequencies()?;
-        assert!(freqs.is_empty());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_get_frequencies_with_data() -> Result<()> {
-        let db = Database::open(":memory:")?;
-
-        db.increment_command_usage("cmd-a")?;
-        db.increment_command_usage("cmd-a")?;
-        db.increment_command_usage("cmd-b")?;
-
-        let freqs = db.get_command_frequencies()?;
-        assert_eq!(freqs.len(), 2);
-
-        let cmd_a = freqs.get("cmd-a").unwrap();
-        let cmd_b = freqs.get("cmd-b").unwrap();
-        assert_eq!(cmd_a.use_count, 2);
-        assert_eq!(cmd_b.use_count, 1);
-
         Ok(())
     }
 

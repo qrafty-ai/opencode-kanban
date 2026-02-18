@@ -6,9 +6,6 @@ use uuid::Uuid;
 
 use crate::command_palette::CommandPaletteState;
 
-pub const STATUS_REPO_UNAVAILABLE: &str = "repo_unavailable";
-pub const STATUS_BROKEN: &str = "broken";
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum NewTaskField {
     Repo,
