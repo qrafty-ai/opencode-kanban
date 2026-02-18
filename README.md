@@ -49,9 +49,7 @@ cargo build --release
 
 Publishing is handled by `.github/workflows/publish-npm.yaml` and uses npm trusted publishing via GitHub OIDC.
 
-1. Bump `version` in `Cargo.toml`.
-2. Commit and push the version change.
-3. Create and push a release tag:
+1. Create and push a release tag:
 
 ```bash
 git tag -a v0.1.0 -m "Release v0.1.0"
@@ -59,6 +57,8 @@ git push origin v0.1.0
 ```
 
 For prereleases, use `vX.Y.Z-alpha.N` tags.
+
+The workflow derives the package version from the tag (or manual dispatch input) and updates `Cargo.toml` during CI before building.
 
 The workflow builds platform binaries, packages npm tarballs, and publishes:
 

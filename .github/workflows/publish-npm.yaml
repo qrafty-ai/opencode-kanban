@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*.*.*"
+  release:
+    types:
+      - published
   workflow_dispatch:
     inputs:
       version:
@@ -31,24 +34,22 @@ jobs:
 
       - name: Resolve and validate version
         id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         shell: bash
         run: |
           set -euo pipefail
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             version="${{ inputs.version }}"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            version="${RELEASE_TAG#v}"
           else
             version="${GITHUB_REF_NAME#v}"
           fi
 
           if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$ ]]; then
             echo "Unsupported version format: ${version}"
-            exit 1
-          fi
-
-          cargo_version="$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
-          if [[ "${cargo_version}" != "${version}" ]]; then
-            echo "Cargo.toml version ${cargo_version} does not match release version ${version}"
             exit 1
           fi
 
@@ -86,6 +87,44 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      - name: Set Cargo package version from release version
+        env:
+          VERSION: ${{ needs.determine-version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          cargo_toml_path = Path("Cargo.toml")
+          lines = cargo_toml_path.read_text(encoding="utf-8").splitlines()
+
+          in_package_section = False
+          updated = False
+
+          for index, line in enumerate(lines):
+              stripped = line.strip()
+              if stripped == "[package]":
+                  in_package_section = True
+                  continue
+
+              if in_package_section and stripped.startswith("[") and stripped != "[package]":
+                  in_package_section = False
+
+              if in_package_section and line.lstrip().startswith("version ="):
+                  indent = line[: len(line) - len(line.lstrip())]
+                  lines[index] = f'{indent}version = "{version}"'
+                  updated = True
+                  break
+
+          if not updated:
+              raise SystemExit("Could not find [package] version in Cargo.toml")
+
+          cargo_toml_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
 
       - name: Build release binary
         shell: bash
