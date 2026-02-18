@@ -100,7 +100,6 @@ jobs:
               f"\tsource = {pkgname}-{version}.tar.gz::{url}/archive/refs/tags/v{version}.tar.gz\n"
               f"\tsha256sums = {sha256}\n"
               f"\n"
-              f"%PACKAGE%\n"
               f"pkgname = {pkgname}\n"
           )
 
