@@ -116,18 +116,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
-          # Secret is stored base64-encoded to survive GitHub's newline stripping
+          # Secret must be stored base64-encoded (cat aur_deploy | base64 -w0)
+          # to survive GitHub's newline stripping of multiline secrets.
           printf '%s' "${AUR_SSH_PRIVATE_KEY}" | base64 -d > ~/.ssh/aur_id_ed25519
           chmod 600 ~/.ssh/aur_id_ed25519
           ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
-          {
-            echo "Host aur.archlinux.org"
-            echo "  IdentityFile ~/.ssh/aur_id_ed25519"
-            echo "  User aur"
-          } >> ~/.ssh/config
+          echo "Key fingerprint (must match the public key on aur.archlinux.org):"
+          ssh-keygen -lf ~/.ssh/aur_id_ed25519
 
       - name: Push to AUR
         shell: bash
+        # GIT_SSH_COMMAND bypasses ~/.ssh/config so the identity file is
+        # always used regardless of runner SSH defaults.
+        env:
+          GIT_SSH_COMMAND: "ssh -i ~/.ssh/aur_id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes"
         run: |
           set -euo pipefail
           git clone ssh://aur@aur.archlinux.org/opencode-kanban.git /tmp/aur-repo
