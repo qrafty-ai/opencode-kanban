@@ -216,6 +216,7 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+          scope: "@qrafty-ai"
 
       - name: Update npm
         run: npm install -g npm@latest

@@ -102,7 +102,7 @@ def stage_main_package(
     package_json["version"] = version
     package_json["files"] = ["bin"]
     package_json["optionalDependencies"] = {
-        f"{PACKAGE_FILENAME}-{platform_tag}": f"npm:{PACKAGE_NAME}@{version}-{platform_tag}"
+        f"{PACKAGE_NAME}-{platform_tag}": f"npm:{PACKAGE_NAME}@{version}-{platform_tag}"
         for platform_tag in PLATFORM_PACKAGES
     }
 
