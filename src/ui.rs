@@ -1,24 +1,26 @@
+use chrono::{DateTime, Utc};
 use tui_realm_stdlib::{Checkbox, Input, Label, List, Paragraph, Table};
 use tuirealm::{
+    MockComponent,
     props::{
         Alignment, AttrValue, Attribute, BorderType, Borders, Color, InputType, Style,
         TableBuilder, TextSpan,
     },
     ratatui::{
+        Frame,
         layout::{Constraint, Direction, Layout, Rect},
         style::Style as RatatuiStyle,
         widgets::{Clear, Scrollbar, ScrollbarOrientation, ScrollbarState},
-        Frame,
     },
-    MockComponent,
 };
 
 use crate::app::{
-    category_color_label, ActiveDialog, App, CategoryColorField, CategoryInputField,
-    CategoryInputMode, DeleteCategoryField, DeleteProjectDialogState, DeleteRepoDialogState,
-    DeleteTaskField, NewProjectDialogState, NewProjectField, NewTaskField, ProjectDetailCache,
-    RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
-    SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode, CATEGORY_COLOR_PALETTE,
+    ActiveDialog, App, ArchiveTaskDialogState, CATEGORY_COLOR_PALETTE, CategoryColorField,
+    CategoryInputField, CategoryInputMode, ConfirmCancelField, DeleteProjectDialogState,
+    DeleteRepoDialogState, DeleteTaskField, NewProjectDialogState, NewProjectField, NewTaskField,
+    ProjectDetailCache, RenameProjectDialogState, RenameProjectField, RenameRepoDialogState,
+    RenameRepoField, SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode,
+    category_color_label,
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
@@ -37,6 +39,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         View::ProjectList => render_project_list(frame, app),
         View::Board => render_board(frame, app),
         View::Settings => render_settings(frame, app),
+        View::Archive => render_archive(frame, app),
     }
 
     if app.active_dialog != ActiveDialog::None {
@@ -207,6 +210,117 @@ fn render_board(frame: &mut Frame<'_>, app: &App) {
     render_footer(frame, chunks[2], app);
 }
 
+fn render_archive(frame: &mut Frame<'_>, app: &App) {
+    let theme = app.theme;
+    let mut canvas = Paragraph::default()
+        .background(theme.base.canvas)
+        .text([TextSpan::from("")]);
+    canvas.view(frame, frame.area());
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    let mut header = Label::default()
+        .text(format!("Archive ({})", app.archived_tasks.len()))
+        .alignment(Alignment::Left)
+        .foreground(theme.base.header)
+        .background(theme.base.canvas);
+    header.view(frame, chunks[0]);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(chunks[1]);
+
+    let mut rows = TableBuilder::default();
+    for task in &app.archived_tasks {
+        let archived_label = task
+            .archived_at
+            .as_deref()
+            .map(format_archive_time)
+            .unwrap_or_else(|| "unknown time".to_string());
+        rows.add_col(
+            TextSpan::new(format!("{}  {}", archived_label, task.title)).fg(theme.base.text_muted),
+        )
+        .add_row();
+    }
+    if app.archived_tasks.is_empty() {
+        rows.add_col(TextSpan::from("No archived tasks")).add_row();
+    }
+
+    let selected = app
+        .archive_selected_index
+        .min(app.archived_tasks.len().saturating_sub(1));
+    let mut list = List::default()
+        .title("Archived Tasks", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
+        .highlighted_str("> ")
+        .scroll(true)
+        .rows(rows.build())
+        .selected_line(selected);
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, body[0]);
+
+    let details_lines = if let Some(task) = app.archived_tasks.get(selected) {
+        let repo_name = app
+            .repos
+            .iter()
+            .find(|repo| repo.id == task.repo_id)
+            .map(|repo| repo.name.as_str())
+            .unwrap_or("unknown");
+        let category_name = app
+            .categories
+            .iter()
+            .find(|category| category.id == task.category_id)
+            .map(|category| category.name.as_str())
+            .unwrap_or("unknown");
+        let archived_formatted = task
+            .archived_at
+            .as_deref()
+            .map(format_archive_time)
+            .unwrap_or_else(|| "unknown".to_string());
+        vec![
+            TextSpan::new("ARCHIVED TASK").fg(theme.base.header).bold(),
+            TextSpan::new(detail_kv("Title", task.title.as_str())).fg(theme.base.text),
+            TextSpan::new(detail_kv("Repo", repo_name)).fg(theme.base.text),
+            TextSpan::new(detail_kv("Branch", task.branch.as_str())).fg(theme.base.text),
+            TextSpan::new(detail_kv("Category", category_name)).fg(theme.base.text),
+            TextSpan::new(detail_kv("Archived", &archived_formatted)).fg(theme.base.text_muted),
+            TextSpan::new(detail_kv(
+                "Path",
+                task.worktree_path.as_deref().unwrap_or("n/a"),
+            ))
+            .fg(theme.base.text_muted),
+        ]
+    } else {
+        vec![TextSpan::new("No archived task selected").fg(theme.base.text_muted)]
+    };
+
+    let mut details = Paragraph::default()
+        .title("Details", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.canvas)
+        .wrap(true)
+        .text(details_lines);
+    details.view(frame, body[1]);
+
+    let mut footer = Label::default()
+        .text("j/k:select  u:unarchive  d:delete  Esc:back")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(theme.base.canvas);
+    footer.view(frame, chunks[2]);
+}
+
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = app.theme;
     let sections = Layout::default()
@@ -248,10 +362,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         match app.view_mode {
             ViewMode::Kanban => {
-                "n:new  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x/p:category  H/L move  J/K reorder  v:view"
+                "n:new  a:archive  A:archive view  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x/p:category  H/L move  J/K reorder  v:view"
             }
             ViewMode::SidePanel => {
-                "j/k:select  Space:collapse  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
+                "j/k:select  Space:collapse  a:archive  A:archive view  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
             }
         }
     };
@@ -641,6 +755,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
     let (width_percent, height_percent) = match &app.active_dialog {
         ActiveDialog::CommandPalette(_) => command_palette_overlay_size(app.viewport),
         ActiveDialog::NewTask(_) => (80, 72),
+        ActiveDialog::ArchiveTask(_) => (55, 35),
         ActiveDialog::DeleteTask(_) => (60, 60),
         ActiveDialog::CategoryInput(_) => (60, 40),
         ActiveDialog::CategoryColor(_) => (60, 58),
@@ -665,6 +780,9 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
         ActiveDialog::NewTask(state) => render_new_task_dialog(frame, dialog_area, app, state),
         ActiveDialog::DeleteTask(state) => {
             render_delete_task_dialog(frame, dialog_area, app, state)
+        }
+        ActiveDialog::ArchiveTask(state) => {
+            render_archive_task_dialog(frame, dialog_area, app, state)
         }
         ActiveDialog::CategoryInput(state) => {
             render_category_dialog(frame, dialog_area, app, state)
@@ -694,11 +812,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
             render_message_dialog(frame, dialog_area, app, "Repository Unavailable", &text);
         }
         ActiveDialog::ConfirmQuit(state) => {
-            let text = format!(
-                "{} active sessions detected.\n\nPress Enter to quit or Esc to cancel.",
-                state.active_session_count
-            );
-            render_message_dialog(frame, dialog_area, app, "Confirm Quit", &text);
+            render_confirm_quit_dialog(frame, dialog_area, app, state);
         }
         ActiveDialog::CommandPalette(state) => {
             render_command_palette_dialog(frame, dialog_area, app, state)
@@ -921,6 +1035,27 @@ fn render_delete_task_dialog(
     );
 }
 
+fn render_archive_task_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &ArchiveTaskDialogState,
+) {
+    let text = format!("Archive task '{}' ?", state.task_title);
+    render_confirm_cancel_dialog(
+        frame,
+        area,
+        app,
+        ConfirmCancelDialogSpec {
+            title: "Archive Task",
+            text: &text,
+            confirm_label: "Archive",
+            confirm_destructive: false,
+            focused_field: state.focused_field,
+        },
+    );
+}
+
 fn render_category_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1001,11 +1136,72 @@ fn render_delete_category_dialog(
     app: &App,
     state: &crate::app::DeleteCategoryDialogState,
 ) {
+    let text = if state.task_count > 0 {
+        format!(
+            "Category '{}' contains {} tasks.\nEmpty the category before deleting.",
+            state.category_name, state.task_count
+        )
+    } else {
+        format!("Delete category '{}' ?", state.category_name)
+    };
+
+    render_confirm_cancel_dialog(
+        frame,
+        area,
+        app,
+        ConfirmCancelDialogSpec {
+            title: "Delete Category",
+            text: &text,
+            confirm_label: "Delete",
+            confirm_destructive: true,
+            focused_field: state.focused_field,
+        },
+    );
+}
+
+fn render_confirm_quit_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &crate::app::ConfirmQuitDialogState,
+) {
+    let text = format!(
+        "{} active sessions detected.\nQuit anyway?",
+        state.active_session_count
+    );
+    render_confirm_cancel_dialog(
+        frame,
+        area,
+        app,
+        ConfirmCancelDialogSpec {
+            title: "Confirm Quit",
+            text: &text,
+            confirm_label: "Quit",
+            confirm_destructive: true,
+            focused_field: state.focused_field,
+        },
+    );
+}
+
+struct ConfirmCancelDialogSpec<'a> {
+    title: &'a str,
+    text: &'a str,
+    confirm_label: &'a str,
+    confirm_destructive: bool,
+    focused_field: ConfirmCancelField,
+}
+
+fn render_confirm_cancel_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    spec: ConfirmCancelDialogSpec<'_>,
+) {
     let theme = app.theme;
     let surface = dialog_surface(theme);
 
-    let mut panel = dialog_panel("Delete Category", Alignment::Center, theme, surface)
-        .text([TextSpan::from("")]);
+    let mut panel =
+        dialog_panel(spec.title, Alignment::Center, theme, surface).text([TextSpan::from("")]);
     panel.view(frame, area);
 
     let panel_inner = inset_rect(area, 1, 1);
@@ -1019,21 +1215,12 @@ fn render_delete_category_dialog(
         ])
         .split(panel_inner);
 
-    let text = if state.task_count > 0 {
-        format!(
-            "Category '{}' contains {} tasks.\nEmpty the category before deleting.",
-            state.category_name, state.task_count
-        )
-    } else {
-        format!("Delete category '{}'?", state.category_name)
-    };
-
     let mut summary = Paragraph::default()
         .foreground(theme.base.text)
         .background(surface)
         .wrap(true)
         .alignment(Alignment::Center)
-        .text([TextSpan::from(text)]);
+        .text([TextSpan::from(spec.text.to_string())]);
     summary.view(frame, layout[0]);
 
     let buttons = Layout::default()
@@ -1044,22 +1231,22 @@ fn render_delete_category_dialog(
     render_action_button(
         frame,
         buttons[0],
-        "Delete",
-        matches!(state.focused_field, DeleteCategoryField::Delete),
-        true,
+        spec.confirm_label,
+        matches!(spec.focused_field, ConfirmCancelField::Confirm),
+        spec.confirm_destructive,
         app,
     );
     render_action_button(
         frame,
         buttons[1],
         "Cancel",
-        matches!(state.focused_field, DeleteCategoryField::Cancel),
+        matches!(spec.focused_field, ConfirmCancelField::Cancel),
         false,
         app,
     );
 
     let mut hint = Label::default()
-        .text("Tab: switch  Enter: confirm  Esc: cancel")
+        .text("Tab/Arrows/hjkl: switch  Enter: confirm  Esc: cancel")
         .alignment(Alignment::Center)
         .foreground(theme.base.text_muted)
         .background(surface);
@@ -1877,6 +2064,15 @@ fn detail_kv(label: &str, value: &str) -> String {
     format!("{label:>8}: {value}")
 }
 
+fn format_archive_time(iso_timestamp: &str) -> String {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(iso_timestamp) {
+        let local = dt.with_timezone(&Utc);
+        local.format("%Y-%m-%d %H:%M").to_string()
+    } else {
+        iso_timestamp.to_string()
+    }
+}
+
 fn clamp_text(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
@@ -1990,11 +2186,7 @@ fn calculate_overlay_area(
 }
 
 fn command_palette_overlay_size(viewport: (u16, u16)) -> (u16, u16) {
-    if viewport.0 < 30 {
-        (90, 50)
-    } else {
-        (60, 50)
-    }
+    if viewport.0 < 30 { (90, 50) } else { (60, 50) }
 }
 
 fn should_render_command_palette_results(viewport: (u16, u16)) -> bool {
@@ -2575,6 +2767,8 @@ mod tests {
             status_fetched_at: None,
             status_error: None,
             opencode_session_id: None,
+            archived: false,
+            archived_at: None,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }
