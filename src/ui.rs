@@ -2258,21 +2258,19 @@ fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .settings_view_state
         .as_ref()
         .map(|s| s.active_section)
-        .unwrap_or(SettingsSection::Theme);
+        .unwrap_or(SettingsSection::General);
 
     let mut rows = TableBuilder::default();
     for section in [
-        SettingsSection::Theme,
+        SettingsSection::General,
         SettingsSection::CategoryColors,
         SettingsSection::Keybindings,
-        SettingsSection::General,
         SettingsSection::Repos,
     ] {
         let label = match section {
-            SettingsSection::Theme => "Theme",
+            SettingsSection::General => "General",
             SettingsSection::CategoryColors => "Category Colors",
             SettingsSection::Keybindings => "Keybindings",
-            SettingsSection::General => "General",
             SettingsSection::Repos => "Repos",
         };
         let prefix = if section == active_section {
@@ -2285,17 +2283,17 @@ fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     let selected_idx = match active_section {
-        SettingsSection::Theme => 0,
+        SettingsSection::General => 0,
         SettingsSection::CategoryColors => 1,
         SettingsSection::Keybindings => 2,
-        SettingsSection::General => 3,
-        SettingsSection::Repos => 4,
+        SettingsSection::Repos => 3,
     };
 
     let mut list = List::default()
         .title("Settings", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
+        .background(theme.base.surface)
         .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
         .scroll(false)
@@ -2310,16 +2308,14 @@ fn render_settings_active_section(frame: &mut Frame<'_>, area: Rect, app: &App) 
         .settings_view_state
         .as_ref()
         .map(|s| s.active_section)
-        .unwrap_or(SettingsSection::Theme);
+        .unwrap_or(SettingsSection::General);
     match active_section {
-        SettingsSection::Theme => render_settings_theme(frame, area, app),
+        SettingsSection::General => render_settings_general(frame, area, app),
         SettingsSection::CategoryColors => render_settings_category_colors(frame, area, app),
         SettingsSection::Keybindings => render_settings_keybindings(frame, area, app),
-        SettingsSection::General => render_settings_general(frame, area, app),
         SettingsSection::Repos => render_settings_repos(frame, area, app),
     }
 }
-
 fn render_settings_category_colors(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = app.theme;
     let selected_field = app
@@ -2349,43 +2345,12 @@ fn render_settings_category_colors(frame: &mut Frame<'_>, area: Rect, app: &App)
         .title("Category Colors", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
+        .background(theme.base.surface)
         .highlighted_color(theme.interactive.focus)
         .highlighted_str("> ")
         .scroll(false)
         .rows(rows.build())
         .selected_line(selected_field);
-    list.attr(Attribute::Focus, AttrValue::Flag(true));
-    list.view(frame, area);
-}
-
-fn render_settings_theme(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let theme = app.theme;
-    let current_theme = &app.settings.theme;
-
-    let mut rows = TableBuilder::default();
-    for preset in ["default", "high-contrast", "mono"] {
-        let is_selected = current_theme == preset;
-        let prefix = if is_selected { " [x] " } else { " [ ] " };
-        rows.add_col(TextSpan::from(format!("{}{}", prefix, preset)))
-            .add_row();
-    }
-
-    let selected_idx = match current_theme.as_str() {
-        "default" => 0,
-        "high-contrast" => 1,
-        "mono" => 2,
-        _ => 0,
-    };
-
-    let mut list = List::default()
-        .title("Theme", Alignment::Left)
-        .borders(rounded_borders(theme.interactive.focus))
-        .foreground(theme.base.text)
-        .highlighted_color(theme.interactive.focus)
-        .highlighted_str("> ")
-        .scroll(false)
-        .rows(rows.build())
-        .selected_line(selected_idx);
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, area);
 }
@@ -2411,6 +2376,7 @@ fn render_settings_keybindings(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .title("Keybindings (View Only)", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
+        .background(theme.base.surface)
         .scroll(true)
         .rows(rows.build());
     list.attr(Attribute::Focus, AttrValue::Flag(true));
@@ -2425,33 +2391,135 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .map(|s| s.general_selected_field)
         .unwrap_or(0);
 
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(0)])
+        .split(area);
+
+    let field_rows: [(&str, String); 3] = [
+        ("Theme", app.settings.theme.clone()),
+        (
+            "Poll Interval",
+            format!("{} ms", app.settings.poll_interval_ms),
+        ),
+        (
+            "Side Panel Width",
+            format!("{}%", app.settings.side_panel_width),
+        ),
+    ];
+
     let mut rows = TableBuilder::default();
-
-    let poll_prefix = if selected_field == 0 { "> " } else { "  " };
-    rows.add_col(TextSpan::from(format!(
-        "{}Poll Interval: {} ms",
-        poll_prefix, app.settings.poll_interval_ms
-    )))
-    .add_row();
-
-    let width_prefix = if selected_field == 1 { "> " } else { "  " };
-    rows.add_col(TextSpan::from(format!(
-        "{}Side Panel Width: {}%",
-        width_prefix, app.settings.side_panel_width
-    )))
-    .add_row();
+    for (i, (label, value)) in field_rows.iter().enumerate() {
+        let is_selected = i == selected_field;
+        let bg = if is_selected {
+            theme.interactive.selected_bg
+        } else {
+            theme.base.surface
+        };
+        let fg = if is_selected {
+            theme.interactive.focus
+        } else {
+            theme.base.text
+        };
+        let text = format!("  {:<18} {}", label, value);
+        let span = if is_selected {
+            TextSpan::new(text).fg(fg).bg(bg).bold()
+        } else {
+            TextSpan::new(text).fg(fg).bg(bg)
+        };
+        rows.add_col(span).add_row();
+    }
 
     let mut list = List::default()
-        .title("General", Alignment::Left)
+        .title(
+            "General  (j/k: select  h/l: adjust  0: reset)",
+            Alignment::Left,
+        )
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
-        .highlighted_color(theme.interactive.focus)
-        .highlighted_str("> ")
+        .background(theme.base.surface)
         .scroll(false)
         .rows(rows.build())
-        .selected_line(selected_field);
+        .selected_line(selected_field)
+        .inactive(Style::default().fg(theme.base.text_muted));
     list.attr(Attribute::Focus, AttrValue::Flag(true));
-    list.view(frame, area);
+    list.view(frame, layout[0]);
+
+    let info_lines: Vec<TextSpan> = match selected_field {
+        0 => {
+            let current = &app.settings.theme;
+            let mut lines = vec![
+                TextSpan::new("Theme").fg(theme.base.header).bold(),
+                TextSpan::new("Color palette used throughout the app.").fg(theme.base.text),
+                TextSpan::new(""),
+            ];
+            for (preset, desc) in [
+                ("default", "Balanced colors for everyday use"),
+                ("high-contrast", "Enhanced visibility, bright on dark"),
+                ("mono", "Minimal monochrome aesthetic"),
+            ] {
+                let marker = if current == preset { "●" } else { "○" };
+                lines.push(
+                    TextSpan::new(format!("  {} {:<16}  {}", marker, preset, desc)).fg(
+                        if current == preset {
+                            theme.interactive.focus
+                        } else {
+                            theme.base.text_muted
+                        },
+                    ),
+                );
+            }
+            lines.push(TextSpan::new(""));
+            lines.push(TextSpan::new("  l / →    cycle forward").fg(theme.base.text_muted));
+            lines.push(TextSpan::new("  h / ←    cycle backward").fg(theme.base.text_muted));
+            lines.push(TextSpan::new("  0         reset to default").fg(theme.base.text_muted));
+            lines
+        }
+        1 => vec![
+            TextSpan::new("Poll Interval").fg(theme.base.header).bold(),
+            TextSpan::new(
+                "How often the app checks each session's status. \
+                 Lower values give faster updates but use more CPU.",
+            )
+            .fg(theme.base.text),
+            TextSpan::new(""),
+            TextSpan::new(format!("{:>8}: {}", "Range", "500 – 30 000 ms"))
+                .fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Step", "500 ms")).fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Default", "1 000 ms")).fg(theme.base.text_muted),
+            TextSpan::new(""),
+            TextSpan::new("  l / →    increase value").fg(theme.base.text_muted),
+            TextSpan::new("  h / ←    decrease value").fg(theme.base.text_muted),
+            TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
+        ],
+        _ => vec![
+            TextSpan::new("Side Panel Width")
+                .fg(theme.base.header)
+                .bold(),
+            TextSpan::new(
+                "Width of the left panel in split view (SidePanel mode). \
+                 Adjust to balance task list vs detail pane.",
+            )
+            .fg(theme.base.text),
+            TextSpan::new(""),
+            TextSpan::new(format!("{:>8}: {}", "Range", "20 – 80 %")).fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Step", "5 %")).fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Default", "40 %")).fg(theme.base.text_muted),
+            TextSpan::new(""),
+            TextSpan::new("  l / →    increase value").fg(theme.base.text_muted),
+            TextSpan::new("  h / ←    decrease value").fg(theme.base.text_muted),
+            TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
+        ],
+    };
+
+    let mut desc = Paragraph::default()
+        .title("Info", Alignment::Left)
+        .borders(rounded_borders(theme.base.text_muted))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
+        .wrap(true)
+        .text(info_lines);
+    desc.view(frame, layout[1]);
 }
 
 fn render_settings_repos(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -2503,20 +2571,32 @@ fn render_settings_repos(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_settings_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = app.theme;
+
+    if let Some(notice) = &app.footer_notice {
+        let mut footer = Label::default()
+            .text(notice.as_str())
+            .alignment(Alignment::Center)
+            .foreground(theme.base.header)
+            .background(theme.base.surface);
+        footer.view(frame, area);
+        return;
+    }
+
     let active_section = app
         .settings_view_state
         .as_ref()
         .map(|s| s.active_section)
-        .unwrap_or(SettingsSection::Theme);
+        .unwrap_or(SettingsSection::General);
 
     let help_text = match active_section {
-        SettingsSection::Theme => "Space/Enter: cycle theme  h/l: section  Esc: close",
-        SettingsSection::CategoryColors => {
-            "j/k: select category  Space/Enter: cycle color  h/l: section  Esc: close"
+        SettingsSection::General => {
+            "j/k: select  h/←: adjust  l/→: adjust  0: reset  Tab: section  Esc: close"
         }
-        SettingsSection::Keybindings => "h/l: section  Esc: close",
-        SettingsSection::General => "j/k: select  h/l: section  Esc: close",
-        SettingsSection::Repos => "j/k: select  r: rename  x: remove  h/l: section  Esc: close",
+        SettingsSection::CategoryColors => {
+            "j/k: select category  Space/Enter: cycle color  Tab: section  Esc: close"
+        }
+        SettingsSection::Keybindings => "j/k: scroll  Tab: section  Esc: close",
+        SettingsSection::Repos => "j/k: select  r: rename  x: remove  Tab: section  Esc: close",
     };
 
     let mut footer = Label::default()

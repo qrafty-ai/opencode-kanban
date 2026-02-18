@@ -194,10 +194,9 @@ pub enum View {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SettingsSection {
-    Theme,
+    General,
     CategoryColors,
     Keybindings,
-    General,
     Repos,
 }
 

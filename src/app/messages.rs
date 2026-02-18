@@ -32,6 +32,8 @@ pub enum Message {
     SettingsNextItem,
     SettingsPrevItem,
     SettingsToggle,
+    SettingsDecreaseItem,
+    SettingsResetItem,
     DismissDialog,
     FocusColumn(usize),
     SelectTask(usize, usize),
