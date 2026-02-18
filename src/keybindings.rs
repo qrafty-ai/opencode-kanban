@@ -20,6 +20,7 @@ pub enum KeyAction {
     OpenPalette,
     Quit,
     ToggleView,
+    OpenArchiveView,
     ShrinkPanel,
     ExpandPanel,
     ProjectUp,
@@ -36,6 +37,7 @@ pub enum KeyAction {
     RenameCategory,
     DeleteCategory,
     DeleteTask,
+    ArchiveTask,
     MoveTaskLeft,
     MoveTaskRight,
     MoveTaskDown,
@@ -171,6 +173,12 @@ const GLOBAL_DEFS: &[ActionDef] = &[
         defaults: &["v"],
     },
     ActionDef {
+        id: "open_archive_view",
+        action: KeyAction::OpenArchiveView,
+        description: "open archive view",
+        defaults: &["A"],
+    },
+    ActionDef {
         id: "shrink_panel",
         action: KeyAction::ShrinkPanel,
         description: "narrow side panel",
@@ -279,6 +287,12 @@ const BOARD_DEFS: &[ActionDef] = &[
         defaults: &["d"],
     },
     ActionDef {
+        id: "archive_task",
+        action: KeyAction::ArchiveTask,
+        description: "archive selected task",
+        defaults: &["a"],
+    },
+    ActionDef {
         id: "move_task_left",
         action: KeyAction::MoveTaskLeft,
         description: "move task left",
@@ -355,6 +369,8 @@ impl Keybindings {
         match command_id {
             "switch_project" => self.display_for(KeyContext::Global, KeyAction::OpenPalette),
             "new_task" => self.display_for(KeyContext::Board, KeyAction::NewTask),
+            "open_archive_view" => self.display_for(KeyContext::Global, KeyAction::OpenArchiveView),
+            "archive_task" => self.display_for(KeyContext::Board, KeyAction::ArchiveTask),
             "attach_task" => self.display_for(KeyContext::Board, KeyAction::AttachTask),
             "add_category" => self.display_for(KeyContext::Board, KeyAction::AddCategory),
             "rename_category" => self.display_for(KeyContext::Board, KeyAction::RenameCategory),
@@ -395,6 +411,11 @@ impl Keybindings {
             format!(
                 "  {}: toggle help",
                 self.display_for(KeyContext::Global, KeyAction::ToggleHelp)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {}: open archive view",
+                self.display_for(KeyContext::Global, KeyAction::OpenArchiveView)
                     .unwrap_or_else(|| "-".to_string())
             ),
             String::new(),
@@ -471,6 +492,11 @@ impl Keybindings {
             format!(
                 "  {}: delete task",
                 self.display_for(KeyContext::Board, KeyAction::DeleteTask)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {}: archive selected task",
+                self.display_for(KeyContext::Board, KeyAction::ArchiveTask)
                     .unwrap_or_else(|| "-".to_string())
             ),
             format!(

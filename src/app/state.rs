@@ -52,6 +52,13 @@ pub struct ErrorDialogState {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConfirmQuitDialogState {
     pub active_session_count: usize,
+    pub focused_field: ConfirmCancelField,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ConfirmCancelField {
+    Confirm,
+    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -72,6 +79,13 @@ pub struct DeleteTaskDialogState {
     pub remove_worktree: bool,
     pub delete_branch: bool,
     pub focused_field: DeleteTaskField,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ArchiveTaskDialogState {
+    pub task_id: Uuid,
+    pub task_title: String,
+    pub focused_field: ConfirmCancelField,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -135,6 +149,7 @@ pub enum View {
     ProjectList,
     Board,
     Settings,
+    Archive,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -161,18 +176,12 @@ pub struct CategoryInputDialogState {
     pub focused_field: CategoryInputField,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum DeleteCategoryField {
-    Delete,
-    Cancel,
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct DeleteCategoryDialogState {
     pub category_id: Uuid,
     pub category_name: String,
     pub task_count: usize,
-    pub focused_field: DeleteCategoryField,
+    pub focused_field: ConfirmCancelField,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -262,6 +271,7 @@ pub enum ActiveDialog {
     CategoryColor(CategoryColorDialogState),
     DeleteCategory(DeleteCategoryDialogState),
     Error(ErrorDialogState),
+    ArchiveTask(ArchiveTaskDialogState),
     DeleteTask(DeleteTaskDialogState),
     MoveTask(MoveTaskDialogState),
     WorktreeNotFound(WorktreeNotFoundDialogState),

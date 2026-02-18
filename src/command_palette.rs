@@ -169,9 +169,21 @@ pub fn all_commands() -> Vec<CommandDef> {
             message: Some(Message::OpenNewTaskDialog),
         },
         CommandDef {
+            id: "archive_task",
+            display_name: "Archive Selected Task",
+            keybinding: "a",
+            message: Some(Message::OpenArchiveTaskDialog),
+        },
+        CommandDef {
+            id: "open_archive_view",
+            display_name: "Open Archive View",
+            keybinding: "A",
+            message: Some(Message::OpenArchiveView),
+        },
+        CommandDef {
             id: "attach_task",
             display_name: "Attach Selected Task",
-            keybinding: "a",
+            keybinding: "Enter",
             message: Some(Message::AttachSelectedTask),
         },
         CommandDef {
@@ -320,8 +332,8 @@ mod tests {
         let commands = all_commands();
         assert_eq!(
             commands.len(),
-            20,
-            "Expected 20 commands, found {}",
+            22,
+            "Expected 22 commands, found {}",
             commands.len()
         );
     }
