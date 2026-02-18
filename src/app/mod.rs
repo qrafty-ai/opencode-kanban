@@ -470,6 +470,9 @@ impl App {
                 self.settings_view_state = Some(SettingsViewState {
                     active_section: SettingsSection::Theme,
                     general_selected_field: 0,
+                    category_color_selected: self
+                        .focused_column
+                        .min(self.categories.len().saturating_sub(1)),
                     previous_view: self.current_view,
                 });
                 self.current_view = View::Settings;
@@ -487,7 +490,8 @@ impl App {
             Message::SettingsNextSection => {
                 if let Some(state) = &mut self.settings_view_state {
                     state.active_section = match state.active_section {
-                        SettingsSection::Theme => SettingsSection::Keybindings,
+                        SettingsSection::Theme => SettingsSection::CategoryColors,
+                        SettingsSection::CategoryColors => SettingsSection::Keybindings,
                         SettingsSection::Keybindings => SettingsSection::General,
                         SettingsSection::General => SettingsSection::Theme,
                     };
@@ -497,29 +501,55 @@ impl App {
                 if let Some(state) = &mut self.settings_view_state {
                     state.active_section = match state.active_section {
                         SettingsSection::Theme => SettingsSection::General,
-                        SettingsSection::Keybindings => SettingsSection::Theme,
+                        SettingsSection::CategoryColors => SettingsSection::Theme,
+                        SettingsSection::Keybindings => SettingsSection::CategoryColors,
                         SettingsSection::General => SettingsSection::Keybindings,
                     };
                 }
             }
             Message::SettingsNextItem => {
-                if let Some(state) = &mut self.settings_view_state
-                    && state.active_section == SettingsSection::General
-                {
-                    state.general_selected_field =
-                        state.general_selected_field.saturating_add(1).min(1);
+                if let Some(state) = &mut self.settings_view_state {
+                    match state.active_section {
+                        SettingsSection::General => {
+                            state.general_selected_field =
+                                state.general_selected_field.saturating_add(1).min(1);
+                        }
+                        SettingsSection::CategoryColors => {
+                            state.category_color_selected = state
+                                .category_color_selected
+                                .saturating_add(1)
+                                .min(self.categories.len().saturating_sub(1));
+                        }
+                        SettingsSection::Theme | SettingsSection::Keybindings => {}
+                    }
                 }
             }
             Message::SettingsPrevItem => {
-                if let Some(state) = &mut self.settings_view_state
-                    && state.active_section == SettingsSection::General
-                {
-                    state.general_selected_field = state.general_selected_field.saturating_sub(1);
+                if let Some(state) = &mut self.settings_view_state {
+                    match state.active_section {
+                        SettingsSection::General => {
+                            state.general_selected_field =
+                                state.general_selected_field.saturating_sub(1);
+                        }
+                        SettingsSection::CategoryColors => {
+                            state.category_color_selected =
+                                state.category_color_selected.saturating_sub(1);
+                        }
+                        SettingsSection::Theme | SettingsSection::Keybindings => {}
+                    }
                 }
             }
             Message::SettingsToggle => {
-                if let Some(state) = &self.settings_view_state {
-                    match state.active_section {
+                if let Some((active_section, general_selected_field, category_color_selected)) =
+                    self.settings_view_state.as_ref().map(|state| {
+                        (
+                            state.active_section,
+                            state.general_selected_field,
+                            state.category_color_selected,
+                        )
+                    })
+                {
+                    match active_section {
                         SettingsSection::Theme => {
                             self.settings.theme = match self.settings.theme.as_str() {
                                 "default" => "high-contrast".to_string(),
@@ -533,7 +563,7 @@ impl App {
                             self.save_settings_with_notice();
                         }
                         SettingsSection::General => {
-                            match state.general_selected_field.min(1) {
+                            match general_selected_field.min(1) {
                                 0 => {
                                     let next = self.settings.poll_interval_ms.saturating_add(500);
                                     self.settings.poll_interval_ms =
@@ -549,6 +579,36 @@ impl App {
                                 _ => {}
                             }
                             self.save_settings_with_notice();
+                        }
+                        SettingsSection::CategoryColors => {
+                            let Some((category_id, current_color)) = self
+                                .categories
+                                .get(
+                                    category_color_selected
+                                        .min(self.categories.len().saturating_sub(1)),
+                                )
+                                .map(|category| (category.id, category.color.clone()))
+                            else {
+                                return Ok(());
+                            };
+
+                            let next_color = next_palette_color(current_color.as_deref());
+                            self.db
+                                .update_category_color(category_id, next_color)
+                                .context("failed to update category color")?;
+                            self.refresh_data()?;
+
+                            if let Some(state) = &mut self.settings_view_state {
+                                state.category_color_selected = self
+                                    .categories
+                                    .iter()
+                                    .position(|category| category.id == category_id)
+                                    .unwrap_or_else(|| {
+                                        state
+                                            .category_color_selected
+                                            .min(self.categories.len().saturating_sub(1))
+                                    });
+                            }
                         }
                         SettingsSection::Keybindings => {}
                     }
@@ -2232,6 +2292,59 @@ mod tests {
             .find(|category| category.id == in_progress_id)
             .and_then(|category| category.color.as_deref());
         assert_eq!(canceled_color, Some("cyan"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn settings_category_color_toggle_updates_selected_category() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, [_todo_id, in_progress_id, _done_id]) =
+            test_app_with_middle_task()?;
+
+        app.focused_column = 1;
+        app.update(Message::OpenSettings)?;
+        if let Some(state) = &mut app.settings_view_state {
+            state.active_section = SettingsSection::CategoryColors;
+            state.category_color_selected = 1;
+        }
+
+        app.update(Message::SettingsToggle)?;
+
+        let categories_after_toggle = app.db.list_categories()?;
+        let toggled_color = categories_after_toggle
+            .iter()
+            .find(|category| category.id == in_progress_id)
+            .and_then(|category| category.color.as_deref());
+        assert_eq!(toggled_color, Some("cyan"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn settings_category_color_selection_moves_with_j_and_k() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        app.update(Message::OpenSettings)?;
+        if let Some(state) = &mut app.settings_view_state {
+            state.active_section = SettingsSection::CategoryColors;
+            state.category_color_selected = 0;
+        }
+
+        app.handle_key(key_char('j'))?;
+        assert_eq!(
+            app.settings_view_state
+                .as_ref()
+                .map(|state| state.category_color_selected),
+            Some(1)
+        );
+
+        app.handle_key(key_char('k'))?;
+        assert_eq!(
+            app.settings_view_state
+                .as_ref()
+                .map(|state| state.category_color_selected),
+            Some(0)
+        );
 
         Ok(())
     }
