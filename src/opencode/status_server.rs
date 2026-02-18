@@ -409,7 +409,7 @@ fn parse_session_state(value: &Value) -> Result<SessionState, &'static str> {
             return match typ {
                 "idle" => Ok(SessionState::Idle),
                 "busy" => Ok(SessionState::Running),
-                "retry" => Ok(SessionState::Waiting),
+                "retry" => Ok(SessionState::Idle),
                 _ => Err("unrecognized session type value"),
             };
         }
@@ -427,13 +427,10 @@ fn parse_session_state(value: &Value) -> Result<SessionState, &'static str> {
 }
 
 fn parse_state_str(state: &str) -> Result<SessionState, &'static str> {
-    let normalized = state.trim().to_ascii_lowercase();
-    match normalized.as_str() {
+    match state.trim().to_ascii_lowercase().as_str() {
         "running" | "active" | "thinking" | "processing" => Ok(SessionState::Running),
-        "waiting" | "blocked" | "prompt" | "paused" => Ok(SessionState::Waiting),
-        "idle" | "ready" => Ok(SessionState::Idle),
-        "dead" | "stopped" | "offline" | "completed" => Ok(SessionState::Dead),
-        "unknown" => Ok(SessionState::Idle),
+        "waiting" | "blocked" | "prompt" | "paused" | "idle" | "ready" | "dead" | "stopped"
+        | "offline" | "completed" | "unknown" => Ok(SessionState::Idle),
         _ => Err("unrecognized session state value"),
     }
 }

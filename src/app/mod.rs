@@ -28,9 +28,8 @@ pub use self::state::{
     ContextMenuItem, ContextMenuState, DeleteCategoryDialogState, DeleteCategoryField,
     DeleteTaskDialogState, DeleteTaskField, ErrorDialogState, MoveTaskDialogState,
     NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
-    RepoUnavailableDialogState, STATUS_BROKEN, STATUS_REPO_UNAVAILABLE, SettingsSection,
-    SettingsViewState, TodoVisualizationMode, View, ViewMode, WorktreeNotFoundDialogState,
-    WorktreeNotFoundField, category_color_label,
+    RepoUnavailableDialogState, SettingsSection, SettingsViewState, TodoVisualizationMode, View,
+    ViewMode, WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
 };
 
 use crate::command_palette::{CommandPaletteState, all_commands};
@@ -43,7 +42,7 @@ use crate::opencode::{
 use crate::projects::{self, ProjectInfo};
 use crate::theme::{Theme, ThemePreset};
 use crate::tmux::{tmux_capture_pane, tmux_kill_session};
-use crate::types::{Category, Repo, SessionTodoItem, Task};
+use crate::types::{Category, Repo, SessionState, SessionTodoItem, Task};
 
 use self::runtime::{
     CreateTaskRuntime, RealCreateTaskRuntime, RealRecoveryRuntime, RecoveryRuntime,
@@ -387,9 +386,7 @@ impl App {
                         return Ok(());
                     };
 
-                    if task.tmux_status == Status::Running.as_str()
-                        && let Some(session_name) = task.tmux_session_name.as_deref()
-                    {
+                    if let Some(session_name) = task.tmux_session_name.as_deref() {
                         match tmux_capture_pane(session_name, 50) {
                             Ok(buffer) => self.current_log_buffer = Some(buffer),
                             Err(err) => {
@@ -1552,7 +1549,7 @@ impl App {
             _ => return Ok(()),
         };
 
-        self.db.update_task_status(task_id, STATUS_BROKEN)?;
+        self.db.update_task_status(task_id, Status::Idle.as_str())?;
         self.active_dialog = ActiveDialog::None;
         self.refresh_data()
     }
@@ -1753,28 +1750,24 @@ fn reconcile_desired_vs_observed(
     current_status: &str,
 ) -> String {
     if !desired.repo_available || !observed.repo_available {
-        return STATUS_REPO_UNAVAILABLE.to_string();
+        return Status::Idle.as_str().to_string();
     }
 
-    if desired.expected_session_name.is_none() {
-        if current_status == STATUS_REPO_UNAVAILABLE
-            || current_status == Status::Dead.as_str()
-            || current_status == STATUS_BROKEN
-        {
-            return Status::Idle.as_str().to_string();
-        }
-        return current_status.to_string();
-    }
-
-    if !observed.session_exists {
-        return Status::Dead.as_str().to_string();
+    if desired.expected_session_name.is_none() || !observed.session_exists {
+        return Status::Idle.as_str().to_string();
     }
 
     observed
         .session_status
         .as_ref()
         .map(|status| status.state.as_str().to_string())
-        .unwrap_or_else(|| current_status.to_string())
+        .unwrap_or_else(|| {
+            if SessionState::from_raw_status(current_status) == SessionState::Running {
+                Status::Running.as_str().to_string()
+            } else {
+                Status::Idle.as_str().to_string()
+            }
+        })
 }
 
 fn reconcile_startup_tasks(
@@ -1818,7 +1811,7 @@ fn attach_task_with_runtime(
     runtime: &impl RecoveryRuntime,
 ) -> Result<AttachTaskResult> {
     if !runtime.repo_exists(Path::new(&repo.path)) {
-        db.update_task_status(task.id, STATUS_REPO_UNAVAILABLE)?;
+        db.update_task_status(task.id, Status::Idle.as_str())?;
         return Ok(AttachTaskResult::RepoUnavailable);
     }
 

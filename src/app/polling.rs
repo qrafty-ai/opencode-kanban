@@ -18,8 +18,6 @@ use crate::opencode::status_server::SessionStatusMatch;
 use crate::opencode::{ServerStatusProvider, Status};
 use crate::types::{SessionStatusSource, SessionTodoItem};
 
-use super::state::STATUS_REPO_UNAVAILABLE;
-
 /// Spawn a background task that polls task status from the OpenCode server
 pub fn spawn_status_poller(
     db_path: PathBuf,
@@ -29,31 +27,48 @@ pub fn spawn_status_poller(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let server_provider = ServerStatusProvider::default();
+        let db = loop {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+
+            match Database::open_async(&db_path).await {
+                Ok(db) => break db,
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to open database for status poller");
+                    interruptible_sleep(Duration::from_millis(poll_interval_ms), &stop).await;
+                }
+            }
+        };
 
         while !stop.load(Ordering::Relaxed) {
-            let db = match Database::open(&db_path) {
-                Ok(db) => db,
+            let tasks = match db.list_tasks_async().await {
+                Ok(tasks) => tasks,
                 Err(_) => {
                     interruptible_sleep(Duration::from_millis(poll_interval_ms), &stop).await;
                     continue;
                 }
             };
-
-            let tasks = db.list_tasks().unwrap_or_default();
             if tasks.is_empty() {
                 interruptible_sleep(Duration::from_millis(poll_interval_ms), &stop).await;
                 continue;
             }
 
-            let repo_paths: HashMap<Uuid, String> = db
-                .list_repos()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|repo| (repo.id, repo.path))
-                .collect();
-            drop(db);
+            let repo_paths: HashMap<Uuid, String> = match db.list_repos_async().await {
+                Ok(repos) => repos.into_iter().map(|repo| (repo.id, repo.path)).collect(),
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to list repos for status poller");
+                    interruptible_sleep(Duration::from_millis(poll_interval_ms), &stop).await;
+                    continue;
+                }
+            };
             let fetched_at = SystemTime::now();
             let complete_session_parent_map = server_provider.fetch_session_parent_map().await.ok();
+            let mut next_todo_cache: HashMap<Uuid, Vec<SessionTodoItem>> = session_todo_cache
+                .lock()
+                .ok()
+                .map(|cache| cache.clone())
+                .unwrap_or_default();
 
             debug!(
                 poll_interval_ms,
@@ -71,30 +86,32 @@ pub fn spawn_status_poller(
                     .map(|path| Path::new(path).exists())
                     .unwrap_or(false);
 
+                let mut todo_session_id = task.opencode_session_id.clone();
+
                 if !repo_available {
-                    if let Ok(db) = Database::open(&db_path) {
-                        let _ = db.update_task_status(task.id, STATUS_REPO_UNAVAILABLE);
+                    if task.tmux_status != Status::Idle.as_str() {
+                        let _ = db
+                            .update_task_status_async(task.id, Status::Idle.as_str())
+                            .await;
                     }
-                    clear_task_todos(&session_todo_cache, task.id);
                     debug!(
                         task_id = %task.id,
-                        "cleared cached todos because repository is unavailable"
+                        session_id = ?todo_session_id,
+                        "repository unavailable; still attempting todo fetch"
                     );
-                    continue;
                 }
 
-                if let Some(worktree_path) = task.worktree_path.as_deref() {
-                    debug!("Fetching status for task {} at {}", task.id, worktree_path);
-                    let mut bound_session_id = task.opencode_session_id.clone();
+                if repo_available {
+                    if let Some(worktree_path) = task.worktree_path.as_deref() {
+                        debug!("Fetching status for task {} at {}", task.id, worktree_path);
+                        let mut bound_session_id = task.opencode_session_id.clone();
 
-                    match server_provider
-                        .fetch_status_matches(fetched_at, Some(worktree_path))
-                        .await
-                    {
-                        Ok(statuses) => {
-                            debug!("Got {} statuses for task {}", statuses.len(), task.id);
-                            let mut todo_session_id: Option<String> = None;
-                            if let Ok(db) = Database::open(&db_path) {
+                        match server_provider
+                            .fetch_status_matches(fetched_at, Some(worktree_path))
+                            .await
+                        {
+                            Ok(statuses) => {
+                                debug!("Got {} statuses for task {}", statuses.len(), task.id);
                                 if let Some(status_match) = select_status_match(
                                     statuses,
                                     complete_session_parent_map.as_ref(),
@@ -104,97 +121,140 @@ pub fn spawn_status_poller(
                                         task.id, status_match.session_id, status_match.status.state
                                     );
 
-                                    let _ = db.update_task_status(
-                                        task.id,
-                                        status_match.status.state.as_str(),
-                                    );
-                                    let _ = db.update_task_status_metadata(
-                                        task.id,
-                                        SessionStatusSource::Server.as_str(),
-                                        Some(to_iso8601(fetched_at)),
-                                        None,
-                                    );
+                                    if task.tmux_status != status_match.status.state.as_str() {
+                                        let _ = db
+                                            .update_task_status_async(
+                                                task.id,
+                                                status_match.status.state.as_str(),
+                                            )
+                                            .await;
+                                    }
+
+                                    if task.status_source != SessionStatusSource::Server.as_str()
+                                        || task.status_error.is_some()
+                                    {
+                                        let _ = db
+                                            .update_task_status_metadata_async(
+                                                task.id,
+                                                SessionStatusSource::Server.as_str(),
+                                                Some(to_iso8601(fetched_at)),
+                                                None,
+                                            )
+                                            .await;
+                                    }
 
                                     if bound_session_id.as_deref()
                                         != Some(status_match.session_id.as_str())
                                     {
-                                        let _ = db.update_task_session_binding(
-                                            task.id,
-                                            Some(status_match.session_id.clone()),
-                                        );
+                                        let _ = db
+                                            .update_task_session_binding_async(
+                                                task.id,
+                                                Some(status_match.session_id.clone()),
+                                            )
+                                            .await;
                                     }
                                     bound_session_id = Some(status_match.session_id);
                                     todo_session_id = bound_session_id.clone();
                                 } else {
                                     debug!(
-                                        "No active session for task {} - setting status to dead",
+                                        "No active session for task {} - setting status to idle",
                                         task.id
                                     );
-                                    let _ = db.update_task_status(task.id, Status::Dead.as_str());
                                     let missing_id = task
                                         .tmux_session_name
                                         .clone()
                                         .unwrap_or_else(|| task.id.to_string());
-                                    let _ = db.update_task_status_metadata(
-                                        task.id,
-                                        SessionStatusSource::None.as_str(),
-                                        Some(to_iso8601(fetched_at)),
-                                        Some(format!("SESSION_NOT_FOUND:{missing_id}")),
-                                    );
+                                    let missing_error = format!("SESSION_NOT_FOUND:{missing_id}");
+
+                                    if task.tmux_status != Status::Idle.as_str() {
+                                        let _ = db
+                                            .update_task_status_async(
+                                                task.id,
+                                                Status::Idle.as_str(),
+                                            )
+                                            .await;
+                                    }
+
+                                    if task.status_source != SessionStatusSource::None.as_str()
+                                        || task.status_error.as_deref()
+                                            != Some(missing_error.as_str())
+                                    {
+                                        let _ = db
+                                            .update_task_status_metadata_async(
+                                                task.id,
+                                                SessionStatusSource::None.as_str(),
+                                                Some(to_iso8601(fetched_at)),
+                                                Some(missing_error),
+                                            )
+                                            .await;
+                                    }
                                 }
                             }
-
-                            if let Some(todos) = fetch_task_todos(
-                                &server_provider,
-                                task.id,
-                                todo_session_id.as_deref(),
-                            )
-                            .await
-                            {
-                                debug!(
-                                    task_id = %task.id,
-                                    session_id = ?todo_session_id,
-                                    todo_count = todos.len(),
-                                    poll_interval_ms,
-                                    "updated task todos from OpenCode server"
-                                );
-                                set_task_todos(&session_todo_cache, task.id, todos);
-                            } else {
-                                clear_task_todos(&session_todo_cache, task.id);
-                                debug!(
-                                    task_id = %task.id,
-                                    session_id = ?todo_session_id,
-                                    "cleared cached todos because server todo fetch returned none"
-                                );
-                            }
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                "Failed to fetch status for task {} - marking status dead: {:?}",
-                                task.id,
-                                err
-                            );
-                            if let Ok(db) = Database::open(&db_path) {
-                                let _ = db.update_task_status(task.id, Status::Dead.as_str());
-                                let _ = db.update_task_status_metadata(
+                            Err(err) => {
+                                tracing::warn!(
+                                    "Failed to fetch status for task {} - marking status idle: {:?}",
                                     task.id,
-                                    SessionStatusSource::None.as_str(),
-                                    Some(to_iso8601(fetched_at)),
-                                    Some(format!("{}:{}", err.code, err.message)),
+                                    err
+                                );
+                                let error_text = format!("{}:{}", err.code, err.message);
+                                if task.tmux_status != Status::Idle.as_str() {
+                                    let _ = db
+                                        .update_task_status_async(task.id, Status::Idle.as_str())
+                                        .await;
+                                }
+
+                                if task.status_source != SessionStatusSource::None.as_str()
+                                    || task.status_error.as_deref() != Some(error_text.as_str())
+                                {
+                                    let _ = db
+                                        .update_task_status_metadata_async(
+                                            task.id,
+                                            SessionStatusSource::None.as_str(),
+                                            Some(to_iso8601(fetched_at)),
+                                            Some(error_text),
+                                        )
+                                        .await;
+                                }
+                                debug!(
+                                    task_id = %task.id,
+                                    session_id = ?todo_session_id,
+                                    "status fetch failed; still attempting todo fetch"
                                 );
                             }
-                            clear_task_todos(&session_todo_cache, task.id);
-                            debug!(
-                                task_id = %task.id,
-                                "cleared cached todos because status fetch failed"
-                            );
                         }
+                    } else {
+                        debug!(
+                            task_id = %task.id,
+                            session_id = ?todo_session_id,
+                            "task has no worktree path; still attempting todo fetch"
+                        );
+                    }
+                }
+
+                if let Some(session_id) = todo_session_id.as_deref() {
+                    if let Some(todos) =
+                        fetch_task_todos(&server_provider, task.id, Some(session_id)).await
+                    {
+                        debug!(
+                            task_id = %task.id,
+                            session_id,
+                            todo_count = todos.len(),
+                            poll_interval_ms,
+                            "updated task todos from OpenCode server"
+                        );
+                        next_todo_cache.insert(task.id, todos);
+                    } else {
+                        debug!(
+                            task_id = %task.id,
+                            session_id,
+                            "todo fetch failed; preserving previous cached todos"
+                        );
                     }
                 } else {
-                    clear_task_todos(&session_todo_cache, task.id);
+                    next_todo_cache.remove(&task.id);
                     debug!(
                         task_id = %task.id,
-                        "cleared cached todos because task has no worktree path"
+                        "no bound session; removed cached todos"
                     );
                 }
 
@@ -205,6 +265,11 @@ pub fn spawn_status_poller(
 
             if stop.load(Ordering::Relaxed) {
                 break;
+            }
+
+            if let Ok(mut cache) = session_todo_cache.lock() {
+                cache.clear();
+                cache.extend(next_todo_cache);
             }
 
             debug!(
@@ -241,25 +306,6 @@ async fn fetch_task_todos(
             );
             None
         }
-    }
-}
-
-fn set_task_todos(
-    session_todo_cache: &Arc<Mutex<HashMap<Uuid, Vec<SessionTodoItem>>>>,
-    task_id: Uuid,
-    todos: Vec<SessionTodoItem>,
-) {
-    if let Ok(mut cache) = session_todo_cache.lock() {
-        cache.insert(task_id, todos);
-    }
-}
-
-fn clear_task_todos(
-    session_todo_cache: &Arc<Mutex<HashMap<Uuid, Vec<SessionTodoItem>>>>,
-    task_id: Uuid,
-) {
-    if let Ok(mut cache) = session_todo_cache.lock() {
-        cache.remove(&task_id);
     }
 }
 

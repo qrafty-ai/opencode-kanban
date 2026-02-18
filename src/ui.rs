@@ -15,9 +15,8 @@ use tuirealm::{
 
 use crate::app::{
     ActiveDialog, App, CATEGORY_COLOR_PALETTE, CategoryColorField, CategoryInputField,
-    CategoryInputMode, DeleteCategoryField, DeleteTaskField, NewTaskField, STATUS_BROKEN,
-    STATUS_REPO_UNAVAILABLE, SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode,
-    category_color_label,
+    CategoryInputMode, DeleteCategoryField, DeleteTaskField, NewTaskField, SettingsSection,
+    SidePanelRow, TodoVisualizationMode, View, ViewMode, category_color_label,
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
@@ -518,8 +517,7 @@ fn render_side_panel_category_details(
 
     let theme = app.theme;
     let accent = theme.category_accent(category_color.as_deref());
-    let (running, idle, broken, unavailable, waiting, dead, other) =
-        category_status_counts(app, *category_id);
+    let (running, idle) = category_status_counts(app, *category_id);
 
     let mut lines = vec![
         TextSpan::new("CATEGORY").fg(theme.base.header).bold(),
@@ -535,17 +533,7 @@ fn render_side_panel_category_details(
         TextSpan::new("STATUS").fg(theme.base.header).bold(),
         TextSpan::new(detail_kv("Running", &running.to_string())).fg(theme.status_color("running")),
         TextSpan::new(detail_kv("Idle", &idle.to_string())).fg(theme.status_color("idle")),
-        TextSpan::new(detail_kv("Broken", &broken.to_string()))
-            .fg(theme.status_color(STATUS_BROKEN)),
-        TextSpan::new(detail_kv("Unavailable", &unavailable.to_string()))
-            .fg(theme.status_color(STATUS_REPO_UNAVAILABLE)),
-        TextSpan::new(detail_kv("Waiting", &waiting.to_string())).fg(theme.status_color("waiting")),
-        TextSpan::new(detail_kv("Dead", &dead.to_string())).fg(theme.status_color("dead")),
     ];
-
-    if other > 0 {
-        lines.push(TextSpan::new(detail_kv("Other", &other.to_string())).fg(theme.base.text));
-    }
 
     lines.push(TextSpan::new(""));
     lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
@@ -606,7 +594,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
         }
         ActiveDialog::WorktreeNotFound(state) => {
             let text = format!(
-                "Worktree missing for task '{}'.\n\nEnter: recreate  m: mark broken  Esc: cancel",
+                "Worktree missing for task '{}'.\n\nEnter: recreate  m: mark idle  Esc: cancel",
                 state.task_title
             );
             render_message_dialog(frame, dialog_area, app, "Worktree Not Found", &text);
@@ -1329,35 +1317,23 @@ fn scrollbar_position_for_offset(
     ((clamped_offset as u128) * (max_position as u128) / (max_offset as u128)) as usize
 }
 
-fn category_status_counts(
-    app: &App,
-    category_id: uuid::Uuid,
-) -> (usize, usize, usize, usize, usize, usize, usize) {
+fn category_status_counts(app: &App, category_id: uuid::Uuid) -> (usize, usize) {
     let mut running = 0;
     let mut idle = 0;
-    let mut broken = 0;
-    let mut unavailable = 0;
-    let mut waiting = 0;
-    let mut dead = 0;
-    let mut other = 0;
 
     for task in app
         .tasks
         .iter()
         .filter(|task| task.category_id == category_id)
     {
-        match task.tmux_status.as_str() {
-            "running" => running += 1,
-            "idle" => idle += 1,
-            STATUS_BROKEN => broken += 1,
-            STATUS_REPO_UNAVAILABLE => unavailable += 1,
-            "waiting" => waiting += 1,
-            "dead" => dead += 1,
-            _ => other += 1,
+        if task.tmux_status == "running" {
+            running += 1;
+        } else {
+            idle += 1;
         }
     }
 
-    (running, idle, broken, unavailable, waiting, dead, other)
+    (running, idle)
 }
 
 const TASK_TITLE_MAX: usize = 34;
@@ -1542,12 +1518,7 @@ fn status_spinner_ascii(status: &str, pulse_phase: u8) -> &'static str {
             2 => ":.",
             _ => "..",
         },
-        "waiting" => "..",
-        "idle" => "--",
-        "dead" => "xx",
-        STATUS_BROKEN => "!!",
-        STATUS_REPO_UNAVAILABLE => "!!",
-        _ => "..",
+        _ => "--",
     }
 }
 

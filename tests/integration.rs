@@ -187,7 +187,7 @@ async fn integration_test_server_first_lifecycle_with_stale_binding_transition()
 
         wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
             current.status_source == "none"
-                && current.tmux_status == "dead"
+                && current.tmux_status == "idle"
                 && current
                     .status_error
                     .as_deref()
@@ -260,7 +260,7 @@ async fn integration_test_server_failure_falls_back_to_tmux_across_poll_cycles()
         let _app = App::new(None)?;
 
         wait_for_task(&db_path, task.id, Duration::from_secs(12), |current| {
-            current.tmux_status == "dead"
+            current.tmux_status == "idle"
                 && current.status_source == "none"
                 && current
                     .status_error

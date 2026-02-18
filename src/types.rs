@@ -51,18 +51,22 @@ pub struct SessionTodoItem {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub enum SessionState {
     Running,
-    Waiting,
     Idle,
-    Dead,
 }
 
 impl SessionState {
     pub fn as_str(self) -> &'static str {
         match self {
             SessionState::Running => "running",
-            SessionState::Waiting => "waiting",
             SessionState::Idle => "idle",
-            SessionState::Dead => "dead",
+        }
+    }
+
+    pub fn from_raw_status(raw: &str) -> Self {
+        let normalized = raw.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "running" | "active" | "thinking" | "processing" | "busy" => SessionState::Running,
+            _ => SessionState::Idle,
         }
     }
 }
