@@ -10,6 +10,7 @@ use tracing::warn;
 use crate::theme::ThemePreset;
 
 const DEFAULT_THEME: &str = "default";
+const DEFAULT_DEFAULT_VIEW: &str = "kanban";
 const MIN_POLL_INTERVAL_MS: u64 = 500;
 const MAX_POLL_INTERVAL_MS: u64 = 30_000;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
@@ -21,6 +22,7 @@ const DEFAULT_SIDE_PANEL_WIDTH: u16 = 40;
 #[serde(default)]
 pub struct Settings {
     pub theme: String,
+    pub default_view: String,
     pub poll_interval_ms: u64,
     pub side_panel_width: u16,
     pub keybindings: KeybindingsConfig,
@@ -38,6 +40,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: DEFAULT_THEME.to_string(),
+            default_view: DEFAULT_DEFAULT_VIEW.to_string(),
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             side_panel_width: DEFAULT_SIDE_PANEL_WIDTH,
             keybindings: KeybindingsConfig::default(),
@@ -153,6 +156,18 @@ impl Settings {
                 DEFAULT_THEME.to_string()
             }
         };
+
+        self.default_view = match self.default_view.trim().to_ascii_lowercase().as_str() {
+            "kanban" => "kanban".to_string(),
+            "detail" => "detail".to_string(),
+            _ => {
+                warn!(
+                    "invalid default_view '{}' in settings config; falling back to {}",
+                    self.default_view, DEFAULT_DEFAULT_VIEW
+                );
+                DEFAULT_DEFAULT_VIEW.to_string()
+            }
+        };
     }
 }
 
@@ -203,6 +218,7 @@ mod tests {
     fn test_default_settings() {
         let settings = Settings::default();
         assert_eq!(settings.theme, "default");
+        assert_eq!(settings.default_view, "kanban");
         assert_eq!(settings.poll_interval_ms, 1_000);
         assert_eq!(settings.side_panel_width, 40);
         assert_eq!(settings.keybindings, KeybindingsConfig::default());
@@ -239,6 +255,7 @@ mod tests {
 
         let settings = Settings::load_from_path(&path);
         assert_eq!(settings.theme, "mono");
+        assert_eq!(settings.default_view, DEFAULT_DEFAULT_VIEW);
         assert_eq!(settings.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS);
         assert_eq!(settings.side_panel_width, DEFAULT_SIDE_PANEL_WIDTH);
         assert_eq!(settings.keybindings, KeybindingsConfig::default());
@@ -250,6 +267,7 @@ mod tests {
         let path = settings_file_path(&temp_dir);
         let mut expected = Settings {
             theme: "high-contrast".to_string(),
+            default_view: "detail".to_string(),
             poll_interval_ms: 2_500,
             side_panel_width: 55,
             keybindings: KeybindingsConfig::default(),
@@ -268,6 +286,7 @@ mod tests {
     fn test_validate_clamps_values() {
         let mut settings = Settings {
             theme: "default".to_string(),
+            default_view: "kanban".to_string(),
             poll_interval_ms: 1,
             side_panel_width: 999,
             keybindings: KeybindingsConfig::default(),
@@ -290,6 +309,7 @@ mod tests {
     fn test_validate_invalid_theme() {
         let mut settings = Settings {
             theme: "retro-wave".to_string(),
+            default_view: "kanban".to_string(),
             ..Settings::default()
         };
 
@@ -299,12 +319,25 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_invalid_default_view() {
+        let mut settings = Settings {
+            default_view: "list".to_string(),
+            ..Settings::default()
+        };
+
+        settings.validate();
+
+        assert_eq!(settings.default_view, "kanban");
+    }
+
+    #[test]
     fn test_atomic_write_creates_dirs() {
         let temp_dir = TempDir::new();
         let path = settings_file_path(&temp_dir);
 
         let settings = Settings {
             theme: "mono".to_string(),
+            default_view: "detail".to_string(),
             ..Settings::default()
         };
 

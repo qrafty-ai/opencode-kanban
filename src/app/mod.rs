@@ -160,6 +160,7 @@ impl App {
             .ok()
             .and_then(|value| TodoVisualizationMode::from_str(&value).ok())
             .unwrap_or(TodoVisualizationMode::Checklist);
+        let default_view_mode = default_view_mode(&settings);
 
         let mut app = Self {
             should_quit: false,
@@ -192,7 +193,7 @@ impl App {
             _server_manager: server_manager,
             poller_stop,
             poller_thread: None,
-            view_mode: ViewMode::SidePanel,
+            view_mode: default_view_mode,
             side_panel_width: settings.side_panel_width,
             side_panel_selected_row: 0,
             collapsed_categories: HashSet::new(),
@@ -595,7 +596,7 @@ impl App {
                     && state.active_section == SettingsSection::General
                 {
                     state.general_selected_field =
-                        state.general_selected_field.saturating_add(1).min(1);
+                        state.general_selected_field.saturating_add(1).min(2);
                 }
             }
             Message::SettingsPrevItem => {
@@ -621,7 +622,7 @@ impl App {
                             self.save_settings_with_notice();
                         }
                         SettingsSection::General => {
-                            match state.general_selected_field.min(1) {
+                            match state.general_selected_field.min(2) {
                                 0 => {
                                     let next = self.settings.poll_interval_ms.saturating_add(500);
                                     self.settings.poll_interval_ms =
@@ -633,6 +634,14 @@ impl App {
                                     self.settings.side_panel_width =
                                         if next > 80 { 20 } else { next };
                                     self.side_panel_width = self.settings.side_panel_width;
+                                }
+                                2 => {
+                                    self.settings.default_view =
+                                        if self.settings.default_view == "kanban" {
+                                            "detail".to_string()
+                                        } else {
+                                            "kanban".to_string()
+                                        };
                                 }
                                 _ => {}
                             }
@@ -1868,6 +1877,14 @@ impl App {
     }
 }
 
+fn default_view_mode(settings: &crate::settings::Settings) -> ViewMode {
+    if settings.default_view == "detail" {
+        ViewMode::SidePanel
+    } else {
+        ViewMode::Kanban
+    }
+}
+
 fn palette_index_for(current: Option<&str>) -> usize {
     CATEGORY_COLOR_PALETTE
         .iter()
@@ -2479,6 +2496,26 @@ mod tests {
         assert!(!app.category_edit_mode);
 
         Ok(())
+    }
+
+    #[test]
+    fn default_view_setting_maps_to_kanban_mode() {
+        let settings = crate::settings::Settings {
+            default_view: "kanban".to_string(),
+            ..crate::settings::Settings::default()
+        };
+
+        assert_eq!(default_view_mode(&settings), ViewMode::Kanban);
+    }
+
+    #[test]
+    fn default_view_setting_maps_to_detail_mode() {
+        let settings = crate::settings::Settings {
+            default_view: "detail".to_string(),
+            ..crate::settings::Settings::default()
+        };
+
+        assert_eq!(default_view_mode(&settings), ViewMode::SidePanel);
     }
 
     #[test]

@@ -2172,6 +2172,13 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &App) {
     )))
     .add_row();
 
+    let default_view_prefix = if selected_field == 2 { "> " } else { "  " };
+    rows.add_col(TextSpan::from(format!(
+        "{}Default View: {}",
+        default_view_prefix, app.settings.default_view
+    )))
+    .add_row();
+
     let mut list = List::default()
         .title("General", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
@@ -2196,7 +2203,7 @@ fn render_settings_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let help_text = match active_section {
         SettingsSection::Theme => "Space/Enter: cycle theme  h/l: section  Esc: close",
         SettingsSection::Keybindings => "h/l: section  Esc: close",
-        SettingsSection::General => "j/k: select  h/l: section  Esc: close",
+        SettingsSection::General => "j/k: select  Space/Enter: cycle  h/l: section  Esc: close",
     };
 
     let mut footer = Label::default()
