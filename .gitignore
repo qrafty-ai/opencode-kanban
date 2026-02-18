@@ -7,3 +7,6 @@
 !.sisyphus/rules/
 __pycache__/
 *.py[cod]
+# AUR deploy SSH keys (never commit)
+aur_deploy
+aur_deploy.pub
