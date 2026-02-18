@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use crossterm::event::{KeyEvent, MouseEvent};
 
 use super::state::{
-    CategoryInputField, DeleteTaskField, NewProjectField, NewTaskField, RenameProjectField,
-    RenameRepoField,
+    CategoryInputField, DeleteTaskField, DetailFocus, NewProjectField, NewTaskField,
+    RenameProjectField, RenameRepoField, SettingsSection,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -34,10 +34,15 @@ pub enum Message {
     SettingsToggle,
     SettingsDecreaseItem,
     SettingsResetItem,
+    SettingsSelectSection(SettingsSection),
+    SettingsSelectGeneralField(usize),
+    SettingsSelectCategoryColor(usize),
+    SettingsSelectRepo(usize),
     DismissDialog,
     FocusColumn(usize),
     SelectTask(usize, usize),
     SelectTaskInSidePanel(usize),
+    FocusSidePanel(DetailFocus),
     ToggleSidePanelCategoryCollapse,
     OpenAddCategoryDialog,
     OpenRenameCategoryDialog,

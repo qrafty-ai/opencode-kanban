@@ -16,13 +16,14 @@ use tuirealm::{
     },
 };
 
+use crate::app::interaction::InteractionLayer;
 use crate::app::{
     ActiveDialog, App, ArchiveTaskDialogState, CATEGORY_COLOR_PALETTE, CategoryColorField,
-    CategoryInputField, CategoryInputMode, ConfirmCancelField, DeleteProjectDialogState,
-    DeleteRepoDialogState, DeleteTaskField, DetailFocus, NewProjectDialogState, NewProjectField,
-    NewTaskField, ProjectDetailCache, RenameProjectDialogState, RenameProjectField,
-    RenameRepoDialogState, RenameRepoField, SettingsSection, SidePanelRow, TodoVisualizationMode,
-    View, ViewMode, category_color_label,
+    CategoryInputField, CategoryInputMode, ConfirmCancelField, ContextMenuItem,
+    DeleteProjectDialogState, DeleteRepoDialogState, DeleteTaskField, DetailFocus, Message,
+    NewProjectDialogState, NewProjectField, NewTaskField, ProjectDetailCache,
+    RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
+    SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode, category_color_label,
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
@@ -35,7 +36,7 @@ pub enum OverlayAnchor {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
-    app.hit_test_map.clear();
+    app.interaction_map.clear();
 
     match app.current_view {
         View::ProjectList => render_project_list(frame, app),
@@ -47,9 +48,13 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     if app.active_dialog != ActiveDialog::None {
         render_dialog(frame, app);
     }
+
+    if app.context_menu.is_some() {
+        render_context_menu(frame, app);
+    }
 }
 
-fn render_project_list(frame: &mut Frame<'_>, app: &App) {
+fn render_project_list(frame: &mut Frame<'_>, app: &mut App) {
     let theme = app.theme;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -75,6 +80,7 @@ fn render_project_list(frame: &mut Frame<'_>, app: &App) {
     let mut rows = TableBuilder::default();
     for (idx, project) in app.project_list.iter().enumerate() {
         let is_selected = idx == app.selected_project_index;
+        let is_hovered = app.hovered_message.as_ref() == Some(&Message::SelectProject(idx));
         let is_active = app
             .current_project_path
             .as_ref()
@@ -82,7 +88,7 @@ fn render_project_list(frame: &mut Frame<'_>, app: &App) {
             .unwrap_or(false);
         let marker = if is_active { "*" } else { " " };
         let name = format!("{} {}", marker, project.name);
-        if is_selected {
+        if is_selected || is_hovered {
             rows.add_col(TextSpan::new(name).fg(theme.interactive.focus).bold())
                 .add_row();
         } else {
@@ -111,6 +117,23 @@ fn render_project_list(frame: &mut Frame<'_>, app: &App) {
         .selected_line(selected);
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, content[0]);
+
+    let list_rect = content[0];
+    let content_x = list_rect.x + 1;
+    let content_y = list_rect.y + 2;
+    let content_width = list_rect.width.saturating_sub(2);
+    let content_height = list_rect.height.saturating_sub(2);
+
+    for (idx, _project) in app.project_list.iter().enumerate() {
+        if idx < content_height as usize {
+            let row_rect = Rect::new(content_x, content_y + idx as u16, content_width, 1);
+            app.interaction_map.register_click(
+                InteractionLayer::Base,
+                row_rect,
+                Message::SelectProject(idx),
+            );
+        }
+    }
 
     render_project_detail_panel(frame, content[1], app);
 
@@ -188,7 +211,7 @@ fn render_project_detail_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
     paragraph.view(frame, area);
 }
 
-fn render_board(frame: &mut Frame<'_>, app: &App) {
+fn render_board(frame: &mut Frame<'_>, app: &mut App) {
     let theme = app.theme;
     let mut canvas = Paragraph::default()
         .background(theme.base.surface)
@@ -387,7 +410,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     footer.view(frame, area);
 }
 
-fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let theme = app.theme;
     if app.categories.is_empty() {
         render_empty_state(frame, area, "No categories yet. Press c to add one.", app);
@@ -401,6 +424,8 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             app.categories.len()
         ])
         .split(area);
+
+    let mut hit_test_entries: Vec<(Rect, Message, bool)> = Vec::new();
 
     for (slot, (column_idx, category)) in sorted_categories(app).into_iter().enumerate() {
         let mut rows = TableBuilder::default();
@@ -421,15 +446,19 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .unwrap_or(0)
             .min(tasks.len().saturating_sub(1));
         let is_focused_column = column_idx == app.focused_column;
+        let is_header_hovered =
+            app.hovered_message.as_ref() == Some(&Message::FocusColumn(column_idx));
 
         let tile_width =
             list_inner_width(columns[slot]).saturating_sub(usize::from(show_scrollbar));
         for (task_index, task) in tasks.iter().enumerate() {
+            let is_hovered =
+                app.hovered_message.as_ref() == Some(&Message::SelectTask(column_idx, task_index));
             append_task_tile_rows(
                 &mut rows,
                 app,
                 task,
-                is_focused_column && task_index == selected_task,
+                (is_focused_column && task_index == selected_task) || is_hovered,
                 tile_width,
                 accent,
             );
@@ -446,7 +475,11 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 format!("{} ({})", category.name, tasks.len()),
                 Alignment::Left,
             )
-            .borders(rounded_borders(accent))
+            .borders(rounded_borders(if is_focused_column || is_header_hovered {
+                theme.interactive.focus
+            } else {
+                accent
+            }))
             .foreground(theme.base.text)
             .background(theme.base.surface)
             .scroll(true)
@@ -458,6 +491,29 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             AttrValue::Flag(column_idx == app.focused_column),
         );
         list.view(frame, columns[slot]);
+
+        let scroll_offset = column_scroll_offset(selected_line, row_count, viewport_lines);
+        let col_rect = columns[slot];
+        let content_x = col_rect.x + 1;
+        let content_y = col_rect.y + 2;
+        let content_width = col_rect.width.saturating_sub(2);
+
+        for (task_index, _task) in tasks.iter().enumerate() {
+            let tile_start_line = task_index * 5;
+            if tile_start_line >= scroll_offset && tile_start_line < scroll_offset + viewport_lines
+            {
+                let visible_y = content_y + (tile_start_line - scroll_offset) as u16;
+                let task_rect = Rect::new(content_x, visible_y, content_width, 5);
+                hit_test_entries.push((
+                    task_rect,
+                    Message::SelectTask(column_idx, task_index),
+                    true,
+                ));
+            }
+        }
+
+        let header_rect = Rect::new(col_rect.x, col_rect.y, col_rect.width, 2);
+        hit_test_entries.push((header_rect, Message::FocusColumn(column_idx), false));
 
         if show_scrollbar {
             let scroll_offset = column_scroll_offset(selected_line, row_count, viewport_lines);
@@ -486,9 +542,19 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &App) {
             }
         }
     }
+
+    for (rect, message, is_task) in hit_test_entries {
+        if is_task {
+            app.interaction_map
+                .register_task(InteractionLayer::Base, rect, message);
+        } else {
+            app.interaction_map
+                .register_click(InteractionLayer::Base, rect, message);
+        }
+    }
 }
 
-fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     if app.categories.is_empty() {
         render_empty_state(frame, area, "No categories yet. Press c to add one.", app);
         return;
@@ -515,7 +581,7 @@ fn render_side_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn render_side_panel_list(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     rows_data: &[SidePanelRow],
 ) {
     let theme = app.theme;
@@ -532,6 +598,8 @@ fn render_side_panel_list(
     let tile_width = list_inner_width(area).saturating_sub(usize::from(show_scrollbar));
     let mut rows = TableBuilder::default();
     for (row_index, row) in rows_data.iter().enumerate() {
+        let is_hovered =
+            app.hovered_message.as_ref() == Some(&Message::SelectTaskInSidePanel(row_index));
         match row {
             SidePanelRow::CategoryHeader {
                 category_name,
@@ -545,7 +613,7 @@ fn render_side_panel_list(
                 let marker = if *collapsed { ">" } else { "v" };
                 let text = format!("{marker} {category_name} ({visible_tasks}/{total_tasks})");
                 let line = pad_to_width(&format!(" {text}"), tile_width);
-                let style = if row_index == selected_row {
+                let style = if row_index == selected_row || is_hovered {
                     theme.tile_colors(true)
                 } else {
                     theme.tile_colors(false)
@@ -558,7 +626,7 @@ fn render_side_panel_list(
                     &mut rows,
                     app,
                     task,
-                    row_index == selected_row,
+                    row_index == selected_row || is_hovered,
                     tile_width,
                     theme.interactive.selected_border,
                 );
@@ -582,8 +650,42 @@ fn render_side_panel_list(
     );
     list.view(frame, area);
 
+    app.interaction_map.register_click(
+        InteractionLayer::Base,
+        area,
+        Message::FocusSidePanel(DetailFocus::List),
+    );
+
+    let selected_line = side_panel_selected_line(rows_data, selected_row);
+    let scroll_offset = column_scroll_offset(selected_line, row_count, viewport_lines);
+    let content_x = area.x.saturating_add(1);
+    let content_y = area.y.saturating_add(1);
+    let content_width = area.width.saturating_sub(2);
+
+    if content_width > 0 && viewport_lines > 0 {
+        let viewport_start = scroll_offset;
+        let viewport_end = scroll_offset + viewport_lines;
+        let mut row_start = 0usize;
+
+        for (row_index, row) in rows_data.iter().enumerate() {
+            let row_height = side_panel_row_lines(row);
+            let row_end = row_start + row_height;
+            let visible_start = row_start.max(viewport_start);
+            let visible_end = row_end.min(viewport_end);
+            if visible_end > visible_start {
+                let y = content_y + (visible_start - viewport_start) as u16;
+                let h = (visible_end - visible_start) as u16;
+                app.interaction_map.register_click(
+                    InteractionLayer::Base,
+                    Rect::new(content_x, y, content_width, h),
+                    Message::SelectTaskInSidePanel(row_index),
+                );
+            }
+            row_start = row_end;
+        }
+    }
+
     if show_scrollbar {
-        let scroll_offset = column_scroll_offset(selected_line, row_count, viewport_lines);
         let mut state = ScrollbarState::new(row_count)
             .position(scrollbar_position_for_offset(
                 scroll_offset,
@@ -608,7 +710,7 @@ fn render_side_panel_list(
 fn render_side_panel_details(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     rows_data: &[SidePanelRow],
 ) {
     if rows_data.is_empty() {
@@ -625,7 +727,7 @@ fn render_side_panel_details(
     }
 }
 
-fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, task: &Task) {
+fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &mut App, task: &Task) {
     let theme = app.theme;
 
     let split = app.log_split_ratio.clamp(35, 80);
@@ -744,9 +846,20 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, 
     }
 
     render_log_panel(frame, sections[1], app);
+
+    app.interaction_map.register_click(
+        InteractionLayer::Base,
+        sections[0],
+        Message::FocusSidePanel(DetailFocus::Details),
+    );
+    app.interaction_map.register_click(
+        InteractionLayer::Base,
+        sections[1],
+        Message::FocusSidePanel(DetailFocus::Log),
+    );
 }
 
-fn render_log_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_log_panel(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let theme = app.theme;
     let entries = app
         .current_log_buffer
@@ -813,7 +926,7 @@ fn render_log_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn render_side_panel_category_details(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     row: &SidePanelRow,
 ) {
     let SidePanelRow::CategoryHeader {
@@ -901,9 +1014,15 @@ fn render_side_panel_category_details(
             frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
         }
     }
+
+    app.interaction_map.register_click(
+        InteractionLayer::Base,
+        area,
+        Message::FocusSidePanel(DetailFocus::Details),
+    );
 }
 
-fn render_dialog(frame: &mut Frame<'_>, app: &App) {
+fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
     if matches!(app.active_dialog, ActiveDialog::Help) {
         render_help_overlay(frame, app);
         return;
@@ -933,22 +1052,22 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
     let dialog_area = calculate_overlay_area(anchor, width_percent, height_percent, frame.area());
     frame.render_widget(Clear, dialog_area);
 
-    match &app.active_dialog {
-        ActiveDialog::NewTask(state) => render_new_task_dialog(frame, dialog_area, app, state),
+    match app.active_dialog.clone() {
+        ActiveDialog::NewTask(state) => render_new_task_dialog(frame, dialog_area, app, &state),
         ActiveDialog::DeleteTask(state) => {
-            render_delete_task_dialog(frame, dialog_area, app, state)
+            render_delete_task_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::ArchiveTask(state) => {
-            render_archive_task_dialog(frame, dialog_area, app, state)
+            render_archive_task_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::CategoryInput(state) => {
-            render_category_dialog(frame, dialog_area, app, state)
+            render_category_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::CategoryColor(state) => {
-            render_category_color_dialog(frame, dialog_area, app, state)
+            render_category_color_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::DeleteCategory(state) => {
-            render_delete_category_dialog(frame, dialog_area, app, state)
+            render_delete_category_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::Error(state) => {
             let text = format!("{}\n\n{}", state.title, state.detail);
@@ -969,25 +1088,25 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
             render_message_dialog(frame, dialog_area, app, "Repository Unavailable", &text);
         }
         ActiveDialog::ConfirmQuit(state) => {
-            render_confirm_quit_dialog(frame, dialog_area, app, state);
+            render_confirm_quit_dialog(frame, dialog_area, app, &state);
         }
         ActiveDialog::CommandPalette(state) => {
-            render_command_palette_dialog(frame, dialog_area, app, state)
+            render_command_palette_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::NewProject(state) => {
-            render_new_project_dialog(frame, dialog_area, app, state)
+            render_new_project_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::RenameProject(state) => {
-            render_rename_project_dialog(frame, dialog_area, app, state)
+            render_rename_project_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::DeleteProject(state) => {
-            render_delete_project_dialog(frame, dialog_area, app, state)
+            render_delete_project_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::RenameRepo(state) => {
-            render_rename_repo_dialog(frame, dialog_area, app, state)
+            render_rename_repo_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::DeleteRepo(state) => {
-            render_delete_repo_dialog(frame, dialog_area, app, state)
+            render_delete_repo_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::MoveTask(_) | ActiveDialog::None | ActiveDialog::Help => {}
     }
@@ -996,7 +1115,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &App) {
 fn render_new_task_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &crate::app::NewTaskDialogState,
 ) {
     let theme = app.theme;
@@ -1092,6 +1211,7 @@ fn render_new_task_dialog(
         matches!(state.focused_field, NewTaskField::Create),
         false,
         app,
+        Some(Message::CreateTask),
     );
     render_action_button(
         frame,
@@ -1100,6 +1220,7 @@ fn render_new_task_dialog(
         matches!(state.focused_field, NewTaskField::Cancel),
         false,
         app,
+        Some(Message::DismissDialog),
     );
 
     let mut hint = Label::default()
@@ -1113,7 +1234,7 @@ fn render_new_task_dialog(
 fn render_delete_task_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &crate::app::DeleteTaskDialogState,
 ) {
     let theme = app.theme;
@@ -1181,6 +1302,7 @@ fn render_delete_task_dialog(
         matches!(state.focused_field, DeleteTaskField::Delete),
         true,
         app,
+        Some(Message::ConfirmDeleteTask),
     );
     render_action_button(
         frame,
@@ -1189,13 +1311,14 @@ fn render_delete_task_dialog(
         matches!(state.focused_field, DeleteTaskField::Cancel),
         false,
         app,
+        Some(Message::DismissDialog),
     );
 }
 
 fn render_archive_task_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &ArchiveTaskDialogState,
 ) {
     let text = format!("Archive task '{}' ?", state.task_title);
@@ -1209,6 +1332,8 @@ fn render_archive_task_dialog(
             confirm_label: "Archive",
             confirm_destructive: false,
             focused_field: state.focused_field,
+            confirm_message: Message::ConfirmArchiveTask,
+            cancel_message: Message::DismissDialog,
         },
     );
 }
@@ -1216,7 +1341,7 @@ fn render_archive_task_dialog(
 fn render_category_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &crate::app::CategoryInputDialogState,
 ) {
     let theme = app.theme;
@@ -1269,6 +1394,7 @@ fn render_category_dialog(
         matches!(state.focused_field, CategoryInputField::Confirm),
         false,
         app,
+        Some(Message::SubmitCategoryInput),
     );
     render_action_button(
         frame,
@@ -1277,6 +1403,7 @@ fn render_category_dialog(
         matches!(state.focused_field, CategoryInputField::Cancel),
         false,
         app,
+        Some(Message::DismissDialog),
     );
 
     let mut hint = Label::default()
@@ -1290,7 +1417,7 @@ fn render_category_dialog(
 fn render_delete_category_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &crate::app::DeleteCategoryDialogState,
 ) {
     let text = if state.task_count > 0 {
@@ -1312,6 +1439,8 @@ fn render_delete_category_dialog(
             confirm_label: "Delete",
             confirm_destructive: true,
             focused_field: state.focused_field,
+            confirm_message: Message::ConfirmDeleteCategory,
+            cancel_message: Message::DismissDialog,
         },
     );
 }
@@ -1319,7 +1448,7 @@ fn render_delete_category_dialog(
 fn render_confirm_quit_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &crate::app::ConfirmQuitDialogState,
 ) {
     let text = format!(
@@ -1336,6 +1465,8 @@ fn render_confirm_quit_dialog(
             confirm_label: "Quit",
             confirm_destructive: true,
             focused_field: state.focused_field,
+            confirm_message: Message::ConfirmQuit,
+            cancel_message: Message::DismissDialog,
         },
     );
 }
@@ -1346,12 +1477,14 @@ struct ConfirmCancelDialogSpec<'a> {
     confirm_label: &'a str,
     confirm_destructive: bool,
     focused_field: ConfirmCancelField,
+    confirm_message: Message,
+    cancel_message: Message,
 }
 
 fn render_confirm_cancel_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     spec: ConfirmCancelDialogSpec<'_>,
 ) {
     let theme = app.theme;
@@ -1392,6 +1525,7 @@ fn render_confirm_cancel_dialog(
         matches!(spec.focused_field, ConfirmCancelField::Confirm),
         spec.confirm_destructive,
         app,
+        Some(spec.confirm_message.clone()),
     );
     render_action_button(
         frame,
@@ -1400,6 +1534,7 @@ fn render_confirm_cancel_dialog(
         matches!(spec.focused_field, ConfirmCancelField::Cancel),
         false,
         app,
+        Some(spec.cancel_message.clone()),
     );
 
     let mut hint = Label::default()
@@ -1413,7 +1548,7 @@ fn render_confirm_cancel_dialog(
 fn render_new_project_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &NewProjectDialogState,
 ) {
     let theme = app.theme;
@@ -1457,6 +1592,7 @@ fn render_new_project_dialog(
         matches!(state.focused_field, NewProjectField::Create),
         false,
         app,
+        Some(Message::CreateProject),
     );
     render_action_button(
         frame,
@@ -1465,6 +1601,7 @@ fn render_new_project_dialog(
         matches!(state.focused_field, NewProjectField::Cancel),
         false,
         app,
+        Some(Message::DismissDialog),
     );
 
     let mut hint = Label::default()
@@ -1478,7 +1615,7 @@ fn render_new_project_dialog(
 fn render_rename_project_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &RenameProjectDialogState,
 ) {
     let theme = app.theme;
@@ -1522,6 +1659,7 @@ fn render_rename_project_dialog(
         matches!(state.focused_field, RenameProjectField::Confirm),
         false,
         app,
+        Some(Message::ConfirmRenameProject),
     );
     render_action_button(
         frame,
@@ -1530,6 +1668,7 @@ fn render_rename_project_dialog(
         matches!(state.focused_field, RenameProjectField::Cancel),
         false,
         app,
+        Some(Message::DismissDialog),
     );
 
     let mut hint = Label::default()
@@ -1543,7 +1682,7 @@ fn render_rename_project_dialog(
 fn render_delete_project_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &DeleteProjectDialogState,
 ) {
     let theme = app.theme;
@@ -1580,8 +1719,24 @@ fn render_delete_project_dialog(
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(layout[2]);
 
-    render_action_button(frame, buttons[0], "Delete", true, true, app);
-    render_action_button(frame, buttons[1], "Cancel", false, false, app);
+    render_action_button(
+        frame,
+        buttons[0],
+        "Delete",
+        true,
+        true,
+        app,
+        Some(Message::ConfirmDeleteProject),
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        false,
+        false,
+        app,
+        Some(Message::DismissDialog),
+    );
 
     let mut hint = Label::default()
         .text("Enter: confirm delete  Esc: cancel")
@@ -1594,7 +1749,7 @@ fn render_delete_project_dialog(
 fn render_rename_repo_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &RenameRepoDialogState,
 ) {
     let theme = app.theme;
@@ -1638,6 +1793,7 @@ fn render_rename_repo_dialog(
         matches!(state.focused_field, RenameRepoField::Confirm),
         false,
         app,
+        Some(Message::ConfirmRenameRepo),
     );
     render_action_button(
         frame,
@@ -1646,6 +1802,7 @@ fn render_rename_repo_dialog(
         matches!(state.focused_field, RenameRepoField::Cancel),
         false,
         app,
+        Some(Message::DismissDialog),
     );
 
     let mut hint = Label::default()
@@ -1659,7 +1816,7 @@ fn render_rename_repo_dialog(
 fn render_delete_repo_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &DeleteRepoDialogState,
 ) {
     let theme = app.theme;
@@ -1696,8 +1853,24 @@ fn render_delete_repo_dialog(
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(layout[2]);
 
-    render_action_button(frame, buttons[0], "Remove", true, true, app);
-    render_action_button(frame, buttons[1], "Cancel", false, false, app);
+    render_action_button(
+        frame,
+        buttons[0],
+        "Remove",
+        true,
+        true,
+        app,
+        Some(Message::ConfirmDeleteRepo),
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        false,
+        false,
+        app,
+        Some(Message::DismissDialog),
+    );
 
     let mut hint = Label::default()
         .text("Enter: confirm  Esc: cancel")
@@ -1710,7 +1883,7 @@ fn render_delete_repo_dialog(
 fn render_category_color_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &crate::app::CategoryColorDialogState,
 ) {
     let theme = app.theme;
@@ -1779,6 +1952,7 @@ fn render_category_color_dialog(
         matches!(state.focused_field, CategoryColorField::Confirm),
         false,
         app,
+        Some(Message::ConfirmCategoryColor),
     );
     render_action_button(
         frame,
@@ -1787,6 +1961,7 @@ fn render_category_color_dialog(
         matches!(state.focused_field, CategoryColorField::Cancel),
         false,
         app,
+        Some(Message::DismissDialog),
     );
 
     let mut hint = Label::default()
@@ -1797,12 +1972,21 @@ fn render_category_color_dialog(
     hint.view(frame, layout[3]);
 }
 
-fn render_message_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, title: &str, text: &str) {
+fn render_message_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &mut App,
+    title: &str,
+    text: &str,
+) {
     let theme = app.theme;
     let mut paragraph = dialog_panel(title, Alignment::Center, theme, dialog_surface(theme))
         .wrap(true)
         .text(text.lines().map(|line| TextSpan::from(line.to_string())));
     paragraph.view(frame, area);
+
+    app.interaction_map
+        .register_click(InteractionLayer::Dialog, area, Message::DismissDialog);
 }
 
 fn render_action_button(
@@ -1811,24 +1995,38 @@ fn render_action_button(
     label: &str,
     focused: bool,
     destructive: bool,
-    app: &App,
+    app: &mut App,
+    click_message: Option<Message>,
 ) {
     let theme = app.theme;
-    let (accent, fg, bg) = dialog_button_palette(theme, focused, destructive);
+    let hovered = click_message
+        .as_ref()
+        .is_some_and(|msg| app.hovered_message.as_ref() == Some(msg));
+    let highlighted = focused || hovered;
+    let (accent, fg, bg) = dialog_button_palette(theme, highlighted, destructive);
 
     let mut button = Paragraph::default()
         .borders(rounded_borders(accent))
         .foreground(fg)
-        .background(if focused { bg } else { dialog_surface(theme) })
+        .background(if highlighted {
+            bg
+        } else {
+            dialog_surface(theme)
+        })
         .alignment(Alignment::Center)
         .text([TextSpan::from(label.to_string())]);
     button.view(frame, area);
+
+    if let Some(message) = click_message {
+        app.interaction_map
+            .register_click(InteractionLayer::Dialog, area, message);
+    }
 }
 
 fn render_command_palette_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    app: &mut App,
     state: &crate::command_palette::CommandPaletteState,
 ) {
     let theme = app.theme;
@@ -1899,6 +2097,19 @@ fn render_command_palette_dialog(
         .inactive(Style::default().fg(theme.base.text_muted));
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, chunks[2]);
+
+    let results_area = chunks[2];
+    let content_x = results_area.x.saturating_add(1);
+    let content_y = results_area.y.saturating_add(1);
+    let content_width = results_area.width.saturating_sub(2);
+    let max_rows = results_area.height.saturating_sub(2) as usize;
+    for idx in 0..state.filtered.len().min(max_rows) {
+        app.interaction_map.register_click(
+            InteractionLayer::Dialog,
+            Rect::new(content_x, content_y + idx as u16, content_width, 1),
+            Message::SelectCommandPaletteItem(idx),
+        );
+    }
 }
 
 fn render_help_overlay(frame: &mut Frame<'_>, app: &App) {
@@ -2529,6 +2740,74 @@ fn calculate_overlay_area(
     }
 }
 
+fn render_context_menu(frame: &mut Frame<'_>, app: &mut App) {
+    let Some(ref menu) = app.context_menu else {
+        return;
+    };
+
+    let theme = app.theme;
+    let items = &menu.items;
+    let item_labels: Vec<&str> = items
+        .iter()
+        .map(|item| match item {
+            ContextMenuItem::Attach => " Attach ",
+            ContextMenuItem::Delete => " Delete ",
+            ContextMenuItem::Move => " Move   ",
+        })
+        .collect();
+
+    let width = item_labels.iter().map(|s| s.len()).max().unwrap_or(8) as u16 + 2;
+    let height = items.len() as u16 + 2;
+
+    let (mx, my) = menu.position;
+    let frame_width = frame.area().width;
+    let frame_height = frame.area().height;
+
+    let x = mx.min(frame_width.saturating_sub(width));
+    let y = my.min(frame_height.saturating_sub(height));
+
+    let menu_rect = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, menu_rect);
+
+    let mut rows = TableBuilder::default();
+    for (idx, label) in item_labels.iter().enumerate() {
+        if idx == menu.selected_index {
+            rows.add_col(
+                TextSpan::new(*label)
+                    .fg(theme.base.canvas)
+                    .bg(theme.interactive.focus)
+                    .bold(),
+            );
+        } else {
+            rows.add_col(
+                TextSpan::new(*label)
+                    .fg(theme.base.text)
+                    .bg(theme.base.surface),
+            );
+        }
+        rows.add_row();
+    }
+
+    let mut list = List::default()
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
+        .rows(rows.build());
+    list.view(frame, menu_rect);
+
+    for (idx, item) in items.iter().enumerate() {
+        let item_y = y + 1 + idx as u16;
+        let item_rect = Rect::new(x + 1, item_y, width.saturating_sub(2), 1);
+        let msg = match item {
+            ContextMenuItem::Attach => Message::AttachSelectedTask,
+            ContextMenuItem::Delete => Message::OpenDeleteTaskDialog,
+            ContextMenuItem::Move => Message::DismissDialog,
+        };
+        app.interaction_map
+            .register_click(InteractionLayer::ContextMenu, item_rect, msg);
+    }
+}
+
 fn command_palette_overlay_size(viewport: (u16, u16)) -> (u16, u16) {
     if viewport.0 < 30 { (90, 50) } else { (60, 50) }
 }
@@ -2565,7 +2844,7 @@ fn inset_rect(area: Rect, horizontal: u16, vertical: u16) -> Rect {
     Rect::new(x, y, width, height)
 }
 
-fn render_settings(frame: &mut Frame<'_>, app: &App) {
+fn render_settings(frame: &mut Frame<'_>, app: &mut App) {
     let theme = app.theme;
     let mut canvas = Paragraph::default()
         .background(theme.base.surface)
@@ -2586,7 +2865,7 @@ fn render_settings(frame: &mut Frame<'_>, app: &App) {
     render_settings_footer(frame, chunks[2], app);
 }
 
-fn render_settings_content(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_settings_content(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let sections = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
@@ -2596,7 +2875,7 @@ fn render_settings_content(frame: &mut Frame<'_>, area: Rect, app: &App) {
     render_settings_active_section(frame, sections[1], app);
 }
 
-fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let theme = app.theme;
     let active_section = app
         .settings_view_state
@@ -2604,13 +2883,15 @@ fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .map(|s| s.active_section)
         .unwrap_or(SettingsSection::General);
 
-    let mut rows = TableBuilder::default();
-    for section in [
+    let sidebar_sections = [
         SettingsSection::General,
         SettingsSection::CategoryColors,
         SettingsSection::Keybindings,
         SettingsSection::Repos,
-    ] {
+    ];
+
+    let mut rows = TableBuilder::default();
+    for section in sidebar_sections {
         let label = match section {
             SettingsSection::General => "General",
             SettingsSection::CategoryColors => "Category Colors",
@@ -2622,8 +2903,16 @@ fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         } else {
             "  "
         };
-        rows.add_col(TextSpan::from(format!("{}{}", prefix, label)))
-            .add_row();
+        let is_hovered =
+            app.hovered_message.as_ref() == Some(&Message::SettingsSelectSection(section));
+        let span = if section == active_section || is_hovered {
+            TextSpan::new(format!("{}{}", prefix, label))
+                .fg(theme.interactive.focus)
+                .bold()
+        } else {
+            TextSpan::from(format!("{}{}", prefix, label))
+        };
+        rows.add_col(span).add_row();
     }
 
     let selected_idx = match active_section {
@@ -2645,9 +2934,23 @@ fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .selected_line(selected_idx);
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, area);
+
+    let content_x = area.x.saturating_add(1);
+    let content_y = area.y.saturating_add(1);
+    let content_width = area.width.saturating_sub(2);
+    for (idx, section) in sidebar_sections.iter().enumerate() {
+        let row = content_y.saturating_add(idx as u16);
+        if row < area.y.saturating_add(area.height.saturating_sub(1)) {
+            app.interaction_map.register_click(
+                InteractionLayer::Base,
+                Rect::new(content_x, row, content_width, 1),
+                Message::SettingsSelectSection(*section),
+            );
+        }
+    }
 }
 
-fn render_settings_active_section(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_settings_active_section(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let active_section = app
         .settings_view_state
         .as_ref()
@@ -2660,7 +2963,7 @@ fn render_settings_active_section(frame: &mut Frame<'_>, area: Rect, app: &App) 
         SettingsSection::Repos => render_settings_repos(frame, area, app),
     }
 }
-fn render_settings_category_colors(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_settings_category_colors(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let theme = app.theme;
     let selected_field = app
         .settings_view_state
@@ -2675,13 +2978,21 @@ fn render_settings_category_colors(frame: &mut Frame<'_>, area: Rect, app: &App)
             .add_row();
     } else {
         for (index, category) in app.categories.iter().enumerate() {
-            let prefix = if index == selected_field { "> " } else { "  " };
+            let is_hovered =
+                app.hovered_message.as_ref() == Some(&Message::SettingsSelectCategoryColor(index));
+            let prefix = if index == selected_field || is_hovered {
+                "> "
+            } else {
+                "  "
+            };
             let color_label = category_color_label(category.color.as_deref());
-            rows.add_col(
-                TextSpan::new(format!("{}{}: {}", prefix, category.name, color_label))
-                    .fg(theme.category_accent(category.color.as_deref())),
-            )
-            .add_row();
+            let text = format!("{}{}: {}", prefix, category.name, color_label);
+            let span = if is_hovered {
+                TextSpan::new(text).fg(theme.interactive.focus).bold()
+            } else {
+                TextSpan::new(text).fg(theme.category_accent(category.color.as_deref()))
+            };
+            rows.add_col(span).add_row();
         }
     }
 
@@ -2697,9 +3008,21 @@ fn render_settings_category_colors(frame: &mut Frame<'_>, area: Rect, app: &App)
         .selected_line(selected_field);
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, area);
+
+    let content_x = area.x.saturating_add(1);
+    let content_y = area.y.saturating_add(1);
+    let content_width = area.width.saturating_sub(2);
+    let max_rows = area.height.saturating_sub(2) as usize;
+    for index in 0..app.categories.len().min(max_rows) {
+        app.interaction_map.register_click(
+            InteractionLayer::Base,
+            Rect::new(content_x, content_y + index as u16, content_width, 1),
+            Message::SettingsSelectCategoryColor(index),
+        );
+    }
 }
 
-fn render_settings_keybindings(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_settings_keybindings(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let theme = app.theme;
     let lines = app.keybindings.help_lines();
 
@@ -2727,7 +3050,7 @@ fn render_settings_keybindings(frame: &mut Frame<'_>, area: Rect, app: &App) {
     list.view(frame, area);
 }
 
-fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let theme = app.theme;
     let selected_field = app
         .settings_view_state
@@ -2755,7 +3078,9 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let mut rows = TableBuilder::default();
     for (i, (label, value)) in field_rows.iter().enumerate() {
-        let is_selected = i == selected_field;
+        let is_hovered =
+            app.hovered_message.as_ref() == Some(&Message::SettingsSelectGeneralField(i));
+        let is_selected = i == selected_field || is_hovered;
         let bg = if is_selected {
             theme.interactive.selected_bg
         } else {
@@ -2789,6 +3114,25 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .inactive(Style::default().fg(theme.base.text_muted));
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, layout[0]);
+
+    let list_area = layout[0];
+    let content_x = list_area.x.saturating_add(1);
+    let content_y = list_area.y.saturating_add(1);
+    let content_width = list_area.width.saturating_sub(2);
+    for index in 0..4 {
+        let row = content_y.saturating_add(index as u16);
+        if row
+            < list_area
+                .y
+                .saturating_add(list_area.height.saturating_sub(1))
+        {
+            app.interaction_map.register_click(
+                InteractionLayer::Base,
+                Rect::new(content_x, row, content_width, 1),
+                Message::SettingsSelectGeneralField(index),
+            );
+        }
+    }
 
     let info_lines: Vec<TextSpan> = match selected_field {
         0 => {
@@ -2896,7 +3240,7 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &App) {
     desc.view(frame, layout[1]);
 }
 
-fn render_settings_repos(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_settings_repos(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let theme = app.theme;
     let selected_field = app
         .settings_view_state
@@ -2912,21 +3256,32 @@ fn render_settings_repos(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .add_row();
     } else {
         for (index, repo) in app.repos.iter().enumerate() {
-            let prefix = if index == selected_field { "> " } else { "  " };
+            let is_hovered =
+                app.hovered_message.as_ref() == Some(&Message::SettingsSelectRepo(index));
+            let prefix = if index == selected_field || is_hovered {
+                "> "
+            } else {
+                "  "
+            };
             let path_short = clamp_text(&repo.path, 45);
             let base = repo
                 .default_base
                 .as_deref()
                 .filter(|b| !b.is_empty())
                 .unwrap_or("—");
-            rows.add_col(TextSpan::new(format!(
+            let span = TextSpan::new(format!(
                 "{}{:<20} {} [{}]",
                 prefix,
                 clamp_text(&repo.name, 20),
                 path_short,
                 base
-            )))
-            .add_row();
+            ))
+            .fg(if is_hovered {
+                theme.interactive.focus
+            } else {
+                theme.base.text
+            });
+            rows.add_col(span).add_row();
         }
     }
 
@@ -2941,6 +3296,18 @@ fn render_settings_repos(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .selected_line(selected_field);
     list.attr(Attribute::Focus, AttrValue::Flag(true));
     list.view(frame, area);
+
+    let content_x = area.x.saturating_add(1);
+    let content_y = area.y.saturating_add(1);
+    let content_width = area.width.saturating_sub(2);
+    let max_rows = area.height.saturating_sub(2) as usize;
+    for index in 0..app.repos.len().min(max_rows) {
+        app.interaction_map.register_click(
+            InteractionLayer::Base,
+            Rect::new(content_x, content_y + index as u16, content_width, 1),
+            Message::SettingsSelectRepo(index),
+        );
+    }
 }
 
 fn render_settings_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
