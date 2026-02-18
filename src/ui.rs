@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use tui_realm_stdlib::{Checkbox, Input, Label, List, Paragraph, Table};
 use tuirealm::{
     MockComponent,
@@ -212,7 +213,7 @@ fn render_board(frame: &mut Frame<'_>, app: &App) {
 fn render_archive(frame: &mut Frame<'_>, app: &App) {
     let theme = app.theme;
     let mut canvas = Paragraph::default()
-        .background(theme.base.surface)
+        .background(theme.base.canvas)
         .text([TextSpan::from("")]);
     canvas.view(frame, frame.area());
 
@@ -229,7 +230,7 @@ fn render_archive(frame: &mut Frame<'_>, app: &App) {
         .text(format!("Archive ({})", app.archived_tasks.len()))
         .alignment(Alignment::Left)
         .foreground(theme.base.header)
-        .background(theme.base.surface);
+        .background(theme.base.canvas);
     header.view(frame, chunks[0]);
 
     let body = Layout::default()
@@ -242,7 +243,7 @@ fn render_archive(frame: &mut Frame<'_>, app: &App) {
         let archived_label = task
             .archived_at
             .as_deref()
-            .map(|value| clamp_text(value, 19))
+            .map(format_archive_time)
             .unwrap_or_else(|| "unknown time".to_string());
         rows.add_col(
             TextSpan::new(format!("{}  {}", archived_label, task.title)).fg(theme.base.text_muted),
@@ -281,17 +282,18 @@ fn render_archive(frame: &mut Frame<'_>, app: &App) {
             .find(|category| category.id == task.category_id)
             .map(|category| category.name.as_str())
             .unwrap_or("unknown");
+        let archived_formatted = task
+            .archived_at
+            .as_deref()
+            .map(format_archive_time)
+            .unwrap_or_else(|| "unknown".to_string());
         vec![
             TextSpan::new("ARCHIVED TASK").fg(theme.base.header).bold(),
             TextSpan::new(detail_kv("Title", task.title.as_str())).fg(theme.base.text),
             TextSpan::new(detail_kv("Repo", repo_name)).fg(theme.base.text),
             TextSpan::new(detail_kv("Branch", task.branch.as_str())).fg(theme.base.text),
             TextSpan::new(detail_kv("Category", category_name)).fg(theme.base.text),
-            TextSpan::new(detail_kv(
-                "Archived",
-                task.archived_at.as_deref().unwrap_or("unknown"),
-            ))
-            .fg(theme.base.text_muted),
+            TextSpan::new(detail_kv("Archived", &archived_formatted)).fg(theme.base.text_muted),
             TextSpan::new(detail_kv(
                 "Path",
                 task.worktree_path.as_deref().unwrap_or("n/a"),
@@ -306,7 +308,7 @@ fn render_archive(frame: &mut Frame<'_>, app: &App) {
         .title("Details", Alignment::Left)
         .borders(rounded_borders(theme.interactive.focus))
         .foreground(theme.base.text)
-        .background(theme.base.surface)
+        .background(theme.base.canvas)
         .wrap(true)
         .text(details_lines);
     details.view(frame, body[1]);
@@ -315,7 +317,7 @@ fn render_archive(frame: &mut Frame<'_>, app: &App) {
         .text("j/k:select  u:unarchive  d:delete  Esc:back")
         .alignment(Alignment::Center)
         .foreground(theme.base.text_muted)
-        .background(theme.base.surface);
+        .background(theme.base.canvas);
     footer.view(frame, chunks[2]);
 }
 
@@ -2060,6 +2062,15 @@ fn pad_to_width(value: &str, width: usize) -> String {
 
 fn detail_kv(label: &str, value: &str) -> String {
     format!("{label:>8}: {value}")
+}
+
+fn format_archive_time(iso_timestamp: &str) -> String {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(iso_timestamp) {
+        let local = dt.with_timezone(&Utc);
+        local.format("%Y-%m-%d %H:%M").to_string()
+    } else {
+        iso_timestamp.to_string()
+    }
 }
 
 fn clamp_text(value: &str, max_chars: usize) -> String {
