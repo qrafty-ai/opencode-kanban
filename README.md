@@ -107,7 +107,13 @@ Only stable `vX.Y.Z` tags are supported (no alpha/pre-release variants).
 3. Add the **private key** as a GitHub Actions secret named `AUR_SSH_PRIVATE_KEY`:
    - Repository → Settings → Secrets and variables → Actions → New repository secret
    - Name: `AUR_SSH_PRIVATE_KEY`
-   - Value: contents of `aur_deploy` (the private key file)
+   - Value: **base64-encoded** private key — GitHub strips trailing newlines from secrets which corrupts PEM files; base64 avoids this:
+
+   ```bash
+   cat aur_deploy | base64 -w0
+   ```
+
+   Paste the single-line output as the secret value.
 
 4. Claim or create the `opencode-kanban` package on AUR (first publish does this automatically if the package doesn't exist yet).
 

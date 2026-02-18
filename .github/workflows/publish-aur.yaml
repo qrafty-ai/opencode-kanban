@@ -46,11 +46,11 @@ jobs:
 
       - name: Stamp PKGBUILD
         shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.sha256.outputs.sha256 }}
         run: |
           set -euo pipefail
-          VERSION="${{ steps.version.outputs.version }}"
-          SHA256="${{ steps.sha256.outputs.sha256 }}"
-
           python3 - <<'PY'
           import os, re
           from pathlib import Path
@@ -68,18 +68,75 @@ jobs:
           pkgbuild.write_text(text)
           print(f"Stamped PKGBUILD: version={version}, sha256={sha256}")
           PY
+
+      - name: Generate .SRCINFO
+        shell: bash
         env:
           VERSION: ${{ steps.version.outputs.version }}
           SHA256: ${{ steps.sha256.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
 
-      - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
-        with:
-          pkgname: opencode-kanban
-          pkgbuild: aur/PKGBUILD
-          commit_username: qrafty-ai[bot]
-          commit_email: github-actions@qrafty.ai
-          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          commit_message: "Update to v${{ steps.version.outputs.version }}"
-          allow_empty_commits: false
-          force_push: false
+          version = os.environ["VERSION"]
+          sha256  = os.environ["SHA256"]
+          pkgname = "opencode-kanban"
+          url     = f"https://github.com/qrafty-ai/{pkgname}"
+
+          srcinfo = (
+              f"pkgbase = {pkgname}\n"
+              f"\tpkgdesc = Terminal kanban board for managing OpenCode tmux sessions and Git worktrees\n"
+              f"\tpkgver = {version}\n"
+              f"\tpkgrel = 1\n"
+              f"\turl = {url}\n"
+              f"\tarch = x86_64\n"
+              f"\tarch = aarch64\n"
+              f"\tlicense = MIT\n"
+              f"\tmakedepends = rust\n"
+              f"\tmakedepends = cargo\n"
+              f"\tdepends = tmux\n"
+              f"\tsource = {pkgname}-{version}.tar.gz::{url}/archive/refs/tags/v{version}.tar.gz\n"
+              f"\tsha256sums = {sha256}\n"
+              f"\n"
+              f"%PACKAGE%\n"
+              f"pkgname = {pkgname}\n"
+          )
+
+          Path("aur/.SRCINFO").write_text(srcinfo)
+          print("Generated .SRCINFO:")
+          print(srcinfo)
+          PY
+
+      - name: Set up AUR SSH
+        shell: bash
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          # Secret is stored base64-encoded to survive GitHub's newline stripping
+          printf '%s' "${AUR_SSH_PRIVATE_KEY}" | base64 -d > ~/.ssh/aur_id_ed25519
+          chmod 600 ~/.ssh/aur_id_ed25519
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
+          {
+            echo "Host aur.archlinux.org"
+            echo "  IdentityFile ~/.ssh/aur_id_ed25519"
+            echo "  User aur"
+          } >> ~/.ssh/config
+
+      - name: Push to AUR
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone ssh://aur@aur.archlinux.org/opencode-kanban.git /tmp/aur-repo
+          cp aur/PKGBUILD /tmp/aur-repo/PKGBUILD
+          cp aur/.SRCINFO /tmp/aur-repo/.SRCINFO
+          cd /tmp/aur-repo
+          git config user.name "qrafty-ai[bot]"
+          git config user.email "github-actions@qrafty.ai"
+          git add PKGBUILD .SRCINFO
+          git diff --staged --stat
+          git commit -m "Update to v${{ steps.version.outputs.version }}" || echo "Nothing to commit"
+          git push
