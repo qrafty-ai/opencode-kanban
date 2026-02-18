@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use tui_realm_stdlib::{Checkbox, Input, Label, List, Paragraph, Table};
 use tuirealm::{
     MockComponent,
+    command::{Cmd, Direction as CmdDirection},
     props::{
         Alignment, AttrValue, Attribute, BorderType, Borders, Color, InputType, Style,
         TableBuilder, TextSpan,
@@ -1166,6 +1167,10 @@ fn render_delete_task_dialog(
                 | DeleteTaskField::RemoveWorktree
                 | DeleteTaskField::DeleteBranch
         )),
+    );
+    set_checkbox_highlight_choice(
+        &mut checkbox,
+        delete_task_checkbox_focus_index(state.focused_field),
     );
     checkbox.view(frame, layout[1]);
 
@@ -2472,6 +2477,23 @@ fn dialog_checkbox(title: &str, theme: Theme, background: Color) -> Checkbox {
         .inactive(Style::default().fg(theme.base.text_muted))
 }
 
+fn delete_task_checkbox_focus_index(field: DeleteTaskField) -> Option<usize> {
+    match field {
+        DeleteTaskField::KillTmux => Some(0),
+        DeleteTaskField::RemoveWorktree => Some(1),
+        DeleteTaskField::DeleteBranch => Some(2),
+        DeleteTaskField::Delete | DeleteTaskField::Cancel => None,
+    }
+}
+
+fn set_checkbox_highlight_choice(checkbox: &mut Checkbox, choice: Option<usize>) {
+    if let Some(choice) = choice {
+        for _ in 0..choice {
+            let _ = checkbox.perform(Cmd::Move(CmdDirection::Right));
+        }
+    }
+}
+
 fn dialog_button_palette(theme: Theme, focused: bool, destructive: bool) -> (Color, Color, Color) {
     let accent = if destructive {
         theme.base.danger
@@ -3124,6 +3146,44 @@ mod tests {
         let lines = todo_checklist_lines(&todos);
         assert!(lines[0].0.contains("[•] first"));
         assert!(lines[1].0.contains("[ ] second"));
+    }
+
+    #[test]
+    fn test_delete_task_checkbox_focus_index_maps_fields() {
+        assert_eq!(
+            delete_task_checkbox_focus_index(DeleteTaskField::KillTmux),
+            Some(0)
+        );
+        assert_eq!(
+            delete_task_checkbox_focus_index(DeleteTaskField::RemoveWorktree),
+            Some(1)
+        );
+        assert_eq!(
+            delete_task_checkbox_focus_index(DeleteTaskField::DeleteBranch),
+            Some(2)
+        );
+        assert_eq!(
+            delete_task_checkbox_focus_index(DeleteTaskField::Delete),
+            None
+        );
+        assert_eq!(
+            delete_task_checkbox_focus_index(DeleteTaskField::Cancel),
+            None
+        );
+    }
+
+    #[test]
+    fn test_set_checkbox_highlight_choice_uses_stdlib_navigation() {
+        let mut checkbox = Checkbox::default()
+            .choices(["Kill tmux", "Remove worktree", "Delete branch"])
+            .values(&[])
+            .rewind(false);
+
+        set_checkbox_highlight_choice(&mut checkbox, Some(2));
+        assert_eq!(checkbox.states.choice, 2);
+
+        set_checkbox_highlight_choice(&mut checkbox, None);
+        assert_eq!(checkbox.states.choice, 2);
     }
 
     fn test_task(category_id: Uuid, position: i64) -> Task {
