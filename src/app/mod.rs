@@ -297,9 +297,14 @@ impl App {
     }
 
     fn save_settings_with_notice(&mut self) {
-        if let Err(err) = self.settings.save() {
-            warn!(error = %err, "failed to save settings");
-            self.footer_notice = Some(" Failed to save settings to disk ".to_string());
+        match self.settings.save() {
+            Ok(()) => {
+                self.footer_notice = Some("  ✓ Settings saved  ".to_string());
+            }
+            Err(err) => {
+                warn!(error = %err, "failed to save settings");
+                self.footer_notice = Some(" Failed to save settings to disk ".to_string());
+            }
         }
     }
 
@@ -505,7 +510,7 @@ impl App {
             }
             Message::OpenSettings => {
                 self.settings_view_state = Some(SettingsViewState {
-                    active_section: SettingsSection::Theme,
+                    active_section: SettingsSection::General,
                     general_selected_field: 0,
                     category_color_selected: self
                         .focused_column
@@ -528,22 +533,20 @@ impl App {
             Message::SettingsNextSection => {
                 if let Some(state) = &mut self.settings_view_state {
                     state.active_section = match state.active_section {
-                        SettingsSection::Theme => SettingsSection::CategoryColors,
+                        SettingsSection::General => SettingsSection::CategoryColors,
                         SettingsSection::CategoryColors => SettingsSection::Keybindings,
-                        SettingsSection::Keybindings => SettingsSection::General,
-                        SettingsSection::General => SettingsSection::Repos,
-                        SettingsSection::Repos => SettingsSection::Theme,
+                        SettingsSection::Keybindings => SettingsSection::Repos,
+                        SettingsSection::Repos => SettingsSection::General,
                     };
                 }
             }
             Message::SettingsPrevSection => {
                 if let Some(state) = &mut self.settings_view_state {
                     state.active_section = match state.active_section {
-                        SettingsSection::Theme => SettingsSection::Repos,
-                        SettingsSection::CategoryColors => SettingsSection::Theme,
+                        SettingsSection::General => SettingsSection::Repos,
+                        SettingsSection::CategoryColors => SettingsSection::General,
                         SettingsSection::Keybindings => SettingsSection::CategoryColors,
-                        SettingsSection::General => SettingsSection::Keybindings,
-                        SettingsSection::Repos => SettingsSection::General,
+                        SettingsSection::Repos => SettingsSection::Keybindings,
                     };
                 }
             }
@@ -552,7 +555,7 @@ impl App {
                     match state.active_section {
                         SettingsSection::General => {
                             state.general_selected_field =
-                                state.general_selected_field.saturating_add(1).min(1);
+                                state.general_selected_field.saturating_add(1).min(2);
                         }
                         SettingsSection::CategoryColors => {
                             state.category_color_selected = state
@@ -566,7 +569,7 @@ impl App {
                                 .saturating_add(1)
                                 .min(self.repos.len().saturating_sub(1));
                         }
-                        SettingsSection::Theme | SettingsSection::Keybindings => {}
+                        SettingsSection::Keybindings => {}
                     }
                 }
             }
@@ -585,42 +588,32 @@ impl App {
                             state.repos_selected_field =
                                 state.repos_selected_field.saturating_sub(1);
                         }
-                        SettingsSection::Theme | SettingsSection::Keybindings => {}
+                        SettingsSection::Keybindings => {}
                     }
                 }
             }
             Message::SettingsToggle => {
-                if let Some((active_section, general_selected_field, category_color_selected)) =
-                    self.settings_view_state.as_ref().map(|state| {
-                        (
-                            state.active_section,
-                            state.general_selected_field,
-                            state.category_color_selected,
-                        )
-                    })
-                {
-                    match active_section {
-                        SettingsSection::Theme => {
-                            self.settings.theme = match self.settings.theme.as_str() {
-                                "default" => "high-contrast".to_string(),
-                                "high-contrast" => "mono".to_string(),
-                                _ => "default".to_string(),
-                            };
-
-                            let theme_preset = ThemePreset::from_str(&self.settings.theme)
-                                .unwrap_or(ThemePreset::Default);
-                            self.theme = Theme::from_preset(theme_preset);
-                            self.save_settings_with_notice();
-                        }
+                if let Some(state) = &self.settings_view_state {
+                    match state.active_section {
                         SettingsSection::General => {
-                            match general_selected_field.min(1) {
+                            match state.general_selected_field {
                                 0 => {
+                                    self.settings.theme = match self.settings.theme.as_str() {
+                                        "default" => "high-contrast".to_string(),
+                                        "high-contrast" => "mono".to_string(),
+                                        _ => "default".to_string(),
+                                    };
+                                    let theme_preset = ThemePreset::from_str(&self.settings.theme)
+                                        .unwrap_or(ThemePreset::Default);
+                                    self.theme = Theme::from_preset(theme_preset);
+                                }
+                                1 => {
                                     let next = self.settings.poll_interval_ms.saturating_add(500);
                                     self.settings.poll_interval_ms =
                                         if next > 30_000 { 500 } else { next };
                                     self.restart_status_poller();
                                 }
-                                1 => {
+                                2 => {
                                     let next = self.settings.side_panel_width.saturating_add(5);
                                     self.settings.side_panel_width =
                                         if next > 80 { 20 } else { next };
@@ -634,7 +627,8 @@ impl App {
                             let Some((category_id, current_color)) = self
                                 .categories
                                 .get(
-                                    category_color_selected
+                                    state
+                                        .category_color_selected
                                         .min(self.categories.len().saturating_sub(1)),
                                 )
                                 .map(|category| (category.id, category.color.clone()))
@@ -663,6 +657,58 @@ impl App {
                         SettingsSection::Keybindings => {}
                         SettingsSection::Repos => {}
                     }
+                }
+            }
+            Message::SettingsDecreaseItem => {
+                if let Some(state) = &self.settings_view_state
+                    && state.active_section == SettingsSection::General
+                {
+                    match state.general_selected_field {
+                        0 => {
+                            self.settings.theme = match self.settings.theme.as_str() {
+                                "high-contrast" => "default".to_string(),
+                                "mono" => "high-contrast".to_string(),
+                                _ => "mono".to_string(),
+                            };
+                            let theme_preset = ThemePreset::from_str(&self.settings.theme)
+                                .unwrap_or(ThemePreset::Default);
+                            self.theme = Theme::from_preset(theme_preset);
+                        }
+                        1 => {
+                            let prev = self.settings.poll_interval_ms.saturating_sub(500);
+                            self.settings.poll_interval_ms = if prev < 500 { 30_000 } else { prev };
+                            self.restart_status_poller();
+                        }
+                        2 => {
+                            let prev = self.settings.side_panel_width.saturating_sub(5);
+                            self.settings.side_panel_width = if prev < 20 { 80 } else { prev };
+                            self.side_panel_width = self.settings.side_panel_width;
+                        }
+                        _ => {}
+                    }
+                    self.save_settings_with_notice();
+                }
+            }
+            Message::SettingsResetItem => {
+                if let Some(state) = &self.settings_view_state
+                    && state.active_section == SettingsSection::General
+                {
+                    match state.general_selected_field {
+                        0 => {
+                            self.settings.theme = "default".to_string();
+                            self.theme = Theme::from_preset(ThemePreset::Default);
+                        }
+                        1 => {
+                            self.settings.poll_interval_ms = 1_000;
+                            self.restart_status_poller();
+                        }
+                        2 => {
+                            self.settings.side_panel_width = 40;
+                            self.side_panel_width = 40;
+                        }
+                        _ => {}
+                    }
+                    self.save_settings_with_notice();
                 }
             }
             Message::FocusColumn(index) => {
@@ -1126,20 +1172,41 @@ impl App {
 
         if self.current_view == View::Settings {
             let active_section = self.settings_view_state.as_ref().map(|s| s.active_section);
-            match key.code {
-                KeyCode::Left | KeyCode::Char('h') => self.update(Message::SettingsPrevSection)?,
-                KeyCode::Right | KeyCode::Char('l') => self.update(Message::SettingsNextSection)?,
-                KeyCode::Up | KeyCode::Char('k') => self.update(Message::SettingsPrevItem)?,
-                KeyCode::Down | KeyCode::Char('j') => self.update(Message::SettingsNextItem)?,
-                KeyCode::Enter | KeyCode::Char(' ') => self.update(Message::SettingsToggle)?,
+            let msg = match key.code {
+                KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                    Some(Message::SettingsNextSection)
+                }
+                KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                    Some(Message::SettingsPrevSection)
+                }
+                KeyCode::Up | KeyCode::Char('k') => Some(Message::SettingsPrevItem),
+                KeyCode::Down | KeyCode::Char('j') => Some(Message::SettingsNextItem),
+                KeyCode::Enter | KeyCode::Char(' ') => Some(Message::SettingsToggle),
                 KeyCode::Char('r') if active_section == Some(SettingsSection::Repos) => {
-                    self.update(Message::OpenRenameRepoDialog)?;
+                    Some(Message::OpenRenameRepoDialog)
                 }
                 KeyCode::Char('x') if active_section == Some(SettingsSection::Repos) => {
-                    self.update(Message::OpenDeleteRepoDialog)?;
+                    Some(Message::OpenDeleteRepoDialog)
                 }
-                KeyCode::Esc => self.update(Message::CloseSettings)?,
-                _ => {}
+                KeyCode::Char('0') if active_section == Some(SettingsSection::General) => {
+                    Some(Message::SettingsResetItem)
+                }
+                KeyCode::Esc => Some(Message::CloseSettings),
+                _ => None,
+            };
+
+            let msg = if active_section == Some(SettingsSection::General) {
+                match key.code {
+                    KeyCode::Right | KeyCode::Char('l') => Some(Message::SettingsToggle),
+                    KeyCode::Left | KeyCode::Char('h') => Some(Message::SettingsDecreaseItem),
+                    _ => msg,
+                }
+            } else {
+                msg
+            };
+
+            if let Some(msg) = msg {
+                self.update(msg)?;
             }
             return Ok(());
         }
