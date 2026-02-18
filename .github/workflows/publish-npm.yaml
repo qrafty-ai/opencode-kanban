@@ -21,6 +21,9 @@ jobs:
   build-binaries:
     name: Build ${{ matrix.platform_tag }}
     runs-on: ${{ matrix.runs_on }}
+    concurrency:
+      group: publish-npm-build-${{ github.ref }}-${{ matrix.platform_tag }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
