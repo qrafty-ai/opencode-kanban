@@ -120,6 +120,49 @@ impl Database {
         block_on_db(self.list_repos_async())
     }
 
+    pub async fn update_repo_name_async(&self, id: Uuid, new_name: &str) -> Result<()> {
+        let now = now_iso();
+        sqlx::query("UPDATE repos SET name = ?, updated_at = ? WHERE id = ?")
+            .bind(new_name)
+            .bind(&now)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("failed to update repo name")?;
+        Ok(())
+    }
+
+    pub fn update_repo_name(&self, id: Uuid, new_name: &str) -> Result<()> {
+        block_on_db(self.update_repo_name_async(id, new_name))
+    }
+
+    pub async fn delete_repo_async(&self, id: Uuid) -> Result<()> {
+        let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE repo_id = ?")
+            .bind(id.to_string())
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count tasks for repo")?;
+
+        if task_count > 0 {
+            anyhow::bail!(
+                "cannot delete repo: {} task(s) still reference it",
+                task_count
+            );
+        }
+
+        sqlx::query("DELETE FROM repos WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("failed to delete repo")?;
+
+        Ok(())
+    }
+
+    pub fn delete_repo(&self, id: Uuid) -> Result<()> {
+        block_on_db(self.delete_repo_async(id))
+    }
+
     pub async fn add_task_async(
         &self,
         repo_id: Uuid,

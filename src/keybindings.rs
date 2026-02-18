@@ -26,6 +26,8 @@ pub enum KeyAction {
     ProjectDown,
     ProjectConfirm,
     NewProject,
+    ProjectRename,
+    ProjectDelete,
     NavigateLeft,
     NavigateRight,
     SelectDown,
@@ -208,6 +210,18 @@ const PROJECT_LIST_DEFS: &[ActionDef] = &[
         action: KeyAction::NewProject,
         description: "new project",
         defaults: &["n"],
+    },
+    ActionDef {
+        id: "rename_project",
+        action: KeyAction::ProjectRename,
+        description: "rename selected project",
+        defaults: &["r"],
+    },
+    ActionDef {
+        id: "delete_project",
+        action: KeyAction::ProjectDelete,
+        description: "delete selected project",
+        defaults: &["x"],
     },
 ];
 
@@ -412,6 +426,21 @@ impl Keybindings {
             format!(
                 "  {}: open project",
                 self.display_for(KeyContext::ProjectList, KeyAction::ProjectConfirm)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {}: new project",
+                self.display_for(KeyContext::ProjectList, KeyAction::NewProject)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {}: rename project",
+                self.display_for(KeyContext::ProjectList, KeyAction::ProjectRename)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {}: delete project",
+                self.display_for(KeyContext::ProjectList, KeyAction::ProjectDelete)
                     .unwrap_or_else(|| "-".to_string())
             ),
             String::new(),
