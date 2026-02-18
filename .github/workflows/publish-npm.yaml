@@ -22,7 +22,7 @@ permissions:
 
 concurrency:
   group: publish-npm-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   determine-version:

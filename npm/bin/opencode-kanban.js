@@ -11,8 +11,8 @@ const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 
 const PLATFORM_PACKAGE_BY_TARGET = {
-  "x86_64-unknown-linux-gnu": "opencode-kanban-linux-x64",
-  "aarch64-apple-darwin": "opencode-kanban-darwin-arm64",
+  "x86_64-unknown-linux-gnu": "qrafty-ai-opencode-kanban-linux-x64",
+  "aarch64-apple-darwin": "qrafty-ai-opencode-kanban-darwin-arm64",
 };
 
 function detectTargetTriple() {
@@ -66,8 +66,8 @@ if (!vendorRoot) {
   const packageManager = detectPackageManager();
   const updateCommand =
     packageManager === "bun"
-      ? "bun install -g opencode-kanban@latest"
-      : "npm install -g opencode-kanban@latest";
+      ? "bun install -g @qrafty-ai/opencode-kanban@latest"
+      : "npm install -g @qrafty-ai/opencode-kanban@latest";
   throw new Error(
     `Missing optional dependency ${platformPackage}. Reinstall opencode-kanban: ${updateCommand}`,
   );
