@@ -7,7 +7,8 @@ use serde_json::Value;
 use urlencoding::encode;
 
 use crate::types::{
-    SessionState, SessionStatus, SessionStatusError, SessionStatusSource, SessionTodoItem,
+    SessionMessageItem, SessionState, SessionStatus, SessionStatusError, SessionStatusSource,
+    SessionTodoItem,
 };
 
 #[derive(Debug, Clone)]
@@ -27,6 +28,7 @@ pub struct SessionStatusMatch {
 pub struct SessionRecord {
     pub session_id: String,
     pub directory: String,
+    pub title: Option<String>,
     pub parent_session_id: Option<String>,
 }
 
@@ -87,6 +89,10 @@ impl ServerStatusProvider {
 
     fn session_todo_url(&self, session_id: &str) -> String {
         format!("{}/session/{}/todo", self.base_url(), encode(session_id))
+    }
+
+    fn session_message_url(&self, session_id: &str) -> String {
+        format!("{}/session/{}/message", self.base_url(), encode(session_id))
     }
 
     pub async fn list_all_sessions(&self) -> Result<Vec<(String, String)>, SessionStatusError> {
@@ -229,6 +235,43 @@ impl ServerStatusProvider {
 
         parse_session_todo_body(&body)
     }
+
+    pub async fn fetch_session_messages(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionMessageItem>, SessionStatusError> {
+        let response = self
+            .client
+            .get(self.session_message_url(session_id))
+            .send()
+            .await
+            .map_err(|err| map_reqwest_error(err, "SERVER_CONNECT_FAILED"))?;
+
+        let status_code = response.status();
+        if status_code == StatusCode::UNAUTHORIZED {
+            return Err(SessionStatusError {
+                code: "SERVER_AUTH_ERROR".to_string(),
+                message: format!(
+                    "OpenCode server rejected message fetch for session {session_id} with HTTP 401"
+                ),
+            });
+        }
+        if status_code != StatusCode::OK {
+            return Err(SessionStatusError {
+                code: "SERVER_HTTP_ERROR".to_string(),
+                message: format!(
+                    "OpenCode server returned HTTP {status_code} for /session/{session_id}/message"
+                ),
+            });
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
+
+        parse_session_message_body(&body)
+    }
 }
 
 fn parse_status_matches_body(
@@ -314,11 +357,19 @@ fn parse_session_records_body(body: &str) -> Result<Vec<SessionRecord>, SessionS
             continue;
         };
         let directory = obj.get("directory").and_then(|v| v.as_str()).unwrap_or("");
+        let title = obj
+            .get("title")
+            .and_then(|v| v.as_str())
+            .or_else(|| obj.get("name").and_then(|v| v.as_str()))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         let parent_session_id = parse_parent_session_id(item);
 
         sessions.push(SessionRecord {
             session_id: session_id.to_string(),
             directory: directory.to_string(),
+            title,
             parent_session_id,
         });
     }
@@ -347,6 +398,307 @@ fn parse_session_todo_body(body: &str) -> Result<Vec<SessionTodoItem>, SessionSt
     }
 
     Ok(todos)
+}
+
+fn parse_session_message_body(body: &str) -> Result<Vec<SessionMessageItem>, SessionStatusError> {
+    let payload: Value = serde_json::from_str(body).map_err(|err| SessionStatusError {
+        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+        message: format!("failed to parse /session/:id/message response JSON: {err}"),
+    })?;
+
+    let array = if let Some(array) = payload.as_array() {
+        array
+    } else if let Some(obj) = payload.as_object() {
+        if let Some(array) = obj.get("messages").and_then(Value::as_array) {
+            array
+        } else if let Some(array) = obj.get("items").and_then(Value::as_array) {
+            array
+        } else if let Some(array) = obj.get("data").and_then(Value::as_array) {
+            array
+        } else {
+            return Err(SessionStatusError {
+                code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+                message: "expected /session/:id/message response to be a JSON array or object containing messages/items/data array".to_string(),
+            });
+        }
+    } else {
+        return Err(SessionStatusError {
+            code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+            message: "expected /session/:id/message response to be a JSON array or object"
+                .to_string(),
+        });
+    };
+
+    let mut messages = Vec::with_capacity(array.len());
+    for value in array {
+        if let Ok(Some(parsed)) = parse_session_message_item(value) {
+            messages.push(parsed);
+        }
+    }
+
+    Ok(messages)
+}
+
+fn parse_session_message_item(value: &Value) -> Result<Option<SessionMessageItem>, &'static str> {
+    if let Some(content) = value.as_str() {
+        let content = content.trim();
+        if content.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(SessionMessageItem {
+            message_type: Some("text".to_string()),
+            role: None,
+            content: content.to_string(),
+            timestamp: None,
+        }));
+    }
+
+    let obj = value
+        .as_object()
+        .ok_or("expected message entry to be a string or object")?;
+
+    let role = obj
+        .get("role")
+        .and_then(Value::as_str)
+        .or_else(|| obj.get("type").and_then(Value::as_str))
+        .or_else(|| obj.get("author").and_then(Value::as_str))
+        .or_else(|| {
+            obj.get("info")
+                .and_then(Value::as_object)
+                .and_then(|info| info.get("role"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            obj.get("author")
+                .and_then(Value::as_object)
+                .and_then(|author| author.get("role"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(str::to_string);
+
+    let timestamp = extract_message_timestamp(value);
+
+    let message_type = extract_message_type(value);
+
+    let Some(content) = extract_message_content(value) else {
+        return Ok(None);
+    };
+    if content.trim().is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(SessionMessageItem {
+        message_type,
+        role,
+        content,
+        timestamp,
+    }))
+}
+
+fn extract_message_type(value: &Value) -> Option<String> {
+    let obj = value.as_object()?;
+
+    if let Some(kind) = obj
+        .get("type")
+        .and_then(Value::as_str)
+        .and_then(normalize_message_type)
+    {
+        return Some(kind);
+    }
+
+    if let Some(kind) = obj
+        .get("info")
+        .and_then(Value::as_object)
+        .and_then(|info| info.get("type"))
+        .and_then(Value::as_str)
+        .and_then(normalize_message_type)
+    {
+        return Some(kind);
+    }
+
+    if let Some(parts) = obj.get("parts").and_then(Value::as_array)
+        && let Some(kind) = parts.iter().find_map(|part| {
+            part.as_object()
+                .and_then(|part_obj| part_obj.get("type"))
+                .and_then(Value::as_str)
+                .and_then(normalize_message_type)
+        })
+    {
+        return Some(kind);
+    }
+
+    if let Some(data) = obj.get("data").and_then(Value::as_array)
+        && let Some(kind) = data.iter().find_map(|entry| {
+            entry
+                .as_object()
+                .and_then(|entry_obj| entry_obj.get("type"))
+                .and_then(Value::as_str)
+                .and_then(normalize_message_type)
+        })
+    {
+        return Some(kind);
+    }
+
+    Some("text".to_string())
+}
+
+fn normalize_message_type(raw: &str) -> Option<String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    match normalized.as_str() {
+        "assistant" | "user" | "system" => Some("text".to_string()),
+        _ => Some(normalized),
+    }
+}
+
+fn extract_message_content(value: &Value) -> Option<String> {
+    if let Some(array) = value.as_array() {
+        let combined = array
+            .iter()
+            .filter_map(extract_message_content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !combined.trim().is_empty() {
+            return Some(combined);
+        }
+        return None;
+    }
+
+    if let Some(raw) = value.as_str() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some(trimmed.to_string());
+    }
+
+    let obj = value.as_object()?;
+
+    const CONTENT_KEYS: &[&str] = &["content", "text", "message", "body", "value"];
+    for key in CONTENT_KEYS {
+        if let Some(content_value) = obj.get(*key)
+            && let Some(text) = extract_message_content(content_value)
+        {
+            return Some(text);
+        }
+    }
+
+    if let Some(parts) = obj.get("parts").and_then(Value::as_array) {
+        let combined = parts
+            .iter()
+            .filter_map(extract_message_content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !combined.trim().is_empty() {
+            return Some(combined);
+        }
+    }
+
+    if let Some(data) = obj.get("data").and_then(Value::as_array) {
+        let combined = data
+            .iter()
+            .filter_map(extract_message_content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !combined.trim().is_empty() {
+            return Some(combined);
+        }
+    }
+
+    None
+}
+
+fn extract_message_timestamp(value: &Value) -> Option<String> {
+    let obj = value.as_object()?;
+
+    if let Some(ts) = find_timestamp_in_object(obj) {
+        return Some(ts);
+    }
+
+    if let Some(info) = obj.get("info").and_then(Value::as_object)
+        && let Some(ts) = find_timestamp_in_object(info)
+    {
+        return Some(ts);
+    }
+
+    if let Some(parts) = obj.get("parts").and_then(Value::as_array)
+        && let Some(ts) = parts.iter().find_map(extract_timestamp_from_value)
+    {
+        return Some(ts);
+    }
+
+    if let Some(data) = obj.get("data").and_then(Value::as_array)
+        && let Some(ts) = data.iter().find_map(extract_timestamp_from_value)
+    {
+        return Some(ts);
+    }
+
+    None
+}
+
+fn find_timestamp_in_object(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    const DIRECT_KEYS: &[&str] = &["timestamp", "createdAt", "created_at"];
+    for key in DIRECT_KEYS {
+        if let Some(raw) = obj.get(*key)
+            && let Some(parsed) = scalar_timestamp(raw)
+        {
+            return Some(parsed);
+        }
+    }
+
+    if let Some(raw_time) = obj.get("time")
+        && let Some(parsed) = extract_timestamp_from_value(raw_time)
+    {
+        return Some(parsed);
+    }
+
+    const NESTED_KEYS: &[&str] = &["created", "completed", "start", "end"];
+    for key in NESTED_KEYS {
+        if let Some(raw) = obj.get(*key)
+            && let Some(parsed) = scalar_timestamp(raw)
+        {
+            return Some(parsed);
+        }
+    }
+
+    None
+}
+
+fn extract_timestamp_from_value(value: &Value) -> Option<String> {
+    if let Some(parsed) = scalar_timestamp(value) {
+        return Some(parsed);
+    }
+
+    let obj = value.as_object()?;
+    find_timestamp_in_object(obj)
+}
+
+fn scalar_timestamp(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(int_value) = value.as_i64() {
+        return Some(int_value.to_string());
+    }
+
+    if let Some(uint_value) = value.as_u64() {
+        return Some(uint_value.to_string());
+    }
+
+    if let Some(float_value) = value.as_f64() {
+        return Some(float_value.to_string());
+    }
+
+    None
 }
 
 fn parse_session_todo_item(value: &Value) -> Result<SessionTodoItem, &'static str> {
@@ -638,6 +990,105 @@ mod tests {
         assert!(!todos[0].completed);
         assert_eq!(todos[1].content, "Ship release");
         assert!(todos[1].completed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_session_messages_parses_message_array() {
+        let port = spawn_single_response_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[{\"role\":\"user\",\"content\":\"hello\",\"createdAt\":\"2026-01-01T00:00:00Z\"},{\"type\":\"assistant\",\"message\":{\"text\":\"world\"}}]".to_string(),
+        )
+        .await;
+        let provider = ServerStatusProvider::new(ServerStatusConfig {
+            port,
+            request_timeout: Duration::from_millis(500),
+            ..ServerStatusConfig::default()
+        });
+
+        let messages = provider
+            .fetch_session_messages("sid-1")
+            .await
+            .expect("message response should parse");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].message_type.as_deref(), Some("text"));
+        assert_eq!(messages[0].role.as_deref(), Some("user"));
+        assert_eq!(messages[0].content, "hello");
+        assert_eq!(
+            messages[0].timestamp.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        assert_eq!(messages[1].role.as_deref(), Some("assistant"));
+        assert_eq!(messages[1].content, "world");
+        assert_eq!(messages[1].message_type.as_deref(), Some("text"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_session_messages_parses_messages_wrapper() {
+        let port = spawn_single_response_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"messages\":[{\"author\":{\"role\":\"assistant\"},\"parts\":[{\"text\":\"first\"},{\"text\":\"second\"}]}]}".to_string(),
+        )
+        .await;
+        let provider = ServerStatusProvider::new(ServerStatusConfig {
+            port,
+            request_timeout: Duration::from_millis(500),
+            ..ServerStatusConfig::default()
+        });
+
+        let messages = provider
+            .fetch_session_messages("sid-2")
+            .await
+            .expect("wrapped message response should parse");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role.as_deref(), Some("assistant"));
+        assert_eq!(messages[0].content, "first\nsecond");
+        assert_eq!(messages[0].message_type.as_deref(), Some("text"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_session_messages_skips_non_text_entries() {
+        let port = spawn_single_response_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[{\"info\":{\"role\":\"assistant\"},\"parts\":[{\"type\":\"step-start\",\"title\":\"Planning\"}]},{\"info\":{\"role\":\"assistant\"},\"parts\":[{\"type\":\"text\",\"text\":\"real output\"}]}]".to_string(),
+        )
+        .await;
+        let provider = ServerStatusProvider::new(ServerStatusConfig {
+            port,
+            request_timeout: Duration::from_millis(500),
+            ..ServerStatusConfig::default()
+        });
+
+        let messages = provider
+            .fetch_session_messages("sid-3")
+            .await
+            .expect("message response should parse while skipping non-text entries");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role.as_deref(), Some("assistant"));
+        assert_eq!(messages[0].content, "real output");
+        assert_eq!(messages[0].message_type.as_deref(), Some("text"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_session_messages_extracts_nested_numeric_timestamps() {
+        let port = spawn_single_response_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[{\"info\":{\"role\":\"assistant\",\"time\":{\"created\":1735689600}},\"parts\":[{\"type\":\"step-start\",\"time\":{\"start\":1735689601}},{\"type\":\"text\",\"text\":\"done\"}]}]".to_string(),
+        )
+        .await;
+        let provider = ServerStatusProvider::new(ServerStatusConfig {
+            port,
+            request_timeout: Duration::from_millis(500),
+            ..ServerStatusConfig::default()
+        });
+
+        let messages = provider
+            .fetch_session_messages("sid-4")
+            .await
+            .expect("nested timestamp response should parse");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role.as_deref(), Some("assistant"));
+        assert_eq!(messages[0].content, "done");
+        assert_eq!(messages[0].timestamp.as_deref(), Some("1735689600"));
     }
 
     async fn spawn_single_response_server(response: String) -> u16 {

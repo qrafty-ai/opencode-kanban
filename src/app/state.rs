@@ -350,6 +350,13 @@ pub struct CreateTaskOutcome {
     pub warning: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DetailFocus {
+    List,
+    Details,
+    Log,
+}
+
 #[cfg(test)]
 mod tests {
     use super::TodoVisualizationMode;
