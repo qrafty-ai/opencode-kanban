@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use tui_realm_stdlib::{Checkbox, Input, Label, List, Paragraph, Table};
 use tuirealm::{
     MockComponent,
@@ -15,8 +17,8 @@ use tuirealm::{
 
 use crate::app::{
     ActiveDialog, App, CATEGORY_COLOR_PALETTE, CategoryColorField, CategoryInputField,
-    CategoryInputMode, DeleteCategoryField, DeleteTaskField, NewTaskField, SettingsSection,
-    SidePanelRow, TodoVisualizationMode, View, ViewMode, category_color_label,
+    CategoryInputMode, DeleteCategoryField, DeleteTaskField, DetailFocus, NewTaskField,
+    SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode, category_color_label,
 };
 use crate::command_palette::all_commands;
 use crate::theme::Theme;
@@ -121,6 +123,9 @@ fn render_board(frame: &mut Frame<'_>, app: &App) {
         ViewMode::Kanban => render_columns(frame, chunks[1], app),
         ViewMode::SidePanel => render_side_panel(frame, chunks[1], app),
     }
+    if app.view_mode == ViewMode::SidePanel && app.log_expanded {
+        render_log_expanded_overlay(frame, chunks[1], app);
+    }
     render_footer(frame, chunks[2], app);
 }
 
@@ -167,9 +172,17 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ViewMode::Kanban => {
                 "n:new  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view"
             }
-            ViewMode::SidePanel => {
-                "j/k:select  Space:collapse  Enter:attach task  t:todo view  c/r/x:category  H/L/J/K:move  v:view"
-            }
+            ViewMode::SidePanel => match app.detail_focus {
+                DetailFocus::List => {
+                    "Tab:focus  j/k:select  Space:collapse  Enter:attach  t:todo  c/r/x:category  H/L/J/K:move  v:view"
+                }
+                DetailFocus::Details => {
+                    "Tab:focus  j/k:scroll details  +/-:resize split  Esc:list focus  Enter:attach  f:expand log"
+                }
+                DetailFocus::Log => {
+                    "Tab:focus  j/k:select log  e/Enter:toggle  +/-:resize split  f:expand log  Esc:list"
+                }
+            },
         }
     };
 
@@ -374,7 +387,10 @@ fn render_side_panel_list(
         .rows(rows.build())
         .selected_line(selected_line)
         .inactive(Style::default().fg(theme.base.text_muted));
-    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.attr(
+        Attribute::Focus,
+        AttrValue::Flag(app.detail_focus == DetailFocus::List),
+    );
     list.view(frame, area);
 
     if show_scrollbar {
@@ -423,6 +439,15 @@ fn render_side_panel_details(
 fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, task: &Task) {
     let theme = app.theme;
 
+    let split = app.log_split_ratio.clamp(35, 80);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(split),
+            Constraint::Percentage(100 - split),
+        ])
+        .split(area);
+
     let repo_name = app
         .repos
         .iter()
@@ -430,16 +455,18 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, 
         .map(|repo| repo.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let spinner = status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase);
+    let runtime_status = task.tmux_status.to_ascii_uppercase();
     let todo_summary = app
         .session_todo_summary(task.id)
         .map(|(done, total)| format!("{done}/{total}"))
         .unwrap_or_else(|| "--".to_string());
     let todo_view = app.todo_visualization_mode.as_str();
-    let session = task.tmux_session_name.as_deref().unwrap_or("n/a");
-
-    let worktree_full = task.worktree_path.as_deref().unwrap_or("n/a");
-    let worktree_short = clamp_text(worktree_full, 70);
+    let session = task
+        .opencode_session_id
+        .as_deref()
+        .and_then(|session_id| app.opencode_session_title(session_id))
+        .or_else(|| task.opencode_session_id.clone())
+        .unwrap_or_else(|| "n/a".to_string());
 
     let mut lines = vec![
         TextSpan::new("OVERVIEW").fg(theme.base.header).bold(),
@@ -448,14 +475,11 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, 
         TextSpan::new(detail_kv("Branch", &task.branch)).fg(theme.base.text),
         TextSpan::new(""),
         TextSpan::new("RUNTIME").fg(theme.base.header).bold(),
-        TextSpan::new(detail_kv("Status", spinner))
+        TextSpan::new(detail_kv("Status", &runtime_status))
             .fg(theme.status_color(task.tmux_status.as_str())),
         TextSpan::new(detail_kv("Todos", &todo_summary)).fg(theme.tile.todo),
         TextSpan::new(detail_kv("TodoView", todo_view)).fg(theme.base.text_muted),
-        TextSpan::new(detail_kv("Session", session)).fg(theme.base.text),
-        TextSpan::new(""),
-        TextSpan::new("WORKSPACE").fg(theme.base.header).bold(),
-        TextSpan::new(detail_kv("Path", &worktree_short)).fg(theme.base.text),
+        TextSpan::new(detail_kv("Session", &session)).fg(theme.base.text),
     ];
 
     if app.todo_visualization_mode == TodoVisualizationMode::Checklist {
@@ -470,30 +494,131 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &App, 
         }
     }
 
-    if worktree_full != worktree_short {
-        lines.push(TextSpan::new(detail_kv("Full", worktree_full)).fg(theme.base.text_muted));
-    }
-
     lines.push(TextSpan::new(""));
     lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
-    lines.push(TextSpan::new("Enter attach  d delete  m move  l logs").fg(theme.base.text_muted));
+    lines.push(
+        TextSpan::new("d delete  Tab focus  j/k select  e/Enter toggle  +/- resize  f expand")
+            .fg(theme.base.text_muted),
+    );
 
-    if let Some(log) = app.current_log_buffer.as_deref() {
-        lines.push(TextSpan::new(""));
-        lines.push(TextSpan::new("LOG PREVIEW").fg(theme.base.header).bold());
-        for line in log.lines().take(8) {
-            lines.push(TextSpan::new(line.to_string()).fg(theme.base.text_muted));
-        }
-    }
+    let detail_viewport = list_inner_height(sections[0]);
+    let detail_line_count = lines.len();
+    let detail_offset = if detail_viewport == 0 {
+        0
+    } else {
+        app.detail_scroll_offset
+            .min(detail_line_count.saturating_sub(detail_viewport))
+    };
+    let visible_lines = if detail_viewport == 0 {
+        lines
+    } else {
+        lines
+            .into_iter()
+            .skip(detail_offset)
+            .take(detail_viewport)
+            .collect()
+    };
+
+    let detail_border = if app.detail_focus == DetailFocus::Details {
+        theme.interactive.focus
+    } else {
+        theme.base.text_muted
+    };
 
     let mut paragraph = Paragraph::default()
         .title("Details", Alignment::Left)
-        .borders(rounded_borders(theme.interactive.focus))
+        .borders(rounded_borders(detail_border))
         .foreground(theme.base.text)
         .background(theme.base.surface)
-        .wrap(true)
-        .text(lines);
+        .text(visible_lines);
+    paragraph.view(frame, sections[0]);
+
+    if detail_viewport > 0 && detail_line_count > detail_viewport {
+        let mut state = ScrollbarState::new(detail_line_count)
+            .position(scrollbar_position_for_offset(
+                detail_offset,
+                detail_line_count,
+                detail_viewport,
+            ))
+            .viewport_content_length(detail_viewport);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .track_style(RatatuiStyle::default().fg(theme.base.text_muted))
+            .thumb_style(RatatuiStyle::default().fg(detail_border))
+            .thumb_symbol("█");
+        let scrollbar_area = inset_rect(sections[0], 1, 1);
+        if scrollbar_area.width > 0 && scrollbar_area.height > 0 {
+            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
+        }
+    }
+
+    render_log_panel(frame, sections[1], app);
+}
+
+fn render_log_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let entries = app
+        .current_log_buffer
+        .as_deref()
+        .map(parse_structured_log_entries)
+        .unwrap_or_default();
+    let selected_entry = if entries.is_empty() {
+        0
+    } else {
+        app.log_scroll_offset.min(entries.len() - 1)
+    };
+    let viewport = list_inner_height(area);
+
+    let visible_lines = if entries.is_empty() {
+        vec![TextSpan::new("No log output available.").fg(theme.base.text_muted)]
+    } else {
+        log_entries_to_spans(
+            &entries,
+            theme,
+            &app.log_expanded_entries,
+            selected_entry,
+            viewport,
+        )
+    };
+
+    let border = if app.detail_focus == DetailFocus::Log {
+        theme.interactive.focus
+    } else {
+        theme.base.text_muted
+    };
+
+    let mut paragraph = Paragraph::default()
+        .title("Logs | structured | e/Enter toggle", Alignment::Left)
+        .borders(rounded_borders(border))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
+        .text(visible_lines);
     paragraph.view(frame, area);
+
+    let entry_count = entries.len().max(1);
+    let viewport_entries = viewport.min(entry_count).max(1);
+    if viewport > 0 && entry_count > viewport_entries {
+        let mut state = ScrollbarState::new(entry_count)
+            .position(scrollbar_position_for_offset(
+                selected_entry,
+                entry_count,
+                viewport_entries,
+            ))
+            .viewport_content_length(viewport_entries);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .track_style(RatatuiStyle::default().fg(theme.base.text_muted))
+            .thumb_style(RatatuiStyle::default().fg(border))
+            .thumb_symbol("█");
+        let scrollbar_area = inset_rect(area, 1, 1);
+        if scrollbar_area.width > 0 && scrollbar_area.height > 0 {
+            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
+        }
+    }
 }
 
 fn render_side_panel_category_details(
@@ -539,14 +664,54 @@ fn render_side_panel_category_details(
     lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
     lines.push(TextSpan::new("Space toggle  j/k navigate  Enter attach on task").fg(accent));
 
+    let viewport = list_inner_height(area);
+    let line_count = lines.len();
+    let offset = if viewport == 0 {
+        0
+    } else {
+        app.detail_scroll_offset
+            .min(line_count.saturating_sub(viewport))
+    };
+    let visible_lines = if viewport == 0 {
+        lines
+    } else {
+        lines
+            .into_iter()
+            .skip(offset)
+            .take(viewport)
+            .collect::<Vec<_>>()
+    };
+
+    let border = if app.detail_focus == DetailFocus::Details {
+        theme.interactive.focus
+    } else {
+        accent
+    };
+
     let mut paragraph = Paragraph::default()
         .title("Category Summary", Alignment::Left)
-        .borders(rounded_borders(accent))
+        .borders(rounded_borders(border))
         .foreground(theme.base.text)
         .background(theme.base.surface)
-        .wrap(true)
-        .text(lines);
+        .text(visible_lines);
     paragraph.view(frame, area);
+
+    if viewport > 0 && line_count > viewport {
+        let mut state = ScrollbarState::new(line_count)
+            .position(scrollbar_position_for_offset(offset, line_count, viewport))
+            .viewport_content_length(viewport);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .track_style(RatatuiStyle::default().fg(theme.base.text_muted))
+            .thumb_style(RatatuiStyle::default().fg(border))
+            .thumb_symbol("█");
+        let scrollbar_area = inset_rect(area, 1, 1);
+        if scrollbar_area.width > 0 && scrollbar_area.height > 0 {
+            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
+        }
+    }
 }
 
 fn render_dialog(frame: &mut Frame<'_>, app: &App) {
@@ -1203,6 +1368,70 @@ fn render_help_overlay(frame: &mut Frame<'_>, app: &App) {
     paragraph.view(frame, area);
 }
 
+fn render_log_expanded_overlay(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let overlay = centered_rect(94, 94, area);
+    frame.render_widget(Clear, overlay);
+
+    let entries = app
+        .current_log_buffer
+        .as_deref()
+        .map(parse_structured_log_entries)
+        .unwrap_or_default();
+    let selected_entry = if entries.is_empty() {
+        0
+    } else {
+        app.log_expanded_scroll_offset.min(entries.len() - 1)
+    };
+    let viewport = list_inner_height(overlay);
+
+    let visible_lines = if entries.is_empty() {
+        vec![TextSpan::new("No log output available.").fg(theme.base.text_muted)]
+    } else {
+        log_entries_to_spans(
+            &entries,
+            theme,
+            &app.log_expanded_entries,
+            selected_entry,
+            viewport,
+        )
+    };
+
+    let mut paragraph = Paragraph::default()
+        .title(
+            "Logs | structured  j/k select  e/Enter toggle  Esc/f close",
+            Alignment::Left,
+        )
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(dialog_surface(theme))
+        .text(visible_lines);
+    paragraph.view(frame, overlay);
+
+    let entry_count = entries.len().max(1);
+    let viewport_entries = viewport.min(entry_count).max(1);
+    if viewport > 0 && entry_count > viewport_entries {
+        let mut state = ScrollbarState::new(entry_count)
+            .position(scrollbar_position_for_offset(
+                selected_entry,
+                entry_count,
+                viewport_entries,
+            ))
+            .viewport_content_length(viewport_entries);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .track_style(RatatuiStyle::default().fg(theme.base.text_muted))
+            .thumb_style(RatatuiStyle::default().fg(theme.interactive.focus))
+            .thumb_symbol("█");
+        let scrollbar_area = inset_rect(overlay, 1, 1);
+        if scrollbar_area.width > 0 && scrollbar_area.height > 0 {
+            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
+        }
+    }
+}
+
 fn render_empty_state(frame: &mut Frame<'_>, area: Rect, message: &str, app: &App) {
     let theme = app.theme;
     let mut paragraph = Paragraph::default()
@@ -1496,6 +1725,129 @@ fn pad_to_width(value: &str, width: usize) -> String {
 
 fn detail_kv(label: &str, value: &str) -> String {
     format!("{label:>8}: {value}")
+}
+
+#[derive(Debug, Clone)]
+struct StructuredLogEntry {
+    header: String,
+    details: Vec<String>,
+}
+
+fn parse_structured_log_entries(log: &str) -> Vec<StructuredLogEntry> {
+    let mut entries = Vec::new();
+    let mut current: Option<StructuredLogEntry> = None;
+
+    for line in log.lines() {
+        if line.starts_with("> [") {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
+            current = Some(StructuredLogEntry {
+                header: line.to_string(),
+                details: Vec::new(),
+            });
+            continue;
+        }
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let detail = line.trim_start().to_string();
+        if let Some(entry) = current.as_mut() {
+            entry.details.push(detail);
+        } else {
+            current = Some(StructuredLogEntry {
+                header: line.to_string(),
+                details: Vec::new(),
+            });
+        }
+    }
+
+    if let Some(entry) = current {
+        entries.push(entry);
+    }
+
+    entries
+}
+
+fn log_entries_to_spans(
+    entries: &[StructuredLogEntry],
+    theme: Theme,
+    expanded_entries: &HashSet<usize>,
+    selected_entry: usize,
+    viewport: usize,
+) -> Vec<TextSpan> {
+    let mut lines = Vec::new();
+    let mut index = selected_entry.saturating_sub(2);
+
+    while index < entries.len() {
+        if viewport > 0 && lines.len() >= viewport {
+            break;
+        }
+
+        let entry = &entries[index];
+        let is_selected = index == selected_entry;
+        let is_expanded = expanded_entries.contains(&index);
+        let caret = if is_expanded { "▾" } else { "▸" };
+        let selector = if is_selected { "▶" } else { " " };
+        let header_body = entry
+            .header
+            .strip_prefix("> ")
+            .unwrap_or(entry.header.as_str());
+        let header_line = format!("{selector}{caret} {header_body}");
+        let header_kind = parse_structured_log_kind(entry.header.as_str()).unwrap_or("TEXT");
+        let header_color = if is_selected {
+            theme.interactive.focus
+        } else {
+            structured_log_kind_color(theme, header_kind)
+        };
+
+        lines.push(TextSpan::new(header_line).fg(header_color).bold());
+
+        if is_expanded {
+            if entry.details.is_empty() {
+                if viewport == 0 || lines.len() < viewport {
+                    lines.push(TextSpan::new("    (no content)").fg(theme.base.text_muted));
+                }
+            } else {
+                for detail in &entry.details {
+                    if viewport > 0 && lines.len() >= viewport {
+                        break;
+                    }
+                    lines.push(TextSpan::new(format!("    {detail}")).fg(theme.base.text));
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    lines
+}
+
+fn parse_structured_log_kind(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("> [")?;
+    let (kind, _) = rest.split_once(']')?;
+    Some(kind)
+}
+
+fn structured_log_kind_color(theme: Theme, kind: &str) -> Color {
+    if kind.eq_ignore_ascii_case("SAY") {
+        theme.base.header
+    } else if kind.eq_ignore_ascii_case("TOOL") {
+        theme.tile.repo
+    } else if kind.eq_ignore_ascii_case("THINK") {
+        theme.tile.branch
+    } else if kind.eq_ignore_ascii_case("STEP+") || kind.eq_ignore_ascii_case("STEP-") {
+        theme.tile.todo
+    } else if kind.eq_ignore_ascii_case("RETRY") {
+        theme.status.dead
+    } else if kind.eq_ignore_ascii_case("PATCH") {
+        theme.interactive.focus
+    } else {
+        theme.base.header
+    }
 }
 
 fn clamp_text(value: &str, max_chars: usize) -> String {

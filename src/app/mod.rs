@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Local, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -26,7 +27,7 @@ pub use self::state::{
     ActiveDialog, CATEGORY_COLOR_PALETTE, CategoryColorDialogState, CategoryColorField,
     CategoryInputDialogState, CategoryInputField, CategoryInputMode, ConfirmQuitDialogState,
     ContextMenuItem, ContextMenuState, DeleteCategoryDialogState, DeleteCategoryField,
-    DeleteTaskDialogState, DeleteTaskField, ErrorDialogState, MoveTaskDialogState,
+    DeleteTaskDialogState, DeleteTaskField, DetailFocus, ErrorDialogState, MoveTaskDialogState,
     NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
     RepoUnavailableDialogState, SettingsSection, SettingsViewState, TodoVisualizationMode, View,
     ViewMode, WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
@@ -41,8 +42,8 @@ use crate::opencode::{
 };
 use crate::projects::{self, ProjectInfo};
 use crate::theme::{Theme, ThemePreset};
-use crate::tmux::{tmux_capture_pane, tmux_kill_session};
-use crate::types::{Category, Repo, SessionState, SessionTodoItem, Task};
+use crate::tmux::tmux_kill_session;
+use crate::types::{Category, Repo, SessionMessageItem, SessionState, SessionTodoItem, Task};
 
 use self::runtime::{
     CreateTaskRuntime, RealCreateTaskRuntime, RealRecoveryRuntime, RecoveryRuntime,
@@ -105,7 +106,16 @@ pub struct App {
     pub side_panel_selected_row: usize,
     pub collapsed_categories: HashSet<Uuid>,
     pub current_log_buffer: Option<String>,
+    pub detail_focus: DetailFocus,
+    pub detail_scroll_offset: usize,
+    pub log_scroll_offset: usize,
+    pub log_split_ratio: u16,
+    pub log_expanded: bool,
+    pub log_expanded_scroll_offset: usize,
+    pub log_expanded_entries: HashSet<usize>,
     pub session_todo_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionTodoItem>>>>,
+    pub session_title_cache: Arc<Mutex<HashMap<String, String>>>,
+    pub session_message_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionMessageItem>>>>,
     pub todo_visualization_mode: TodoVisualizationMode,
     pub keybindings: Keybindings,
     pub settings: crate::settings::Settings,
@@ -134,6 +144,8 @@ impl App {
         let server_manager = ensure_server_ready();
         let poller_stop = Arc::new(AtomicBool::new(false));
         let session_todo_cache = Arc::new(Mutex::new(HashMap::new()));
+        let session_title_cache = Arc::new(Mutex::new(HashMap::new()));
+        let session_message_cache = Arc::new(Mutex::new(HashMap::new()));
         let settings = crate::settings::Settings::load();
         let env_theme = std::env::var("OPENCODE_KANBAN_THEME")
             .ok()
@@ -185,7 +197,16 @@ impl App {
             side_panel_selected_row: 0,
             collapsed_categories: HashSet::new(),
             current_log_buffer: None,
+            detail_focus: DetailFocus::List,
+            detail_scroll_offset: 0,
+            log_scroll_offset: 0,
+            log_split_ratio: 65,
+            log_expanded: false,
+            log_expanded_scroll_offset: 0,
+            log_expanded_entries: HashSet::new(),
             session_todo_cache,
+            session_title_cache,
+            session_message_cache,
             todo_visualization_mode,
             keybindings: Keybindings::load(),
             settings,
@@ -215,6 +236,8 @@ impl App {
             db_path,
             Arc::clone(&app.poller_stop),
             Arc::clone(&app.session_todo_cache),
+            Arc::clone(&app.session_title_cache),
+            Arc::clone(&app.session_message_cache),
             app.settings.poll_interval_ms,
         ));
         Ok(app)
@@ -242,6 +265,60 @@ impl App {
         Some((completed, todos.len()))
     }
 
+    pub fn opencode_session_title(&self, session_id: &str) -> Option<String> {
+        self.session_title_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(session_id).cloned())
+    }
+
+    pub fn session_messages(&self, task_id: Uuid) -> Vec<SessionMessageItem> {
+        self.session_message_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&task_id).cloned())
+            .unwrap_or_default()
+    }
+
+    fn build_log_buffer_from_messages(messages: &[SessionMessageItem]) -> Option<String> {
+        let mut lines = Vec::new();
+
+        for message in messages.iter().rev() {
+            let content = message.content.trim();
+            if content.is_empty() {
+                continue;
+            }
+
+            let kind = log_kind_label(message.message_type.as_deref());
+            let role = log_role_label(message.role.as_deref());
+            let timestamp = log_time_label(message.timestamp.as_deref());
+
+            lines.push(format!("> [{kind}] {role:<9} {timestamp}"));
+
+            for line in content.lines() {
+                let trimmed = line.trim_end();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                lines.push(format!("  {trimmed}"));
+            }
+
+            lines.push(String::new());
+        }
+
+        while matches!(lines.last(), Some(last) if last.is_empty()) {
+            lines.pop();
+        }
+
+        let output = lines.join("\n");
+
+        if output.is_empty() {
+            None
+        } else {
+            Some(output)
+        }
+    }
+
     fn poller_db_path(&self) -> PathBuf {
         self.current_project_path
             .clone()
@@ -259,6 +336,8 @@ impl App {
             self.poller_db_path(),
             Arc::clone(&self.poller_stop),
             Arc::clone(&self.session_todo_cache),
+            Arc::clone(&self.session_title_cache),
+            Arc::clone(&self.session_message_cache),
             self.settings.poll_interval_ms,
         ));
     }
@@ -279,6 +358,9 @@ impl App {
         self.repos = self.db.list_repos().context("failed to load repos")?;
 
         if let Ok(mut cache) = self.session_todo_cache.lock() {
+            cache.retain(|task_id, _| self.tasks.iter().any(|task| task.id == *task_id));
+        }
+        if let Ok(mut cache) = self.session_message_cache.lock() {
             cache.retain(|task_id, _| self.tasks.iter().any(|task| task.id == *task_id));
         }
 
@@ -312,6 +394,12 @@ impl App {
             self.column_scroll_states.clear();
             self.focused_column = 0;
             self.side_panel_selected_row = 0;
+            self.detail_focus = DetailFocus::List;
+            self.detail_scroll_offset = 0;
+            self.log_scroll_offset = 0;
+            self.log_expanded = false;
+            self.log_expanded_scroll_offset = 0;
+            self.log_expanded_entries.clear();
         }
 
         if self.view_mode == ViewMode::SidePanel {
@@ -347,6 +435,13 @@ impl App {
         if let Ok(mut cache) = self.session_todo_cache.lock() {
             cache.clear();
         }
+        if let Ok(mut cache) = self.session_title_cache.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.session_message_cache.lock() {
+            cache.clear();
+        }
+        self.log_expanded_entries.clear();
         self.refresh_data()?;
 
         self.poller_stop.store(false, Ordering::Relaxed);
@@ -354,6 +449,8 @@ impl App {
             path.clone(),
             Arc::clone(&self.poller_stop),
             Arc::clone(&self.session_todo_cache),
+            Arc::clone(&self.session_title_cache),
+            Arc::clone(&self.session_message_cache),
             self.settings.poll_interval_ms,
         ));
 
@@ -386,20 +483,11 @@ impl App {
                         return Ok(());
                     };
 
-                    if let Some(session_name) = task.tmux_session_name.as_deref() {
-                        match tmux_capture_pane(session_name, 50) {
-                            Ok(buffer) => self.current_log_buffer = Some(buffer),
-                            Err(err) => {
-                                warn!(
-                                    session = %session_name,
-                                    error = %err,
-                                    "failed to capture tmux pane"
-                                );
-                                self.current_log_buffer = None;
-                            }
-                        }
-                    } else {
+                    if task.opencode_session_id.is_none() {
                         self.current_log_buffer = None;
+                    } else {
+                        let messages = self.session_messages(task.id);
+                        self.current_log_buffer = Self::build_log_buffer_from_messages(&messages);
                     }
                 }
             }
@@ -786,6 +874,22 @@ impl App {
             return self.handle_dialog_key(key);
         }
 
+        if self.log_expanded {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('f') => {
+                    self.log_expanded = false;
+                    self.log_scroll_offset = self.log_expanded_scroll_offset;
+                }
+                KeyCode::Enter | KeyCode::Char('e') => self.toggle_selected_log_entry(true),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_expanded_log_down(1),
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_expanded_log_up(1),
+                KeyCode::PageDown => self.scroll_expanded_log_down(10),
+                KeyCode::PageUp => self.scroll_expanded_log_up(10),
+                _ => {}
+            }
+            return Ok(());
+        }
+
         if let Some(action) = self.keybindings.action_for_key(KeyContext::Global, key) {
             match action {
                 KeyAction::ToggleHelp => self.active_dialog = ActiveDialog::Help,
@@ -795,10 +899,16 @@ impl App {
                 KeyAction::Quit => self.should_quit = true,
                 KeyAction::ToggleView => {
                     self.current_log_buffer = None;
+                    self.log_expanded = false;
+                    self.log_expanded_scroll_offset = 0;
+                    self.log_expanded_entries.clear();
 
                     match self.view_mode {
                         ViewMode::Kanban => {
                             self.view_mode = ViewMode::SidePanel;
+                            self.detail_focus = DetailFocus::List;
+                            self.detail_scroll_offset = 0;
+                            self.log_scroll_offset = 0;
 
                             let rows = self.side_panel_rows();
                             let current_id = self
@@ -820,6 +930,7 @@ impl App {
                         }
                         ViewMode::SidePanel => {
                             self.view_mode = ViewMode::Kanban;
+                            self.detail_focus = DetailFocus::List;
                         }
                     }
                 }
@@ -841,6 +952,41 @@ impl App {
         {
             self.update(Message::ToggleSidePanelCategoryCollapse)?;
             return Ok(());
+        }
+
+        if self.current_view == View::Board && self.view_mode == ViewMode::SidePanel {
+            match key.code {
+                KeyCode::Tab => {
+                    self.cycle_detail_focus();
+                    return Ok(());
+                }
+                KeyCode::Enter | KeyCode::Char('e') => {
+                    if self.detail_focus == DetailFocus::Log {
+                        self.toggle_selected_log_entry(false);
+                        return Ok(());
+                    }
+                }
+                KeyCode::Char('f') => {
+                    if self.detail_focus == DetailFocus::Log {
+                        self.log_expanded = !self.log_expanded;
+                        self.log_expanded_scroll_offset = self.log_scroll_offset;
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    if self.detail_focus != DetailFocus::List {
+                        self.log_split_ratio = self.log_split_ratio.saturating_sub(5).max(35);
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char('-') => {
+                    if self.detail_focus != DetailFocus::List {
+                        self.log_split_ratio = self.log_split_ratio.saturating_add(5).min(80);
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
 
         if self.current_view == View::ProjectList {
@@ -882,14 +1028,20 @@ impl App {
                 }
                 KeyAction::SelectDown => {
                     if self.view_mode == ViewMode::SidePanel {
-                        let rows = self.side_panel_rows();
-                        if rows.is_empty() {
-                            self.side_panel_selected_row = 0;
-                            self.current_log_buffer = None;
-                        } else {
-                            let current = self.side_panel_selected_row.min(rows.len() - 1);
-                            let next = (current + 1) % rows.len();
-                            self.sync_side_panel_selection_at(&rows, next, true);
+                        match self.detail_focus {
+                            DetailFocus::List => {
+                                let rows = self.side_panel_rows();
+                                if rows.is_empty() {
+                                    self.side_panel_selected_row = 0;
+                                    self.current_log_buffer = None;
+                                } else {
+                                    let current = self.side_panel_selected_row.min(rows.len() - 1);
+                                    let next = (current + 1) % rows.len();
+                                    self.sync_side_panel_selection_at(&rows, next, true);
+                                }
+                            }
+                            DetailFocus::Details => self.scroll_details_down(1),
+                            DetailFocus::Log => self.scroll_log_down(1),
                         }
                     } else {
                         self.update(Message::SelectDown)?;
@@ -897,18 +1049,24 @@ impl App {
                 }
                 KeyAction::SelectUp => {
                     if self.view_mode == ViewMode::SidePanel {
-                        let rows = self.side_panel_rows();
-                        if rows.is_empty() {
-                            self.side_panel_selected_row = 0;
-                            self.current_log_buffer = None;
-                        } else {
-                            let current = self.side_panel_selected_row.min(rows.len() - 1);
-                            let prev = if current == 0 {
-                                rows.len() - 1
-                            } else {
-                                current - 1
-                            };
-                            self.sync_side_panel_selection_at(&rows, prev, true);
+                        match self.detail_focus {
+                            DetailFocus::List => {
+                                let rows = self.side_panel_rows();
+                                if rows.is_empty() {
+                                    self.side_panel_selected_row = 0;
+                                    self.current_log_buffer = None;
+                                } else {
+                                    let current = self.side_panel_selected_row.min(rows.len() - 1);
+                                    let prev = if current == 0 {
+                                        rows.len() - 1
+                                    } else {
+                                        current - 1
+                                    };
+                                    self.sync_side_panel_selection_at(&rows, prev, true);
+                                }
+                            }
+                            DetailFocus::Details => self.scroll_details_up(1),
+                            DetailFocus::Log => self.scroll_log_up(1),
                         }
                     } else {
                         self.update(Message::SelectUp)?;
@@ -963,7 +1121,14 @@ impl App {
                     self.update(Message::CycleTodoVisualization)?;
                 }
                 KeyAction::Dismiss => {
-                    self.update(Message::DismissDialog)?;
+                    if self.view_mode == ViewMode::SidePanel
+                        && self.current_view == View::Board
+                        && self.detail_focus != DetailFocus::List
+                    {
+                        self.detail_focus = DetailFocus::List;
+                    } else {
+                        self.update(Message::DismissDialog)?;
+                    }
                 }
                 KeyAction::ToggleCategoryEditMode => {
                     if self.active_dialog == ActiveDialog::None {
@@ -1054,6 +1219,81 @@ impl App {
         side_panel_rows_from(&self.categories, &self.tasks, &self.collapsed_categories)
     }
 
+    fn cycle_detail_focus(&mut self) {
+        let has_task = self.selected_task_in_side_panel().is_some();
+        self.detail_focus = match (self.detail_focus, has_task) {
+            (DetailFocus::List, _) => DetailFocus::Details,
+            (DetailFocus::Details, true) => DetailFocus::Log,
+            (DetailFocus::Details, false) => DetailFocus::List,
+            (DetailFocus::Log, _) => DetailFocus::List,
+        };
+    }
+
+    fn scroll_details_down(&mut self, step: usize) {
+        self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(step);
+    }
+
+    fn scroll_details_up(&mut self, step: usize) {
+        self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(step);
+    }
+
+    fn log_entry_count(&self) -> usize {
+        let Some(buffer) = self.current_log_buffer.as_deref() else {
+            return 0;
+        };
+
+        let structured = buffer
+            .lines()
+            .filter(|line| line.starts_with("> ["))
+            .count();
+        if structured > 0 {
+            return structured;
+        }
+
+        buffer
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+    }
+
+    fn scroll_log_down(&mut self, step: usize) {
+        let max_offset = self.log_entry_count().saturating_sub(1);
+        self.log_scroll_offset = self.log_scroll_offset.saturating_add(step).min(max_offset);
+    }
+
+    fn scroll_log_up(&mut self, step: usize) {
+        self.log_scroll_offset = self.log_scroll_offset.saturating_sub(step);
+    }
+
+    fn scroll_expanded_log_down(&mut self, step: usize) {
+        let max_offset = self.log_entry_count().saturating_sub(1);
+        self.log_expanded_scroll_offset = self
+            .log_expanded_scroll_offset
+            .saturating_add(step)
+            .min(max_offset);
+    }
+
+    fn scroll_expanded_log_up(&mut self, step: usize) {
+        self.log_expanded_scroll_offset = self.log_expanded_scroll_offset.saturating_sub(step);
+    }
+
+    fn toggle_selected_log_entry(&mut self, use_expanded_offset: bool) {
+        let entry_count = self.log_entry_count();
+        if entry_count == 0 {
+            return;
+        }
+
+        let selected = if use_expanded_offset {
+            self.log_expanded_scroll_offset.min(entry_count - 1)
+        } else {
+            self.log_scroll_offset.min(entry_count - 1)
+        };
+
+        if !self.log_expanded_entries.insert(selected) {
+            self.log_expanded_entries.remove(&selected);
+        }
+    }
+
     fn sync_side_panel_selection(&mut self, rows: &[SidePanelRow], clear_log: bool) {
         self.sync_side_panel_selection_at(rows, self.side_panel_selected_row, clear_log);
     }
@@ -1068,6 +1308,10 @@ impl App {
             self.side_panel_selected_row = 0;
             if clear_log {
                 self.current_log_buffer = None;
+                self.detail_scroll_offset = 0;
+                self.log_scroll_offset = 0;
+                self.log_expanded_scroll_offset = 0;
+                self.log_expanded_entries.clear();
             }
             return;
         }
@@ -1095,6 +1339,10 @@ impl App {
 
         if clear_log {
             self.current_log_buffer = None;
+            self.detail_scroll_offset = 0;
+            self.log_scroll_offset = 0;
+            self.log_expanded_scroll_offset = 0;
+            self.log_expanded_entries.clear();
         }
     }
 
@@ -1103,6 +1351,10 @@ impl App {
         if rows.is_empty() {
             self.side_panel_selected_row = 0;
             self.current_log_buffer = None;
+            self.detail_scroll_offset = 0;
+            self.log_scroll_offset = 0;
+            self.log_expanded_scroll_offset = 0;
+            self.log_expanded_entries.clear();
             return;
         }
 
@@ -1702,6 +1954,95 @@ fn selected_task_from_side_panel_rows(rows: &[SidePanelRow], selected_row: usize
     }
 }
 
+fn log_kind_label(raw: Option<&str>) -> String {
+    let normalized = raw.unwrap_or("text").trim().to_ascii_lowercase();
+    let value = match normalized.as_str() {
+        "text" => "SAY".to_string(),
+        "tool" => "TOOL".to_string(),
+        "reasoning" => "THINK".to_string(),
+        "step-start" => "STEP+".to_string(),
+        "step-finish" => "STEP-".to_string(),
+        "subtask" => "SUBTASK".to_string(),
+        "patch" => "PATCH".to_string(),
+        "agent" => "AGENT".to_string(),
+        "snapshot" => "SNAP".to_string(),
+        "retry" => "RETRY".to_string(),
+        "compaction" => "COMPACT".to_string(),
+        "file" => "FILE".to_string(),
+        other => other.to_ascii_uppercase(),
+    };
+
+    if value.is_empty() {
+        "TEXT".to_string()
+    } else {
+        value
+    }
+}
+
+fn log_role_label(raw: Option<&str>) -> String {
+    let value = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "unknown".to_string());
+    value.to_ascii_uppercase()
+}
+
+fn log_time_label(raw: Option<&str>) -> String {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "--:--:--".to_string();
+    };
+
+    if let Some(ts) = format_numeric_timestamp(value) {
+        return ts;
+    }
+
+    if let Some((_, right)) = value.split_once('T') {
+        let hhmmss = right.chars().take(8).collect::<String>();
+        if hhmmss.len() == 8 {
+            return hhmmss;
+        }
+    }
+
+    if let Some((_, right)) = value.split_once(' ') {
+        let hhmmss = right.chars().take(8).collect::<String>();
+        if hhmmss.len() == 8 {
+            return hhmmss;
+        }
+    }
+
+    value.to_string()
+}
+
+fn format_numeric_timestamp(raw: &str) -> Option<String> {
+    let value = raw.parse::<f64>().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+
+    let absolute = value.abs();
+    let (seconds, nanos) = if absolute >= 1_000_000_000_000_000_000.0 {
+        let sec = (value / 1_000_000_000.0).trunc() as i64;
+        let nano = (value % 1_000_000_000.0).abs() as u32;
+        (sec, nano)
+    } else if absolute >= 1_000_000_000_000_000.0 {
+        let sec = (value / 1_000_000.0).trunc() as i64;
+        let nano = ((value % 1_000_000.0).abs() * 1_000.0) as u32;
+        (sec, nano)
+    } else if absolute >= 1_000_000_000_000.0 {
+        let sec = (value / 1_000.0).trunc() as i64;
+        let nano = ((value % 1_000.0).abs() * 1_000_000.0) as u32;
+        (sec, nano)
+    } else {
+        let sec = value.trunc() as i64;
+        let nano = ((value - value.trunc()).abs() * 1_000_000_000.0) as u32;
+        (sec, nano)
+    };
+
+    let dt: DateTime<Utc> = DateTime::from_timestamp(seconds, nanos)?;
+    Some(dt.with_timezone(&Local).format("%H:%M:%S").to_string())
+}
+
 fn desired_state_for_task(task: &Task, repo_available: bool) -> DesiredTaskState {
     DesiredTaskState {
         expected_session_name: task.tmux_session_name.clone(),
@@ -2101,7 +2442,16 @@ mod tests {
             side_panel_selected_row: 0,
             collapsed_categories: HashSet::new(),
             current_log_buffer: None,
+            detail_focus: DetailFocus::List,
+            detail_scroll_offset: 0,
+            log_scroll_offset: 0,
+            log_split_ratio: 65,
+            log_expanded: false,
+            log_expanded_scroll_offset: 0,
+            log_expanded_entries: HashSet::new(),
             session_todo_cache: Arc::new(Mutex::new(HashMap::new())),
+            session_title_cache: Arc::new(Mutex::new(HashMap::new())),
+            session_message_cache: Arc::new(Mutex::new(HashMap::new())),
             todo_visualization_mode: TodoVisualizationMode::Checklist,
             keybindings: Keybindings::load(),
             settings: crate::settings::Settings::load(),

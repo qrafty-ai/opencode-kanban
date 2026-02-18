@@ -48,6 +48,14 @@ pub struct SessionTodoItem {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct SessionMessageItem {
+    pub message_type: Option<String>,
+    pub role: Option<String>,
+    pub content: String,
+    pub timestamp: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub enum SessionState {
     Running,

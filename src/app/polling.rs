@@ -16,13 +16,15 @@ use uuid::Uuid;
 use crate::db::Database;
 use crate::opencode::status_server::SessionStatusMatch;
 use crate::opencode::{ServerStatusProvider, Status};
-use crate::types::{SessionStatusSource, SessionTodoItem};
+use crate::types::{SessionMessageItem, SessionStatusSource, SessionTodoItem};
 
 /// Spawn a background task that polls task status from the OpenCode server
 pub fn spawn_status_poller(
     db_path: PathBuf,
     stop: Arc<AtomicBool>,
     session_todo_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionTodoItem>>>>,
+    session_title_cache: Arc<Mutex<HashMap<String, String>>>,
+    session_message_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionMessageItem>>>>,
     poll_interval_ms: u64,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -63,12 +65,32 @@ pub fn spawn_status_poller(
                 }
             };
             let fetched_at = SystemTime::now();
-            let complete_session_parent_map = server_provider.fetch_session_parent_map().await.ok();
+            let session_records = server_provider.list_all_session_records().await.ok();
+            let complete_session_parent_map = session_records.as_ref().map(|records| {
+                records
+                    .iter()
+                    .map(|record| (record.session_id.clone(), record.parent_session_id.clone()))
+                    .collect::<HashMap<_, _>>()
+            });
             let mut next_todo_cache: HashMap<Uuid, Vec<SessionTodoItem>> = session_todo_cache
                 .lock()
                 .ok()
                 .map(|cache| cache.clone())
                 .unwrap_or_default();
+            let mut next_message_cache: HashMap<Uuid, Vec<SessionMessageItem>> =
+                session_message_cache
+                    .lock()
+                    .ok()
+                    .map(|cache| cache.clone())
+                    .unwrap_or_default();
+            let mut next_title_cache: HashMap<String, String> = HashMap::new();
+            if let Some(records) = session_records.as_ref() {
+                for record in records {
+                    if let Some(title) = record.title.as_ref() {
+                        next_title_cache.insert(record.session_id.clone(), title.clone());
+                    }
+                }
+            }
 
             debug!(
                 poll_interval_ms,
@@ -250,11 +272,31 @@ pub fn spawn_status_poller(
                             "todo fetch failed; preserving previous cached todos"
                         );
                     }
+
+                    if let Some(messages) =
+                        fetch_task_messages(&server_provider, task.id, Some(session_id)).await
+                    {
+                        debug!(
+                            task_id = %task.id,
+                            session_id,
+                            message_count = messages.len(),
+                            poll_interval_ms,
+                            "updated task messages from OpenCode server"
+                        );
+                        next_message_cache.insert(task.id, messages);
+                    } else {
+                        debug!(
+                            task_id = %task.id,
+                            session_id,
+                            "message fetch failed; preserving previous cached messages"
+                        );
+                    }
                 } else {
                     next_todo_cache.remove(&task.id);
+                    next_message_cache.remove(&task.id);
                     debug!(
                         task_id = %task.id,
-                        "no bound session; removed cached todos"
+                        "no bound session; removed cached todos and messages"
                     );
                 }
 
@@ -270,6 +312,16 @@ pub fn spawn_status_poller(
             if let Ok(mut cache) = session_todo_cache.lock() {
                 cache.clear();
                 cache.extend(next_todo_cache);
+            }
+
+            if let Ok(mut cache) = session_title_cache.lock() {
+                cache.clear();
+                cache.extend(next_title_cache);
+            }
+
+            if let Ok(mut cache) = session_message_cache.lock() {
+                cache.clear();
+                cache.extend(next_message_cache);
             }
 
             debug!(
@@ -300,6 +352,33 @@ async fn fetch_task_todos(
         Err(err) => {
             tracing::warn!(
                 "Failed to fetch todo list for task {} session {}: {:?}",
+                task_id,
+                session_id,
+                err
+            );
+            None
+        }
+    }
+}
+
+async fn fetch_task_messages(
+    server_provider: &ServerStatusProvider,
+    task_id: Uuid,
+    session_id: Option<&str>,
+) -> Option<Vec<SessionMessageItem>> {
+    let Some(session_id) = session_id else {
+        debug!(
+            "Skipping message sync for task {} because no OpenCode session is bound",
+            task_id
+        );
+        return None;
+    };
+
+    match server_provider.fetch_session_messages(session_id).await {
+        Ok(messages) => Some(messages),
+        Err(err) => {
+            tracing::warn!(
+                "Failed to fetch message list for task {} session {}: {:?}",
                 task_id,
                 session_id,
                 err
