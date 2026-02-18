@@ -165,10 +165,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         match app.view_mode {
             ViewMode::Kanban => {
-                "n:new  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x:category  H/L move  J/K reorder  v:view"
+                "n:new  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x/p:category  H/L move  J/K reorder  v:view"
             }
             ViewMode::SidePanel => {
-                "j/k:select  Space:collapse  Enter:attach task  t:todo view  c/r/x:category  H/L/J/K:move  v:view"
+                "j/k:select  Space:collapse  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
             }
         }
     };
@@ -1688,11 +1688,13 @@ fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut rows = TableBuilder::default();
     for section in [
         SettingsSection::Theme,
+        SettingsSection::CategoryColors,
         SettingsSection::Keybindings,
         SettingsSection::General,
     ] {
         let label = match section {
             SettingsSection::Theme => "Theme",
+            SettingsSection::CategoryColors => "Category Colors",
             SettingsSection::Keybindings => "Keybindings",
             SettingsSection::General => "General",
         };
@@ -1707,8 +1709,9 @@ fn render_settings_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let selected_idx = match active_section {
         SettingsSection::Theme => 0,
-        SettingsSection::Keybindings => 1,
-        SettingsSection::General => 2,
+        SettingsSection::CategoryColors => 1,
+        SettingsSection::Keybindings => 2,
+        SettingsSection::General => 3,
     };
 
     let mut list = List::default()
@@ -1732,9 +1735,48 @@ fn render_settings_active_section(frame: &mut Frame<'_>, area: Rect, app: &App) 
         .unwrap_or(SettingsSection::Theme);
     match active_section {
         SettingsSection::Theme => render_settings_theme(frame, area, app),
+        SettingsSection::CategoryColors => render_settings_category_colors(frame, area, app),
         SettingsSection::Keybindings => render_settings_keybindings(frame, area, app),
         SettingsSection::General => render_settings_general(frame, area, app),
     }
+}
+
+fn render_settings_category_colors(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme;
+    let selected_field = app
+        .settings_view_state
+        .as_ref()
+        .map(|s| s.category_color_selected)
+        .unwrap_or(0)
+        .min(app.categories.len().saturating_sub(1));
+
+    let mut rows = TableBuilder::default();
+    if app.categories.is_empty() {
+        rows.add_col(TextSpan::from("No categories available"))
+            .add_row();
+    } else {
+        for (index, category) in app.categories.iter().enumerate() {
+            let prefix = if index == selected_field { "> " } else { "  " };
+            let color_label = category_color_label(category.color.as_deref());
+            rows.add_col(
+                TextSpan::new(format!("{}{}: {}", prefix, category.name, color_label))
+                    .fg(theme.category_accent(category.color.as_deref())),
+            )
+            .add_row();
+        }
+    }
+
+    let mut list = List::default()
+        .title("Category Colors", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .highlighted_color(theme.interactive.focus)
+        .highlighted_str("> ")
+        .scroll(false)
+        .rows(rows.build())
+        .selected_line(selected_field);
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, area);
 }
 
 fn render_settings_theme(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -1843,6 +1885,9 @@ fn render_settings_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let help_text = match active_section {
         SettingsSection::Theme => "Space/Enter: cycle theme  h/l: section  Esc: close",
+        SettingsSection::CategoryColors => {
+            "j/k: select category  Space/Enter: cycle color  h/l: section  Esc: close"
+        }
         SettingsSection::Keybindings => "h/l: section  Esc: close",
         SettingsSection::General => "j/k: select  h/l: section  Esc: close",
     };
