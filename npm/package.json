@@ -1,0 +1,21 @@
+{
+  "name": "opencode-kanban",
+  "version": "0.0.0-dev",
+  "description": "Terminal kanban board for managing OpenCode tmux sessions",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "opencode-kanban": "bin/opencode-kanban.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "vendor"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/example/opencode-kanban.git"
+  }
+}
