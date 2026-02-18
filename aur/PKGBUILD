@@ -21,16 +21,14 @@ build() {
     cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
-    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc
-    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+    unset CFLAGS CXXFLAGS LDFLAGS
     cargo build --frozen --release
 }
 
 check() {
     cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
-    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc
-    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+    unset CFLAGS CXXFLAGS LDFLAGS
     cargo test --frozen --lib 2>/dev/null || true
 }
 
