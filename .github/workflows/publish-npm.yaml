@@ -161,7 +161,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vendor-${{ matrix.platform_tag }}
-          path: vendor/${{ matrix.target }}
+          path: vendor
           if-no-files-found: error
 
   package-tarballs:
