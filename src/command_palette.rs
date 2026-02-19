@@ -234,7 +234,7 @@ pub fn all_commands() -> Vec<CommandDef> {
         CommandDef {
             id: "toggle_category_edit_mode",
             display_name: "Toggle Category Edit Mode",
-            keybinding: "g",
+            keybinding: "Ctrl+g",
             message: Some(Message::ToggleCategoryEditMode),
         },
         CommandDef {
