@@ -7,7 +7,7 @@ use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::theme::ThemePreset;
+use crate::theme::{CustomThemeConfig, ThemePreset};
 
 const DEFAULT_THEME: &str = "default";
 const DEFAULT_DEFAULT_VIEW: &str = "kanban";
@@ -22,6 +22,7 @@ const DEFAULT_SIDE_PANEL_WIDTH: u16 = 40;
 #[serde(default)]
 pub struct Settings {
     pub theme: String,
+    pub custom_theme: CustomThemeConfig,
     pub default_view: String,
     pub poll_interval_ms: u64,
     pub side_panel_width: u16,
@@ -40,6 +41,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: DEFAULT_THEME.to_string(),
+            custom_theme: CustomThemeConfig::default(),
             default_view: DEFAULT_DEFAULT_VIEW.to_string(),
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             side_panel_width: DEFAULT_SIDE_PANEL_WIDTH,
@@ -155,6 +157,25 @@ impl Settings {
             }
         };
 
+        self.custom_theme.inherit = match ThemePreset::from_str(&self.custom_theme.inherit) {
+            Ok(ThemePreset::Custom) => {
+                warn!(
+                    "custom_theme.inherit cannot be 'custom'; falling back to {}",
+                    ThemePreset::Default.as_str()
+                );
+                ThemePreset::Default.as_str().to_string()
+            }
+            Ok(preset) => preset.as_str().to_string(),
+            Err(()) => {
+                warn!(
+                    "invalid custom_theme.inherit '{}'; falling back to {}",
+                    self.custom_theme.inherit,
+                    ThemePreset::Default.as_str()
+                );
+                ThemePreset::Default.as_str().to_string()
+            }
+        };
+
         self.default_view = match self.default_view.trim().to_ascii_lowercase().as_str() {
             "kanban" => "kanban".to_string(),
             "detail" => "detail".to_string(),
@@ -257,6 +278,7 @@ mod tests {
         assert_eq!(settings.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS);
         assert_eq!(settings.side_panel_width, DEFAULT_SIDE_PANEL_WIDTH);
         assert_eq!(settings.keybindings, KeybindingsConfig::default());
+        assert_eq!(settings.custom_theme, CustomThemeConfig::default());
     }
 
     #[test]
@@ -265,6 +287,7 @@ mod tests {
         let path = settings_file_path(&temp_dir);
         let mut expected = Settings {
             theme: "high-contrast".to_string(),
+            custom_theme: CustomThemeConfig::default(),
             default_view: "detail".to_string(),
             poll_interval_ms: 2_500,
             side_panel_width: 55,
@@ -284,6 +307,7 @@ mod tests {
     fn test_validate_clamps_values() {
         let mut settings = Settings {
             theme: "default".to_string(),
+            custom_theme: CustomThemeConfig::default(),
             default_view: "kanban".to_string(),
             poll_interval_ms: 1,
             side_panel_width: 999,
@@ -338,6 +362,21 @@ mod tests {
         settings.validate();
 
         assert_eq!(settings.default_view, "kanban");
+    }
+
+    #[test]
+    fn test_validate_custom_theme_inherit_invalid_falls_back_to_default() {
+        let mut settings = Settings {
+            custom_theme: CustomThemeConfig {
+                inherit: "invalid".to_string(),
+                ..CustomThemeConfig::default()
+            },
+            ..Settings::default()
+        };
+
+        settings.validate();
+
+        assert_eq!(settings.custom_theme.inherit, "default");
     }
 
     #[test]

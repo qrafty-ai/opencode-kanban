@@ -212,7 +212,7 @@ impl App {
         let mut app = Self {
             should_quit: false,
             pulse_phase: 0,
-            theme: Theme::from_preset(effective_theme),
+            theme: Theme::resolve(effective_theme, &settings.custom_theme),
             layout_epoch: 0,
             viewport: (80, 24),
             last_mouse_event: None,
@@ -730,7 +730,7 @@ impl App {
                                         .unwrap_or_default();
                                     let next = current.next();
                                     self.settings.theme = next.as_str().to_string();
-                                    self.theme = Theme::from_preset(next);
+                                    self.theme = Theme::resolve(next, &self.settings.custom_theme);
                                 }
                                 1 => {
                                     let next = self.settings.poll_interval_ms.saturating_add(500);
@@ -802,7 +802,7 @@ impl App {
                                 ThemePreset::from_str(&self.settings.theme).unwrap_or_default();
                             let previous = current.previous();
                             self.settings.theme = previous.as_str().to_string();
-                            self.theme = Theme::from_preset(previous);
+                            self.theme = Theme::resolve(previous, &self.settings.custom_theme);
                         }
                         1 => {
                             let prev = self.settings.poll_interval_ms.saturating_sub(500);
@@ -826,7 +826,8 @@ impl App {
                     match state.general_selected_field {
                         0 => {
                             self.settings.theme = ThemePreset::Default.as_str().to_string();
-                            self.theme = Theme::from_preset(ThemePreset::Default);
+                            self.theme =
+                                Theme::resolve(ThemePreset::Default, &self.settings.custom_theme);
                         }
                         1 => {
                             self.settings.poll_interval_ms = 1_000;

@@ -91,6 +91,7 @@ cargo build --release
   opencode-kanban --theme light
   opencode-kanban --theme high-contrast
   opencode-kanban --theme mono
+  opencode-kanban --theme custom
   ```
 
 Each project uses its own SQLite file and board state.
@@ -134,10 +135,87 @@ For full, current bindings, use the in-app help overlay (`?`).
 ## Configuration
 
 - Settings file: `~/.config/opencode-kanban/settings.toml`
-- Legacy keybindings file (deprecated): `~/.config/opencode-kanban/keybindings.toml`
 - Project databases (Linux default): `~/.local/share/opencode-kanban/*.sqlite`
 
 The app creates config/data files on demand.
+
+### Theme configuration options
+
+Theme values live in `~/.config/opencode-kanban/settings.toml`.
+
+Top-level option:
+
+- `theme`: `default` | `light` | `high-contrast` | `mono` | `custom`
+
+When `theme = "custom"`, configure semantic tokens with these sections:
+
+- `[custom_theme]`
+  - `inherit`: `default` | `light` | `high-contrast` | `mono`
+- `[custom_theme.base]`
+  - `canvas`, `surface`, `text`, `text_muted`, `header`, `accent`, `danger`
+- `[custom_theme.interactive]`
+  - `focus`, `selected_bg`, `selected_border`, `border`
+- `[custom_theme.status]`
+  - `running`, `waiting`, `idle`, `dead`, `broken`, `unavailable`
+- `[custom_theme.tile]`
+  - `repo`, `branch`, `todo`
+- `[custom_theme.category]`
+  - `primary`, `secondary`, `tertiary`, `success`, `warning`, `danger`
+- `[custom_theme.dialog]`
+  - `surface`, `input_bg`, `button_bg`, `button_fg`
+
+Example:
+
+```toml
+theme = "custom"
+
+[custom_theme]
+inherit = "light"
+
+[custom_theme.base]
+canvas = "#E2E7EE"
+surface = "#ECF1F7"
+text = "#222A3A"
+text_muted = "#4E596D"
+header = "#2F66BF"
+accent = "#0E7490"
+danger = "#B02E24"
+
+[custom_theme.interactive]
+focus = "#2F66BF"
+selected_bg = "#D6DFED"
+selected_border = "#477ACD"
+border = "#A5B2C6"
+
+[custom_theme.status]
+running = "#278449"
+waiting = "#AB781A"
+idle = "#5D687A"
+dead = "#B02E24"
+broken = "#B02E24"
+unavailable = "#B02E24"
+
+[custom_theme.tile]
+repo = "#086678"
+branch = "#926614"
+todo = "#4E596D"
+
+[custom_theme.category]
+primary = "#2F66BF"
+secondary = "#AB501F"
+tertiary = "#6949AB"
+success = "#278449"
+warning = "#AB781A"
+danger = "#B02E24"
+
+[custom_theme.dialog]
+surface = "#ECF1F7"
+input_bg = "#E0E6EF"
+button_bg = "#CDD8E7"
+button_fg = "#FFFFFF"
+```
+
+- Accepted color format: `#RRGGBB` (hex only).
 
 ## Troubleshooting
 
