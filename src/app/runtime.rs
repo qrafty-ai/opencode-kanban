@@ -9,8 +9,8 @@ use crate::git::{
     git_is_valid_repo, git_remove_worktree,
 };
 use crate::tmux::{
-    sanitize_session_name_for_project, tmux_create_session, tmux_kill_session, tmux_session_exists,
-    tmux_switch_client,
+    PopupThemeStyle, sanitize_session_name_for_project, tmux_create_session, tmux_kill_session,
+    tmux_session_exists, tmux_show_popup, tmux_switch_client,
 };
 
 /// Runtime trait for task recovery operations
@@ -19,7 +19,13 @@ pub trait RecoveryRuntime {
     fn worktree_exists(&self, worktree_path: &Path) -> bool;
     fn session_exists(&self, session_name: &str) -> bool;
     fn create_session(&self, session_name: &str, working_dir: &Path, command: &str) -> Result<()>;
-    fn switch_client(&self, session_name: &str) -> Result<()>;
+    fn switch_client(
+        &self,
+        session_name: &str,
+        reopen_lines: &[String],
+        style: &PopupThemeStyle,
+    ) -> Result<()>;
+    fn show_attach_popup(&self, lines: &[String], style: &PopupThemeStyle) -> Result<()>;
 }
 
 /// Real implementation of RecoveryRuntime using actual git/tmux commands
@@ -42,8 +48,17 @@ impl RecoveryRuntime for RealRecoveryRuntime {
         tmux_create_session(session_name, working_dir, Some(command))
     }
 
-    fn switch_client(&self, session_name: &str) -> Result<()> {
-        tmux_switch_client(session_name)
+    fn switch_client(
+        &self,
+        session_name: &str,
+        reopen_lines: &[String],
+        style: &PopupThemeStyle,
+    ) -> Result<()> {
+        tmux_switch_client(session_name, reopen_lines, style)
+    }
+
+    fn show_attach_popup(&self, lines: &[String], style: &PopupThemeStyle) -> Result<()> {
+        tmux_show_popup(lines, style)
     }
 }
 
