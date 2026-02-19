@@ -2581,15 +2581,7 @@ impl App {
                 self.refresh_data()?;
             }
             Err(err) => {
-                let detail = format!("{err:#}");
-                let title = if detail.contains("worktree creation failed") {
-                    "Worktree creation failed".to_string()
-                } else if detail.contains("tmux session creation failed") {
-                    "Tmux session failed".to_string()
-                } else {
-                    "Task creation failed".to_string()
-                };
-                self.active_dialog = ActiveDialog::Error(ErrorDialogState { title, detail });
+                self.active_dialog = ActiveDialog::Error(create_task_error_dialog_state(&err));
             }
         }
 
@@ -2608,6 +2600,42 @@ impl App {
             self.mouse_hint_shown = true;
         }
     }
+}
+
+fn create_task_error_dialog_state(err: &anyhow::Error) -> ErrorDialogState {
+    let detail = format!("{err:#}");
+
+    if let Some(branch) = parse_existing_branch_name(&detail) {
+        return ErrorDialogState {
+            title: "Branch already exists".to_string(),
+            detail: format!(
+                "Branch `{branch}` already exists in this repository, so a new worktree branch cannot be created.\n\nChoose a different branch name, or delete/rename the existing local branch and try again."
+            ),
+        };
+    }
+
+    let title = if detail.contains("worktree creation failed") {
+        "Worktree creation failed".to_string()
+    } else if detail.contains("tmux session creation failed") {
+        "Tmux session failed".to_string()
+    } else {
+        "Task creation failed".to_string()
+    };
+
+    ErrorDialogState { title, detail }
+}
+
+fn parse_existing_branch_name(detail: &str) -> Option<String> {
+    detail.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let rest = trimmed.strip_prefix("fatal: a branch named '")?;
+        let (branch_name, _) = rest.split_once("' already exists")?;
+        if branch_name.is_empty() {
+            None
+        } else {
+            Some(branch_name.to_string())
+        }
+    })
 }
 
 fn default_view_mode(settings: &crate::settings::Settings) -> ViewMode {
@@ -3361,6 +3389,25 @@ mod tests {
 
         let ranked = rank_repos_for_query("", &repos, &usage);
         assert_eq!(ranked.first().copied(), Some(1));
+    }
+
+    #[test]
+    fn parse_existing_branch_name_detects_git_branch_collision() {
+        let detail =
+            "stderr: Preparing worktree (new branch 'c')\nfatal: a branch named 'c' already exists";
+        assert_eq!(parse_existing_branch_name(detail), Some("c".to_string()));
+    }
+
+    #[test]
+    fn create_task_error_dialog_state_branch_collision_is_concise() {
+        let err = anyhow::anyhow!(
+            "worktree creation failed: failed to create worktree `/home/cc/codes/playgrounds/.opencode-kanban-worktrees/test/c-2` for branch `c` from `main`: git command failed in /home/cc/codes/playgrounds/test: git worktree add -b c /home/cc/codes/playgrounds/.opencode-kanban-worktrees/test/c-2 main\nstdout:\nstderr: Preparing worktree (new branch 'c')\nfatal: a branch named 'c' already exists"
+        );
+
+        let dialog = create_task_error_dialog_state(&err);
+        assert_eq!(dialog.title, "Branch already exists");
+        assert!(dialog.detail.contains("Branch `c` already exists"));
+        assert!(!dialog.detail.contains("git worktree add -b"));
     }
 
     #[test]

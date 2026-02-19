@@ -1077,7 +1077,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         }
         ActiveDialog::Error(state) => {
             let text = format!("{}\n\n{}", state.title, state.detail);
-            render_message_dialog(frame, dialog_area, app, "Error", &text);
+            render_error_dialog(frame, dialog_area, app, "Error", &text);
         }
         ActiveDialog::WorktreeNotFound(state) => {
             let text = format!(
@@ -2000,6 +2000,22 @@ fn render_message_dialog(
 ) {
     let theme = app.theme;
     let mut paragraph = dialog_panel(title, Alignment::Center, theme, dialog_surface(theme))
+        .wrap(true)
+        .text(text.lines().map(|line| TextSpan::from(line.to_string())));
+    paragraph.view(frame, area);
+
+    app.interaction_map
+        .register_click(InteractionLayer::Dialog, area, Message::DismissDialog);
+}
+
+fn render_error_dialog(frame: &mut Frame<'_>, area: Rect, app: &mut App, title: &str, text: &str) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+    let mut paragraph = Paragraph::default()
+        .title(title, Alignment::Center)
+        .borders(rounded_borders(theme.base.danger))
+        .foreground(theme.base.danger)
+        .background(surface)
         .wrap(true)
         .text(text.lines().map(|line| TextSpan::from(line.to_string())));
     paragraph.view(frame, area);
