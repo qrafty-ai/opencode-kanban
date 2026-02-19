@@ -17,6 +17,7 @@ pub struct Repo {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Category {
     pub id: Uuid,
+    pub slug: String,
     pub name: String,
     pub position: i64,
     pub color: Option<String>,

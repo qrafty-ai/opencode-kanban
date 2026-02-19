@@ -2721,7 +2721,7 @@ impl App {
         let todo_category = self
             .categories
             .iter()
-            .find(|category| category.name == "TODO")
+            .find(|category| category.slug == "todo")
             .or_else(|| self.categories.first())
             .map(|category| category.id)
             .context("no category available for new task")?;
@@ -3462,8 +3462,13 @@ mod tests {
     use crate::opencode::OpenCodeServerManager;
 
     fn test_category(id: Uuid, name: &str, position: i64) -> Category {
+        let slug = name
+            .to_ascii_lowercase()
+            .replace(' ', "-")
+            .replace('_', "-");
         Category {
             id,
+            slug,
             name: name.to_string(),
             position,
             color: None,

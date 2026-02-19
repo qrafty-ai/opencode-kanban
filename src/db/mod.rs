@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     future::Future,
     path::{Path, PathBuf},
@@ -516,12 +516,25 @@ impl Database {
         position: i64,
         color: Option<String>,
     ) -> Result<Category> {
+        self.add_category_with_slug_async(name, None, position, color)
+            .await
+    }
+
+    pub async fn add_category_with_slug_async(
+        &self,
+        name: impl AsRef<str>,
+        slug: Option<&str>,
+        position: i64,
+        color: Option<String>,
+    ) -> Result<Category> {
+        let normalized_slug = normalize_category_slug(slug.unwrap_or_else(|| name.as_ref()));
         let now = now_iso();
         let id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO categories (id, name, position, color, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO categories (id, slug, name, position, color, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
+        .bind(normalized_slug)
         .bind(name.as_ref())
         .bind(position)
         .bind(color)
@@ -542,9 +555,19 @@ impl Database {
         block_on_db(self.add_category_async(name, position, color))
     }
 
+    pub fn add_category_with_slug(
+        &self,
+        name: impl AsRef<str>,
+        slug: Option<&str>,
+        position: i64,
+        color: Option<String>,
+    ) -> Result<Category> {
+        block_on_db(self.add_category_with_slug_async(name, slug, position, color))
+    }
+
     pub async fn list_categories_async(&self) -> Result<Vec<Category>> {
         let rows = sqlx::query(
-            "SELECT id, name, position, color, created_at FROM categories ORDER BY position ASC",
+            "SELECT id, slug, name, position, color, created_at FROM categories ORDER BY position ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -583,6 +606,38 @@ impl Database {
 
     pub fn rename_category(&self, id: Uuid, name: impl AsRef<str>) -> Result<()> {
         block_on_db(self.rename_category_async(id, name))
+    }
+
+    pub async fn update_category_slug_async(&self, id: Uuid, slug: impl AsRef<str>) -> Result<()> {
+        sqlx::query("UPDATE categories SET slug = ? WHERE id = ?")
+            .bind(normalize_category_slug(slug.as_ref()))
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("failed to update category slug")?;
+        Ok(())
+    }
+
+    pub fn update_category_slug(&self, id: Uuid, slug: impl AsRef<str>) -> Result<()> {
+        block_on_db(self.update_category_slug_async(id, slug))
+    }
+
+    pub async fn get_category_by_slug_async(
+        &self,
+        slug: impl AsRef<str>,
+    ) -> Result<Option<Category>> {
+        let row = sqlx::query(
+            "SELECT id, slug, name, position, color, created_at FROM categories WHERE slug = ?",
+        )
+        .bind(normalize_category_slug(slug.as_ref()))
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|value| map_category_row(&value)).transpose()
+    }
+
+    pub fn get_category_by_slug(&self, slug: impl AsRef<str>) -> Result<Option<Category>> {
+        block_on_db(self.get_category_by_slug_async(slug))
     }
 
     pub async fn update_category_color_async(&self, id: Uuid, color: Option<String>) -> Result<()> {
@@ -677,6 +732,7 @@ impl Database {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS categories (
                 id TEXT PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE,
                 name TEXT NOT NULL UNIQUE,
                 position INTEGER NOT NULL,
                 color TEXT,
@@ -770,7 +826,62 @@ impl Database {
             .await
             .context("failed to backfill tasks.archived")?;
 
+        self.migrate_categories_slug_column_async().await?;
         self.migrate_categories_color_column_async().await?;
+        Ok(())
+    }
+
+    async fn migrate_categories_slug_column_async(&self) -> Result<()> {
+        let rows = sqlx::query("PRAGMA table_info(categories)")
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to query categories table_info pragma")?;
+
+        let has_slug_column = rows.into_iter().any(|row| {
+            row.try_get::<String, _>(1)
+                .map(|name| name == "slug")
+                .unwrap_or(false)
+        });
+
+        if !has_slug_column {
+            sqlx::query("ALTER TABLE categories ADD COLUMN slug TEXT")
+                .execute(&self.pool)
+                .await
+                .context("failed to add categories.slug column")?;
+        }
+
+        let rows = sqlx::query(
+            "SELECT id, name, slug FROM categories ORDER BY position ASC, created_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to load categories for slug migration")?;
+
+        let mut used_slugs = HashSet::new();
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let name: String = row.try_get("name")?;
+            let existing_slug: Option<String> = row.try_get("slug")?;
+            let base_slug = match existing_slug {
+                Some(value) if !value.trim().is_empty() => normalize_category_slug(&value),
+                _ => normalize_category_slug(&name),
+            };
+            let next_slug = next_available_slug(&base_slug, &used_slugs);
+            used_slugs.insert(next_slug.clone());
+
+            sqlx::query("UPDATE categories SET slug = ? WHERE id = ?")
+                .bind(next_slug)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .context("failed to backfill categories.slug")?;
+        }
+
+        sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_slug ON categories(slug)")
+            .execute(&self.pool)
+            .await
+            .context("failed to create categories.slug unique index")?;
+
         Ok(())
     }
 
@@ -826,7 +937,7 @@ impl Database {
 
     async fn get_category_async(&self, id: Uuid) -> Result<Category> {
         let row = sqlx::query(
-            "SELECT id, name, position, color, created_at FROM categories WHERE id = ?",
+            "SELECT id, slug, name, position, color, created_at FROM categories WHERE id = ?",
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -898,6 +1009,7 @@ fn map_repo_row(row: &SqliteRow) -> Result<Repo> {
 fn map_category_row(row: &SqliteRow) -> Result<Category> {
     Ok(Category {
         id: parse_uuid_column(row.try_get::<String, _>("id")?)?,
+        slug: row.try_get("slug")?,
         name: row.try_get("name")?,
         position: row.try_get("position")?,
         color: row.try_get("color")?,
@@ -942,6 +1054,54 @@ fn parse_uuid_column(value: String) -> Result<Uuid> {
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn normalize_category_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+
+    for ch in value.trim().chars() {
+        let normalized = ch.to_ascii_lowercase();
+        if normalized.is_ascii_alphanumeric() {
+            slug.push(normalized);
+            previous_dash = false;
+            continue;
+        }
+
+        if !previous_dash {
+            slug.push('-');
+            previous_dash = true;
+        }
+    }
+
+    while slug.starts_with('-') {
+        slug.remove(0);
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    if slug.is_empty() {
+        "category".to_string()
+    } else {
+        slug
+    }
+}
+
+fn next_available_slug(base: &str, used: &HashSet<String>) -> String {
+    if !used.contains(base) {
+        return base.to_string();
+    }
+
+    let mut index = 2;
+    loop {
+        let candidate = format!("{base}-{index}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
 }
 
 fn derive_repo_name(path: &Path) -> String {
@@ -996,6 +1156,9 @@ mod tests {
         let categories = db.list_categories()?;
 
         assert_eq!(categories.len(), 3);
+        assert_eq!(categories[0].slug, "todo");
+        assert_eq!(categories[1].slug, "in-progress");
+        assert_eq!(categories[2].slug, "done");
         assert_eq!(categories[0].name, "TODO");
         assert_eq!(categories[1].name, "IN PROGRESS");
         assert_eq!(categories[2].name, "DONE");
