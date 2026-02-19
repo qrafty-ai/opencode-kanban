@@ -21,6 +21,7 @@ use nucleo::{Config, Matcher, Utf32Str};
 use tokio::task::JoinHandle;
 use tracing::warn;
 use tuirealm::ratatui::layout::Rect;
+use tuirealm::ratatui::style::Color;
 use tuirealm::ratatui::widgets::{ListState, ScrollbarState};
 use uuid::Uuid;
 
@@ -50,7 +51,7 @@ use crate::opencode::{
 };
 use crate::projects::{self, ProjectInfo};
 use crate::theme::{Theme, ThemePreset};
-use crate::tmux::tmux_kill_session;
+use crate::tmux::{PopupThemeStyle, tmux_kill_session};
 use crate::types::{
     Category, CommandFrequency, Repo, SessionMessageItem, SessionState, SessionTodoItem, Task,
 };
@@ -2630,6 +2631,7 @@ impl App {
         let Some(repo) = self.repo_for_task(&task) else {
             return Ok(());
         };
+        let task_todos = self.session_todos(task.id);
 
         let project_slug = self.current_project_slug_for_tmux();
         let result = attach_task_with_runtime(
@@ -2637,6 +2639,8 @@ impl App {
             project_slug.as_deref(),
             &task,
             &repo,
+            &task_todos,
+            &self.theme,
             &RealRecoveryRuntime,
         )?;
         match result {
@@ -3082,6 +3086,8 @@ fn attach_task_with_runtime(
     project_slug: Option<&str>,
     task: &Task,
     repo: &Repo,
+    task_todos: &[SessionTodoItem],
+    theme: &Theme,
     runtime: &impl RecoveryRuntime,
 ) -> Result<AttachTaskResult> {
     if !runtime.repo_exists(Path::new(&repo.path)) {
@@ -3092,7 +3098,9 @@ fn attach_task_with_runtime(
     if let Some(session_name) = task.tmux_session_name.as_deref()
         && runtime.session_exists(session_name)
     {
-        runtime.switch_client(session_name)?;
+        let popup_style = popup_style_from_theme(theme);
+        let popup_lines = build_attach_popup_lines(task, repo, session_name, task_todos);
+        runtime.switch_client(session_name, &popup_lines, &popup_style)?;
         return Ok(AttachTaskResult::Attached);
     }
 
@@ -3125,8 +3133,107 @@ fn attach_task_with_runtime(
     )?;
     db.update_task_status(task.id, Status::Idle.as_str())?;
 
-    runtime.switch_client(&session_name)?;
+    let popup_style = popup_style_from_theme(theme);
+    let popup_lines = build_attach_popup_lines(task, repo, &session_name, task_todos);
+    runtime.switch_client(&session_name, &popup_lines, &popup_style)?;
+    if let Err(err) = runtime.show_attach_popup(&popup_lines, &popup_style) {
+        warn!(
+            error = %err,
+            task_id = %task.id,
+            session_name = %session_name,
+            "failed to show attach popup overlay"
+        );
+    }
     Ok(AttachTaskResult::Attached)
+}
+
+fn popup_style_from_theme(theme: &Theme) -> PopupThemeStyle {
+    let text = tmux_hex_color(theme.base.text);
+    let surface = tmux_hex_color(theme.dialog.surface);
+    let border = tmux_hex_color(theme.interactive.selected_border);
+    PopupThemeStyle {
+        popup_style: format!("fg={text},bg={surface}"),
+        border_style: format!("fg={border},bg={surface}"),
+    }
+}
+
+fn tmux_hex_color(color: Color) -> String {
+    let (r, g, b) = match color {
+        Color::Reset => (208, 208, 208),
+        Color::Black => (0, 0, 0),
+        Color::Red => (205, 49, 49),
+        Color::Green => (13, 188, 121),
+        Color::Yellow => (229, 229, 16),
+        Color::Blue => (36, 114, 200),
+        Color::Magenta => (188, 63, 188),
+        Color::Cyan => (17, 168, 205),
+        Color::Gray => (128, 128, 128),
+        Color::DarkGray => (90, 90, 90),
+        Color::LightRed => (241, 76, 76),
+        Color::LightGreen => (35, 209, 139),
+        Color::LightYellow => (245, 245, 67),
+        Color::LightBlue => (59, 142, 234),
+        Color::LightMagenta => (214, 112, 214),
+        Color::LightCyan => (41, 184, 219),
+        Color::White => (255, 255, 255),
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index) => {
+            let value = index;
+            (value, value, value)
+        }
+    };
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+fn build_attach_popup_lines(
+    task: &Task,
+    repo: &Repo,
+    session_name: &str,
+    task_todos: &[SessionTodoItem],
+) -> Vec<String> {
+    let worktree = task.worktree_path.as_deref().unwrap_or("n/a");
+    let mut lines = vec![
+        "Task attached".to_string(),
+        String::new(),
+        format!("Title:   {}", task.title),
+        format!("Repo:    {}", repo.name),
+        format!("Branch:  {}", task.branch),
+        format!("Session: {session_name}"),
+        format!("Worktree:{worktree}"),
+        String::new(),
+        "Navigation".to_string(),
+        "Prefix+K  return to kanban".to_string(),
+        "Prefix+O  reopen helper".to_string(),
+        "Prefix+d  detach from tmux".to_string(),
+    ];
+
+    lines.push(String::new());
+    lines.push("Todo list".to_string());
+    lines.extend(build_attach_popup_todo_lines(task_todos));
+    lines.push(String::new());
+    lines
+}
+
+fn build_attach_popup_todo_lines(task_todos: &[SessionTodoItem]) -> Vec<String> {
+    if task_todos.is_empty() {
+        return vec!["(no todos yet)".to_string()];
+    }
+
+    let active_index = task_todos.iter().position(|todo| !todo.completed);
+    task_todos
+        .iter()
+        .enumerate()
+        .map(|(index, todo)| {
+            let marker = if todo.completed {
+                "x"
+            } else if Some(index) == active_index {
+                ">"
+            } else {
+                " "
+            };
+            format!("[{marker}] {}", todo.content)
+        })
+        .collect()
 }
 
 fn create_task_pipeline_with_runtime(
@@ -3516,6 +3623,57 @@ mod tests {
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }
+    }
+
+    #[test]
+    fn build_attach_popup_lines_contains_task_context_and_navigation() {
+        let mut task = test_task(Uuid::new_v4(), 0, "add popup overlay");
+        task.branch = "feat/tmux-overlay".to_string();
+        task.worktree_path = Some("/tmp/worktrees/feat-tmux-overlay".to_string());
+        let repo = test_repo("opencode-kanban", "/tmp/opencode-kanban");
+        let todos = vec![
+            SessionTodoItem {
+                content: "done".to_string(),
+                completed: true,
+            },
+            SessionTodoItem {
+                content: "active".to_string(),
+                completed: false,
+            },
+            SessionTodoItem {
+                content: "pending".to_string(),
+                completed: false,
+            },
+        ];
+
+        let lines = build_attach_popup_lines(&task, &repo, "ok-opencode-feat-tmux-overlay", &todos);
+
+        assert_eq!(lines[0], "Task attached");
+        assert!(lines.iter().any(|line| line.contains("add popup overlay")));
+        assert!(lines.iter().any(|line| line.contains("opencode-kanban")));
+        assert!(lines.iter().any(|line| line.contains("feat/tmux-overlay")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("ok-opencode-feat-tmux-overlay"))
+        );
+        assert!(lines.iter().any(|line| line.contains("Prefix+K")));
+        assert!(lines.iter().any(|line| line.contains("Prefix+O")));
+        assert!(lines.iter().any(|line| line == "Todo list"));
+        assert!(lines.iter().any(|line| line == "[x] done"));
+        assert!(lines.iter().any(|line| line == "[>] active"));
+        assert!(lines.iter().any(|line| line == "[ ] pending"));
+    }
+
+    #[test]
+    fn popup_style_from_theme_uses_theme_palette_colors() {
+        let theme = Theme::default();
+        let style = popup_style_from_theme(&theme);
+
+        assert!(style.popup_style.starts_with("fg=#"));
+        assert!(style.popup_style.contains(",bg=#"));
+        assert!(style.border_style.starts_with("fg=#"));
+        assert!(style.border_style.contains(",bg=#"));
     }
 
     #[test]

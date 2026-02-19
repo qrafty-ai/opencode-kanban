@@ -9,6 +9,21 @@ use anyhow::{Context, Result, bail};
 const TMUX_SOCKET: &str = "";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PopupThemeStyle {
+    pub popup_style: String,
+    pub border_style: String,
+}
+
+impl PopupThemeStyle {
+    pub fn plain() -> Self {
+        Self {
+            popup_style: "fg=default,bg=default".to_string(),
+            border_style: "fg=default,bg=default".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TmuxSession {
     pub name: String,
     pub created_at: i64,
@@ -66,8 +81,13 @@ pub fn tmux_kill_session(session_name: &str) -> Result<()> {
     ensure_success(&output, "kill-session")
 }
 
-pub fn tmux_switch_client(session_name: &str) -> Result<()> {
+pub fn tmux_switch_client(
+    session_name: &str,
+    reopen_lines: &[String],
+    style: &PopupThemeStyle,
+) -> Result<()> {
     tmux_ensure_return_binding()?;
+    tmux_ensure_overlay_binding(reopen_lines, style)?;
 
     let output = Command::new("tmux")
         .args(switch_client_args(session_name))
@@ -76,11 +96,28 @@ pub fn tmux_switch_client(session_name: &str) -> Result<()> {
     ensure_success_with_output(&output, "switch-client")
 }
 
+pub fn tmux_show_popup(lines: &[String], style: &PopupThemeStyle) -> Result<()> {
+    let command = popup_shell_command(lines);
+    let output = tmux_command()
+        .args(display_popup_args(&command, style))
+        .output()
+        .context("failed to run tmux display-popup")?;
+    ensure_success_with_output(&output, "display-popup")
+}
+
 fn tmux_ensure_return_binding() -> Result<()> {
     let output = Command::new("tmux")
         .args(return_binding_args())
         .output()
         .context("failed to configure return key binding")?;
+    ensure_success_with_output(&output, "bind-key")
+}
+
+fn tmux_ensure_overlay_binding(lines: &[String], style: &PopupThemeStyle) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(overlay_binding_args(lines, style))
+        .output()
+        .context("failed to configure attach overlay key binding")?;
     ensure_success_with_output(&output, "bind-key")
 }
 
@@ -286,6 +323,65 @@ fn return_binding_args() -> Vec<String> {
         "switch-client".to_string(),
         "-l".to_string(),
     ]
+}
+
+fn overlay_binding_args(lines: &[String], style: &PopupThemeStyle) -> Vec<String> {
+    let command = popup_shell_command(lines);
+    vec![
+        "bind-key".to_string(),
+        "-T".to_string(),
+        "prefix".to_string(),
+        "O".to_string(),
+        "display-popup".to_string(),
+        "-E".to_string(),
+        "-s".to_string(),
+        style.popup_style.clone(),
+        "-S".to_string(),
+        style.border_style.clone(),
+        "-w".to_string(),
+        "76%".to_string(),
+        "-h".to_string(),
+        "64%".to_string(),
+        "-x".to_string(),
+        "C".to_string(),
+        "-y".to_string(),
+        "C".to_string(),
+        command,
+    ]
+}
+
+fn display_popup_args(command: &str, style: &PopupThemeStyle) -> Vec<String> {
+    vec![
+        "display-popup".to_string(),
+        "-E".to_string(),
+        "-s".to_string(),
+        style.popup_style.clone(),
+        "-S".to_string(),
+        style.border_style.clone(),
+        "-w".to_string(),
+        "76%".to_string(),
+        "-h".to_string(),
+        "64%".to_string(),
+        "-x".to_string(),
+        "C".to_string(),
+        "-y".to_string(),
+        "C".to_string(),
+        command.to_string(),
+    ]
+}
+
+fn popup_shell_command(lines: &[String]) -> String {
+    let mut command = String::from("printf '%s\\n'");
+    for line in lines {
+        command.push(' ');
+        command.push_str(&shell_single_quote(line));
+    }
+    command.push_str("; printf '%s' 'Press Enter to close'; read -r _");
+    command
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn list_sessions_args() -> Vec<String> {
@@ -496,6 +592,90 @@ mod tests {
         assert_eq!(
             return_binding_args(),
             vec!["bind-key", "-T", "prefix", "K", "switch-client", "-l"]
+        );
+    }
+
+    #[test]
+    fn test_overlay_binding_args_builder() {
+        let style = PopupThemeStyle {
+            popup_style: "fg=#ffffff,bg=#101010".to_string(),
+            border_style: "fg=#5fa8ff,bg=#101010".to_string(),
+        };
+        let lines = vec![
+            "Task helper".to_string(),
+            "Prefix+K  return to kanban".to_string(),
+        ];
+        assert_eq!(
+            overlay_binding_args(&lines, &style),
+            vec![
+                "bind-key",
+                "-T",
+                "prefix",
+                "O",
+                "display-popup",
+                "-E",
+                "-s",
+                "fg=#ffffff,bg=#101010",
+                "-S",
+                "fg=#5fa8ff,bg=#101010",
+                "-w",
+                "76%",
+                "-h",
+                "64%",
+                "-x",
+                "C",
+                "-y",
+                "C",
+                "printf '%s\\n' 'Task helper' 'Prefix+K  return to kanban'; printf '%s' 'Press Enter to close'; read -r _",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_display_popup_args_builder() {
+        let style = PopupThemeStyle {
+            popup_style: "fg=#ffffff,bg=#101010".to_string(),
+            border_style: "fg=#5fa8ff,bg=#101010".to_string(),
+        };
+        assert_eq!(
+            display_popup_args("printf 'hello'", &style),
+            vec![
+                "display-popup",
+                "-E",
+                "-s",
+                "fg=#ffffff,bg=#101010",
+                "-S",
+                "fg=#5fa8ff,bg=#101010",
+                "-w",
+                "76%",
+                "-h",
+                "64%",
+                "-x",
+                "C",
+                "-y",
+                "C",
+                "printf 'hello'",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_popup_theme_style_plain_defaults() {
+        assert_eq!(
+            PopupThemeStyle::plain(),
+            PopupThemeStyle {
+                popup_style: "fg=default,bg=default".to_string(),
+                border_style: "fg=default,bg=default".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_popup_shell_command_escapes_lines() {
+        let command = popup_shell_command(&["can't fail".to_string(), "line two".to_string()]);
+        assert_eq!(
+            command,
+            "printf '%s\\n' 'can'\\''t fail' 'line two'; printf '%s' 'Press Enter to close'; read -r _"
         );
     }
 
