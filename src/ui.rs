@@ -1165,6 +1165,11 @@ fn render_new_task_dialog(
         surface,
         theme,
     );
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        layout[0],
+        Message::FocusNewTaskField(NewTaskField::Repo),
+    );
     render_input_component(
         frame,
         layout[1],
@@ -1173,6 +1178,11 @@ fn render_new_task_dialog(
         state.focused_field == NewTaskField::Branch,
         surface,
         theme,
+    );
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        layout[1],
+        Message::FocusNewTaskField(NewTaskField::Branch),
     );
     render_input_component(
         frame,
@@ -1183,6 +1193,11 @@ fn render_new_task_dialog(
         surface,
         theme,
     );
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        layout[2],
+        Message::FocusNewTaskField(NewTaskField::Base),
+    );
     render_input_component(
         frame,
         layout[3],
@@ -1191,6 +1206,11 @@ fn render_new_task_dialog(
         state.focused_field == NewTaskField::Title,
         surface,
         theme,
+    );
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        layout[3],
+        Message::FocusNewTaskField(NewTaskField::Title),
     );
 
     let selected = if state.ensure_base_up_to_date {
@@ -1207,6 +1227,11 @@ fn render_new_task_dialog(
         AttrValue::Flag(state.focused_field == NewTaskField::EnsureBaseUpToDate),
     );
     checkbox.view(frame, layout[4]);
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        layout[4],
+        Message::ToggleNewTaskCheckbox,
+    );
 
     let actions = Layout::default()
         .direction(Direction::Horizontal)
@@ -1244,6 +1269,13 @@ fn render_new_task_dialog(
         .foreground(theme.base.text_muted)
         .background(surface);
     hint.view(frame, layout[6]);
+
+    match state.focused_field {
+        NewTaskField::Branch => set_text_input_cursor(frame, layout[1], &state.branch_input),
+        NewTaskField::Base => set_text_input_cursor(frame, layout[2], &state.base_input),
+        NewTaskField::Title => set_text_input_cursor(frame, layout[3], &state.title_input),
+        _ => {}
+    }
 }
 
 fn render_delete_task_dialog(
@@ -1396,6 +1428,11 @@ fn render_category_dialog(
         surface,
         theme,
     );
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        layout[0],
+        Message::FocusCategoryInputField(CategoryInputField::Name),
+    );
 
     let buttons = Layout::default()
         .direction(Direction::Horizontal)
@@ -1431,6 +1468,10 @@ fn render_category_dialog(
         .foreground(theme.base.text_muted)
         .background(surface);
     hint.view(frame, layout[3]);
+
+    if matches!(state.focused_field, CategoryInputField::Name) {
+        set_text_input_cursor(frame, layout[0], &state.name_input);
+    }
 }
 
 fn render_delete_category_dialog(
@@ -1598,6 +1639,11 @@ fn render_new_project_dialog(
         surface,
         theme,
     );
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        layout[0],
+        Message::FocusNewProjectField(NewProjectField::Name),
+    );
 
     let buttons = Layout::default()
         .direction(Direction::Horizontal)
@@ -1629,6 +1675,10 @@ fn render_new_project_dialog(
         .foreground(theme.base.text_muted)
         .background(surface);
     hint.view(frame, layout[3]);
+
+    if matches!(state.focused_field, NewProjectField::Name) {
+        set_text_input_cursor(frame, layout[0], &state.name_input);
+    }
 }
 
 fn render_rename_project_dialog(
@@ -1665,6 +1715,11 @@ fn render_rename_project_dialog(
         surface,
         theme,
     );
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        layout[0],
+        Message::FocusRenameProjectField(RenameProjectField::Name),
+    );
 
     let buttons = Layout::default()
         .direction(Direction::Horizontal)
@@ -1696,6 +1751,10 @@ fn render_rename_project_dialog(
         .foreground(theme.base.text_muted)
         .background(surface);
     hint.view(frame, layout[3]);
+
+    if matches!(state.focused_field, RenameProjectField::Name) {
+        set_text_input_cursor(frame, layout[0], &state.name_input);
+    }
 }
 
 fn render_delete_project_dialog(
@@ -1799,6 +1858,11 @@ fn render_rename_repo_dialog(
         surface,
         theme,
     );
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        layout[0],
+        Message::FocusRenameRepoField(RenameRepoField::Name),
+    );
 
     let buttons = Layout::default()
         .direction(Direction::Horizontal)
@@ -1830,6 +1894,10 @@ fn render_rename_repo_dialog(
         .foreground(theme.base.text_muted)
         .background(surface);
     hint.view(frame, layout[3]);
+
+    if matches!(state.focused_field, RenameRepoField::Name) {
+        set_text_input_cursor(frame, layout[0], &state.name_input);
+    }
 }
 
 fn render_delete_repo_dialog(
@@ -2067,6 +2135,7 @@ fn render_command_palette_dialog(
         dialog_surface(theme),
         theme,
     );
+    set_text_input_cursor(frame, chunks[0], &state.query);
 
     let mut hint = Label::default()
         .text("Type to filter. Enter to execute. Esc to close.")
@@ -2253,6 +2322,28 @@ fn render_input_component(
     input.view(frame, area);
 }
 
+fn set_text_input_cursor(frame: &mut Frame<'_>, area: Rect, value: &str) {
+    if let Some((cursor_x, cursor_y)) = text_input_cursor_position(area, value) {
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+fn text_input_cursor_position(area: Rect, value: &str) -> Option<(u16, u16)> {
+    if area.width <= 2 || area.height <= 2 {
+        return None;
+    }
+
+    let content_width = area.width.saturating_sub(2) as usize;
+    if content_width == 0 {
+        return None;
+    }
+
+    let x_offset = value.chars().count().min(content_width.saturating_sub(1));
+    let cursor_x = area.x.saturating_add(1).saturating_add(x_offset as u16);
+    let cursor_y = area.y.saturating_add(1);
+    Some((cursor_x, cursor_y))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_repo_picker_input_component(
     frame: &mut Frame<'_>,
@@ -2313,6 +2404,7 @@ fn render_repo_picker_dialog(
         dialog_surface(theme),
         theme,
     );
+    set_text_input_cursor(frame, chunks[0], &picker.query);
 
     let mut hint = Label::default()
         .text("Type path/name. Up/Down move, Enter accept, Tab complete, Esc close")
@@ -3673,6 +3765,23 @@ mod tests {
 
         set_checkbox_highlight_choice(&mut checkbox, None);
         assert_eq!(checkbox.states.choice, 2);
+    }
+
+    #[test]
+    fn test_text_input_cursor_position_clamps_to_visible_input_width() {
+        let area = Rect::new(10, 6, 8, 3);
+        let (x, y) = text_input_cursor_position(area, "feature/long-branch")
+            .expect("cursor should be set for valid input area");
+        assert_eq!(x, 16);
+        assert_eq!(y, 7);
+    }
+
+    #[test]
+    fn test_text_input_cursor_position_none_for_tiny_area() {
+        assert_eq!(
+            text_input_cursor_position(Rect::new(0, 0, 2, 2), "abc"),
+            None
+        );
     }
 
     fn test_task(category_id: Uuid, position: i64) -> Task {
