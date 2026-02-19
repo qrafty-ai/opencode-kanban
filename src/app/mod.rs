@@ -4068,6 +4068,53 @@ mod tests {
     }
 
     #[test]
+    fn mouse_click_focuses_new_task_dialog_input_field() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        app.update(Message::OpenNewTaskDialog)?;
+
+        app.interaction_map.register_click(
+            InteractionLayer::Dialog,
+            Rect::new(12, 8, 24, 3),
+            Message::FocusNewTaskField(NewTaskField::Branch),
+        );
+
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 14, 9))?;
+
+        match &app.active_dialog {
+            ActiveDialog::NewTask(state) => {
+                assert_eq!(state.focused_field, NewTaskField::Branch);
+            }
+            other => panic!("expected NewTask dialog, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_click_toggles_new_task_checkbox() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        app.update(Message::OpenNewTaskDialog)?;
+
+        app.interaction_map.register_click(
+            InteractionLayer::Dialog,
+            Rect::new(12, 16, 24, 3),
+            Message::ToggleNewTaskCheckbox,
+        );
+
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 15, 17))?;
+
+        match &app.active_dialog {
+            ActiveDialog::NewTask(state) => {
+                assert_eq!(state.focused_field, NewTaskField::EnsureBaseUpToDate);
+                assert!(!state.ensure_base_up_to_date);
+            }
+            other => panic!("expected NewTask dialog, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn side_panel_rows_are_grouped_by_sorted_category_position() {
         let todo_id = Uuid::new_v4();
         let doing_id = Uuid::new_v4();
