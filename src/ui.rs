@@ -751,7 +751,6 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &mut A
         .opencode_session_id
         .as_deref()
         .and_then(|session_id| app.opencode_session_title(session_id))
-        .or_else(|| task.opencode_session_id.clone())
         .unwrap_or_else(|| "n/a".to_string());
 
     let mut lines = vec![
