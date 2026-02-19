@@ -447,8 +447,6 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             .unwrap_or(0)
             .min(tasks.len().saturating_sub(1));
         let is_focused_column = column_idx == app.focused_column;
-        let is_header_hovered =
-            app.hovered_message.as_ref() == Some(&Message::FocusColumn(column_idx));
 
         let tile_width =
             list_inner_width(columns[slot]).saturating_sub(usize::from(show_scrollbar));
@@ -476,11 +474,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 format!("{} ({})", category.name, tasks.len()),
                 Alignment::Left,
             )
-            .borders(rounded_borders(if is_focused_column || is_header_hovered {
-                theme.interactive.focus
-            } else {
-                accent
-            }))
+            .borders(rounded_borders(accent))
             .foreground(theme.base.text)
             .background(theme.base.surface)
             .scroll(true)
