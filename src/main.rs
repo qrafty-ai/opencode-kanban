@@ -19,6 +19,7 @@ use tuirealm::{
 
 use opencode_kanban::{
     app::App,
+    cli::{self, RootCommand},
     logging::{init_logging, print_log_location},
     realm::{RootId, apply_message, init_application, should_quit},
     theme::ThemePreset,
@@ -34,11 +35,28 @@ use opencode_kanban::{
     author
 )]
 struct Cli {
-    #[arg(short, long, value_name = "PROJECT")]
+    #[arg(short, long, global = true, value_name = "PROJECT")]
     project: Option<String>,
 
     #[arg(long, value_name = "PRESET")]
     theme: Option<String>,
+
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[arg(long)]
+    quiet: bool,
+
+    #[arg(long = "no-color")]
+    no_color: bool,
+
+    #[command(subcommand)]
+    command: Option<RootCommand>,
+}
+
+enum RunOutcome {
+    Continue,
+    Exit(i32),
 }
 
 #[tokio::main]
@@ -46,17 +64,41 @@ async fn main() -> Result<()> {
     let log_path = init_logging().expect("Failed to initialize logging");
     install_panic_hook_with_log(log_path.clone());
 
-    let result = run_app();
-
-    print_log_location(&log_path);
-
-    result
+    match run_app() {
+        Ok(RunOutcome::Continue) => {
+            print_log_location(&log_path);
+            Ok(())
+        }
+        Ok(RunOutcome::Exit(code)) => {
+            std::process::exit(code);
+        }
+        Err(err) => {
+            print_log_location(&log_path);
+            Err(err)
+        }
+    }
 }
 
-fn run_app() -> Result<()> {
-    validate_runtime_environment()?;
-
+fn run_app() -> Result<RunOutcome> {
     let cli = Cli::parse();
+
+    if let Some(command) = cli.command {
+        let Some(project_name) = cli.project.as_deref() else {
+            eprintln!("error[PROJECT_REQUIRED]: --project is required for CLI commands");
+            return Ok(RunOutcome::Exit(2));
+        };
+
+        if project_name.trim().is_empty() {
+            eprintln!("error[PROJECT_REQUIRED]: --project cannot be empty");
+            return Ok(RunOutcome::Exit(2));
+        }
+
+        let _ = cli.no_color;
+        let code = cli::run(project_name, command, cli.json, cli.quiet);
+        return Ok(RunOutcome::Exit(code));
+    }
+
+    validate_runtime_environment()?;
 
     let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
@@ -94,7 +136,7 @@ fn run_app() -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(RunOutcome::Continue)
 }
 
 fn validate_runtime_environment() -> Result<()> {
