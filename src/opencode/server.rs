@@ -204,24 +204,28 @@ fn is_healthy_response(response: &str) -> bool {
 fn spawn_opencode_server(binary: &str, config: &ServerConfig) -> Result<(), String> {
     let port = config.port.to_string();
 
-    Command::new(binary)
-        .args([
-            "serve",
-            "--port",
-            port.as_str(),
-            "--hostname",
-            config.hostname.as_str(),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|err| {
-            format!(
-                "failed to launch `{binary} serve --port {} --hostname {}`: {err}",
-                config.port, config.hostname
-            )
-        })
+    let mut cmd = Command::new(binary);
+    if let Some(home_dir) = dirs::home_dir() {
+        cmd.current_dir(home_dir);
+    }
+
+    cmd.args([
+        "serve",
+        "--port",
+        port.as_str(),
+        "--hostname",
+        config.hostname.as_str(),
+    ])
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .map(|_| ())
+    .map_err(|err| {
+        format!(
+            "failed to launch `{binary} serve --port {} --hostname {}`: {err}",
+            config.port, config.hostname
+        )
+    })
 }
 
 #[cfg(test)]
