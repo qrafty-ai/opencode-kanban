@@ -447,8 +447,6 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             .unwrap_or(0)
             .min(tasks.len().saturating_sub(1));
         let is_focused_column = column_idx == app.focused_column;
-        let is_header_hovered =
-            app.hovered_message.as_ref() == Some(&Message::FocusColumn(column_idx));
 
         let tile_width =
             list_inner_width(columns[slot]).saturating_sub(usize::from(show_scrollbar));
@@ -476,11 +474,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 format!("{} ({})", category.name, tasks.len()),
                 Alignment::Left,
             )
-            .borders(rounded_borders(if is_focused_column || is_header_hovered {
-                theme.interactive.focus
-            } else {
-                accent
-            }))
+            .borders(rounded_borders(accent))
             .foreground(theme.base.text)
             .background(theme.base.surface)
             .scroll(true)
@@ -1077,7 +1071,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         }
         ActiveDialog::Error(state) => {
             let text = format!("{}\n\n{}", state.title, state.detail);
-            render_message_dialog(frame, dialog_area, app, "Error", &text);
+            render_error_dialog(frame, dialog_area, app, "Error", &text);
         }
         ActiveDialog::WorktreeNotFound(state) => {
             let text = format!(
@@ -2000,6 +1994,22 @@ fn render_message_dialog(
 ) {
     let theme = app.theme;
     let mut paragraph = dialog_panel(title, Alignment::Center, theme, dialog_surface(theme))
+        .wrap(true)
+        .text(text.lines().map(|line| TextSpan::from(line.to_string())));
+    paragraph.view(frame, area);
+
+    app.interaction_map
+        .register_click(InteractionLayer::Dialog, area, Message::DismissDialog);
+}
+
+fn render_error_dialog(frame: &mut Frame<'_>, area: Rect, app: &mut App, title: &str, text: &str) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+    let mut paragraph = Paragraph::default()
+        .title(title, Alignment::Center)
+        .borders(rounded_borders(theme.base.danger))
+        .foreground(theme.base.danger)
+        .background(surface)
         .wrap(true)
         .text(text.lines().map(|line| TextSpan::from(line.to_string())));
     paragraph.view(frame, area);
