@@ -198,9 +198,12 @@ where
 
 /// Get worktrees root directory for a repo
 pub fn worktrees_root_for_repo(repo_path: &Path) -> PathBuf {
-    let parent = repo_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    parent.join(".opencode-kanban-worktrees")
+    dirs::home_dir()
+        .unwrap_or_else(|| {
+            repo_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        })
+        .join(".opencode-kanban-worktrees")
 }

@@ -3563,7 +3563,7 @@ mod tests {
     #[test]
     fn create_task_error_dialog_state_branch_collision_is_concise() {
         let err = anyhow::anyhow!(
-            "worktree creation failed: failed to create worktree `/home/cc/codes/playgrounds/.opencode-kanban-worktrees/test/c-2` for branch `c` from `main`: git command failed in /home/cc/codes/playgrounds/test: git worktree add -b c /home/cc/codes/playgrounds/.opencode-kanban-worktrees/test/c-2 main\nstdout:\nstderr: Preparing worktree (new branch 'c')\nfatal: a branch named 'c' already exists"
+            "worktree creation failed: failed to create worktree `/home/cc/.opencode-kanban-worktrees/test/c-2` for branch `c` from `main`: git command failed in /home/cc/codes/playgrounds/test: git worktree add -b c /home/cc/.opencode-kanban-worktrees/test/c-2 main\nstdout:\nstderr: Preparing worktree (new branch 'c')\nfatal: a branch named 'c' already exists"
         );
 
         let dialog = create_task_error_dialog_state(&err);
