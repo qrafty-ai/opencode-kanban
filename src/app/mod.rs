@@ -61,6 +61,7 @@ use self::runtime::{
 use self::state::{AttachTaskResult, CreateTaskOutcome, DesiredTaskState, ObservedTaskState};
 
 const REPO_SELECTION_USAGE_PREFIX: &str = "repo-selection:";
+const GG_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum SidePanelRow {
@@ -145,6 +146,7 @@ pub struct App {
     pub category_edit_mode: bool,
     pub project_detail_cache: Option<ProjectDetailCache>,
     last_click: Option<(u16, u16, Instant)>,
+    pending_gg_at: Option<Instant>,
 }
 
 fn load_project_detail(info: &crate::projects::ProjectInfo) -> Option<ProjectDetailCache> {
@@ -261,6 +263,7 @@ impl App {
             category_edit_mode: false,
             project_detail_cache: None,
             last_click: None,
+            pending_gg_at: None,
         };
 
         app.refresh_data()?;
@@ -1275,6 +1278,30 @@ impl App {
             return self.handle_dialog_key(key);
         }
 
+        if let Some(started_at) = self.pending_gg_at
+            && started_at.elapsed() > GG_SEQUENCE_TIMEOUT
+        {
+            self.pending_gg_at = None;
+        }
+
+        if self.current_view == View::Board && !self.log_expanded {
+            if key.modifiers == KeyModifiers::empty() && key.code == KeyCode::Char('g') {
+                if let Some(started_at) = self.pending_gg_at
+                    && started_at.elapsed() <= GG_SEQUENCE_TIMEOUT
+                {
+                    self.pending_gg_at = None;
+                    self.move_selection_to_top();
+                } else {
+                    self.pending_gg_at = Some(Instant::now());
+                }
+                return Ok(());
+            }
+
+            self.pending_gg_at = None;
+        } else {
+            self.pending_gg_at = None;
+        }
+
         if self.log_expanded {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('f') => {
@@ -1517,6 +1544,15 @@ impl App {
                     } else {
                         self.update(Message::SelectUp)?;
                     }
+                }
+                KeyAction::SelectHalfPageDown => {
+                    self.move_selection_half_page_down();
+                }
+                KeyAction::SelectHalfPageUp => {
+                    self.move_selection_half_page_up();
+                }
+                KeyAction::SelectBottom => {
+                    self.move_selection_to_bottom();
                 }
                 KeyAction::NewTask => {
                     self.update(Message::OpenNewTaskDialog)?;
@@ -1951,6 +1987,132 @@ impl App {
 
     fn scroll_expanded_log_up(&mut self, step: usize) {
         self.log_expanded_scroll_offset = self.log_expanded_scroll_offset.saturating_sub(step);
+    }
+
+    fn board_half_page_step(&self) -> usize {
+        let content_lines = usize::from(self.viewport.1.saturating_sub(6));
+        let visible_cards = (content_lines / 5).max(1);
+        (visible_cards / 2).max(1)
+    }
+
+    fn side_panel_half_page_step(&self) -> usize {
+        let content_lines = usize::from(self.viewport.1.saturating_sub(6));
+        (content_lines / 4).max(1)
+    }
+
+    fn detail_half_page_step(&self) -> usize {
+        let content_lines = usize::from(self.viewport.1.saturating_sub(8));
+        (content_lines / 2).max(1)
+    }
+
+    fn move_selection_half_page_down(&mut self) {
+        let step = self.board_half_page_step();
+        if self.view_mode == ViewMode::SidePanel {
+            match self.detail_focus {
+                DetailFocus::List => {
+                    let rows = self.side_panel_rows();
+                    if rows.is_empty() {
+                        self.side_panel_selected_row = 0;
+                        self.current_log_buffer = None;
+                    } else {
+                        let current = self.side_panel_selected_row.min(rows.len() - 1);
+                        let next = (current + self.side_panel_half_page_step()).min(rows.len() - 1);
+                        self.sync_side_panel_selection_at(&rows, next, true);
+                    }
+                }
+                DetailFocus::Details => self.scroll_details_down(self.detail_half_page_step()),
+                DetailFocus::Log => self.scroll_log_down(self.detail_half_page_step()),
+            }
+        } else {
+            let max_index = self.tasks_in_column(self.focused_column).saturating_sub(1);
+            let selected = self
+                .selected_task_per_column
+                .entry(self.focused_column)
+                .or_insert(0);
+            *selected = selected.saturating_add(step).min(max_index);
+        }
+    }
+
+    fn move_selection_half_page_up(&mut self) {
+        let step = self.board_half_page_step();
+        if self.view_mode == ViewMode::SidePanel {
+            match self.detail_focus {
+                DetailFocus::List => {
+                    let rows = self.side_panel_rows();
+                    if rows.is_empty() {
+                        self.side_panel_selected_row = 0;
+                        self.current_log_buffer = None;
+                    } else {
+                        let current = self.side_panel_selected_row.min(rows.len() - 1);
+                        let prev = current.saturating_sub(self.side_panel_half_page_step());
+                        self.sync_side_panel_selection_at(&rows, prev, true);
+                    }
+                }
+                DetailFocus::Details => self.scroll_details_up(self.detail_half_page_step()),
+                DetailFocus::Log => self.scroll_log_up(self.detail_half_page_step()),
+            }
+        } else if let Some(selected) = self.selected_task_per_column.get_mut(&self.focused_column) {
+            *selected = selected.saturating_sub(step);
+        }
+    }
+
+    fn move_selection_to_bottom(&mut self) {
+        if self.view_mode == ViewMode::SidePanel {
+            match self.detail_focus {
+                DetailFocus::List => {
+                    let rows = self.side_panel_rows();
+                    if rows.is_empty() {
+                        self.side_panel_selected_row = 0;
+                        self.current_log_buffer = None;
+                    } else {
+                        self.sync_side_panel_selection_at(&rows, rows.len() - 1, true);
+                    }
+                }
+                DetailFocus::Details => {
+                    self.detail_scroll_offset = usize::MAX;
+                }
+                DetailFocus::Log => {
+                    self.log_scroll_offset = self.log_entry_count().saturating_sub(1);
+                }
+            }
+            return;
+        }
+
+        let max_index = self.tasks_in_column(self.focused_column).saturating_sub(1);
+        let selected = self
+            .selected_task_per_column
+            .entry(self.focused_column)
+            .or_insert(0);
+        *selected = max_index;
+    }
+
+    fn move_selection_to_top(&mut self) {
+        if self.view_mode == ViewMode::SidePanel {
+            match self.detail_focus {
+                DetailFocus::List => {
+                    let rows = self.side_panel_rows();
+                    if rows.is_empty() {
+                        self.side_panel_selected_row = 0;
+                        self.current_log_buffer = None;
+                    } else {
+                        self.sync_side_panel_selection_at(&rows, 0, true);
+                    }
+                }
+                DetailFocus::Details => {
+                    self.detail_scroll_offset = 0;
+                }
+                DetailFocus::Log => {
+                    self.log_scroll_offset = 0;
+                }
+            }
+            return;
+        }
+
+        let selected = self
+            .selected_task_per_column
+            .entry(self.focused_column)
+            .or_insert(0);
+        *selected = 0;
     }
 
     fn toggle_selected_log_entry(&mut self, use_expanded_offset: bool) {
@@ -3312,6 +3474,13 @@ mod tests {
         KeyEvent::new(KeyCode::Char(ch), modifiers)
     }
 
+    fn key_ctrl_char(ch: char) -> KeyEvent {
+        KeyEvent::new(
+            KeyCode::Char(ch.to_ascii_lowercase()),
+            KeyModifiers::CONTROL,
+        )
+    }
+
     fn key_enter() -> KeyEvent {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())
     }
@@ -3474,6 +3643,7 @@ mod tests {
             category_edit_mode: false,
             project_detail_cache: None,
             last_click: None,
+            pending_gg_at: None,
         };
 
         app.refresh_data()?;
@@ -3484,16 +3654,81 @@ mod tests {
     }
 
     #[test]
-    fn toggle_category_edit_mode_with_g_key() -> Result<()> {
+    fn toggle_category_edit_mode_with_ctrl_g_key() -> Result<()> {
         let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
 
         assert!(!app.category_edit_mode);
 
         app.handle_key(key_char('g'))?;
+        assert!(!app.category_edit_mode);
+
+        app.handle_key(key_ctrl_char('g'))?;
         assert!(app.category_edit_mode);
 
-        app.handle_key(key_char('g'))?;
+        app.handle_key(key_ctrl_char('g'))?;
         assert!(!app.category_edit_mode);
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_half_page_navigation_ctrl_d_and_ctrl_u_in_kanban() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, category_ids) = test_app_with_middle_task()?;
+        let repo_id = app.repos[0].id;
+        for idx in 0..7 {
+            app.db.add_task(
+                repo_id,
+                &format!("feature/half-page-{idx}"),
+                &format!("Half Page {idx}"),
+                category_ids[1],
+            )?;
+        }
+        app.refresh_data()?;
+        app.focused_column = 1;
+        app.selected_task_per_column.insert(1, 0);
+
+        let step = app.board_half_page_step();
+        app.handle_key(key_ctrl_char('d'))?;
+        assert_eq!(app.selected_task_per_column.get(&1).copied(), Some(step));
+
+        app.handle_key(key_ctrl_char('u'))?;
+        assert_eq!(app.selected_task_per_column.get(&1).copied(), Some(0));
+
+        Ok(())
+    }
+
+    #[test]
+    fn vim_g_and_gg_jump_to_bottom_and_top() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, category_ids) = test_app_with_middle_task()?;
+        let repo_id = app.repos[0].id;
+        for idx in 0..4 {
+            app.db.add_task(
+                repo_id,
+                &format!("feature/g-jump-{idx}"),
+                &format!("Jump {idx}"),
+                category_ids[1],
+            )?;
+        }
+        app.refresh_data()?;
+        app.focused_column = 1;
+        app.selected_task_per_column.insert(1, 0);
+
+        let max_index = app.tasks_in_column(1).saturating_sub(1);
+
+        app.handle_key(key_char('G'))?;
+        assert_eq!(
+            app.selected_task_per_column.get(&1).copied(),
+            Some(max_index)
+        );
+
+        app.handle_key(key_char('g'))?;
+        assert_eq!(
+            app.selected_task_per_column.get(&1).copied(),
+            Some(max_index)
+        );
+
+        app.handle_key(key_char('g'))?;
+        assert_eq!(app.selected_task_per_column.get(&1).copied(), Some(0));
 
         Ok(())
     }

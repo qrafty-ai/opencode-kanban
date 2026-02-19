@@ -387,14 +387,14 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let notice = if let Some(notice) = &app.footer_notice {
         notice.as_str()
     } else if app.category_edit_mode {
-        "EDIT MODE  h/l:nav  H/L:reorder  p:color  r:rename  x:delete  g:exit"
+        "EDIT MODE  h/l:nav  H/L:reorder  p:color  r:rename  x:delete  Ctrl+g:exit"
     } else {
         match app.view_mode {
             ViewMode::Kanban => {
-                "n:new  a:archive  A:archive view  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x/p:category  H/L move  J/K reorder  v:view"
+                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  n:new  a:archive  A:archive view  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x/p:category  H/L move  J/K reorder  v:view"
             }
             ViewMode::SidePanel => {
-                "j/k:select  Space:collapse  a:archive  A:archive view  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
+                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  Space:collapse  a:archive  A:archive view  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
             }
         }
     };
@@ -789,7 +789,9 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &mut A
     lines.push(TextSpan::new(""));
     lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
     lines.push(
-        TextSpan::new("d delete  Tab focus  j/k select  e/Enter toggle  +/- resize  f expand")
+        TextSpan::new(
+            "d delete  Tab focus  j/k select  Ctrl+u/d half-page  gg/G top/bottom  e/Enter toggle  +/- resize  f expand",
+        )
             .fg(theme.base.text_muted),
     );
 
@@ -965,7 +967,12 @@ fn render_side_panel_category_details(
 
     lines.push(TextSpan::new(""));
     lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
-    lines.push(TextSpan::new("Space toggle  j/k navigate  Enter attach on task").fg(accent));
+    lines.push(
+        TextSpan::new(
+            "Space toggle  j/k navigate  Ctrl+u/d half-page  gg/G top/bottom  Enter attach on task",
+        )
+        .fg(accent),
+    );
 
     let viewport = list_inner_height(area);
     let line_count = lines.len();
@@ -2188,7 +2195,7 @@ fn render_log_expanded_overlay(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let mut paragraph = Paragraph::default()
         .title(
-            "Logs | structured  j/k select  e/Enter toggle  Esc/f close",
+            "Logs | structured  j/k select  Ctrl+u/d half-page  gg/G top/bottom  e/Enter toggle  Esc/f close",
             Alignment::Left,
         )
         .borders(rounded_borders(theme.interactive.focus))

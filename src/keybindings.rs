@@ -33,6 +33,9 @@ pub enum KeyAction {
     NavigateRight,
     SelectDown,
     SelectUp,
+    SelectHalfPageDown,
+    SelectHalfPageUp,
+    SelectBottom,
     NewTask,
     AddCategory,
     CycleCategoryColor,
@@ -238,7 +241,7 @@ const BOARD_DEFS: &[ActionDef] = &[
         id: "toggle_category_edit_mode",
         action: KeyAction::ToggleCategoryEditMode,
         description: "toggle category edit mode",
-        defaults: &["g"],
+        defaults: &["Ctrl+g"],
     },
     ActionDef {
         id: "navigate_left",
@@ -263,6 +266,24 @@ const BOARD_DEFS: &[ActionDef] = &[
         action: KeyAction::SelectUp,
         description: "select previous task",
         defaults: &["k", "Up"],
+    },
+    ActionDef {
+        id: "select_half_page_down",
+        action: KeyAction::SelectHalfPageDown,
+        description: "select down by half page",
+        defaults: &["Ctrl+d"],
+    },
+    ActionDef {
+        id: "select_half_page_up",
+        action: KeyAction::SelectHalfPageUp,
+        description: "select up by half page",
+        defaults: &["Ctrl+u"],
+    },
+    ActionDef {
+        id: "select_bottom",
+        action: KeyAction::SelectBottom,
+        description: "select last item",
+        defaults: &["G"],
     },
     ActionDef {
         id: "new_task",
@@ -394,10 +415,20 @@ impl Keybindings {
             "move_task_right" => self.display_for(KeyContext::Board, KeyAction::MoveTaskRight),
             "move_task_up" => self.display_for(KeyContext::Board, KeyAction::MoveTaskUp),
             "move_task_down" => self.display_for(KeyContext::Board, KeyAction::MoveTaskDown),
+            "toggle_category_edit_mode" => {
+                self.display_for(KeyContext::Board, KeyAction::ToggleCategoryEditMode)
+            }
             "navigate_left" => self.display_for(KeyContext::Board, KeyAction::NavigateLeft),
             "navigate_right" => self.display_for(KeyContext::Board, KeyAction::NavigateRight),
             "select_up" => self.display_for(KeyContext::Board, KeyAction::SelectUp),
             "select_down" => self.display_for(KeyContext::Board, KeyAction::SelectDown),
+            "select_half_page_down" => {
+                self.display_for(KeyContext::Board, KeyAction::SelectHalfPageDown)
+            }
+            "select_half_page_up" => {
+                self.display_for(KeyContext::Board, KeyAction::SelectHalfPageUp)
+            }
+            "select_bottom" => self.display_for(KeyContext::Board, KeyAction::SelectBottom),
             "cycle_todo_visualization" => {
                 self.display_for(KeyContext::Board, KeyAction::CycleTodoVisualization)
             }
@@ -486,6 +517,19 @@ impl Keybindings {
                 self.display_for(KeyContext::Board, KeyAction::SelectUp)
                     .unwrap_or_else(|| "-".to_string())
             ),
+            format!(
+                "  {} / {}: select down/up by half page",
+                self.display_for(KeyContext::Board, KeyAction::SelectHalfPageDown)
+                    .unwrap_or_else(|| "-".to_string()),
+                self.display_for(KeyContext::Board, KeyAction::SelectHalfPageUp)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {}: select last item",
+                self.display_for(KeyContext::Board, KeyAction::SelectBottom)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            "  gg: select first item".to_string(),
             format!(
                 "  {}: attach selected task",
                 self.display_for(KeyContext::Board, KeyAction::AttachTask)
@@ -859,5 +903,42 @@ mod tests {
             KeyEvent::new(KeyCode::Char('t'), KeyModifiers::empty()),
         );
         assert_eq!(action, Some(KeyAction::CycleTodoVisualization));
+    }
+
+    #[test]
+    fn defaults_include_toggle_category_edit_mode_ctrl_g() {
+        let keys = Keybindings::load();
+        let action = keys.action_for_key(
+            KeyContext::Board,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, Some(KeyAction::ToggleCategoryEditMode));
+    }
+
+    #[test]
+    fn defaults_include_half_page_navigation() {
+        let keys = Keybindings::load();
+
+        let down = keys.action_for_key(
+            KeyContext::Board,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(down, Some(KeyAction::SelectHalfPageDown));
+
+        let up = keys.action_for_key(
+            KeyContext::Board,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(up, Some(KeyAction::SelectHalfPageUp));
+    }
+
+    #[test]
+    fn defaults_include_select_bottom() {
+        let keys = Keybindings::load();
+        let action = keys.action_for_key(
+            KeyContext::Board,
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(action, Some(KeyAction::SelectBottom));
     }
 }
