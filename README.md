@@ -1,5 +1,10 @@
 # opencode-kanban
 
+<p align="center">
+  <img src="assets/kanban.jpg" alt="opencode-kanban board view" width="49%" />
+  <img src="assets/detail.jpg" alt="opencode-kanban detail view" width="49%" />
+</p>
+
 A Rust terminal kanban board for managing Git worktrees and OpenCode tmux sessions.
 
 ## Why this exists
