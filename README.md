@@ -16,7 +16,6 @@ A Rust terminal kanban board for managing Git worktrees and OpenCode tmux sessio
 - Linux or macOS
 - `tmux` installed and available on `PATH` (required)
 - `opencode` installed and available on `PATH` (recommended for attach/resume workflows)
-- `sqlite3` available on `PATH` (recommended for OpenCode session lookup)
 
 ## Quickstart (2 minutes)
 
@@ -32,7 +31,6 @@ A Rust terminal kanban board for managing Git worktrees and OpenCode tmux sessio
    opencode-kanban --version
    tmux -V
    opencode --version
-   sqlite3 --version
    ```
 
 3. Start the app:
@@ -146,8 +144,6 @@ The app creates config/data files on demand.
   - Install tmux and confirm `tmux -V` works in the same shell.
 - `OpenCode binary not found`:
   - Install OpenCode and confirm `opencode --version` works.
-- OpenCode session lookup issues:
-  - Install `sqlite3` and confirm `sqlite3 --version` works.
 - Mouse scroll/click not working well in tmux:
   - Run `tmux set -g mouse on`.
 
