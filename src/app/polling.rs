@@ -83,8 +83,13 @@ pub fn spawn_status_poller(
                     .ok()
                     .map(|cache| cache.clone())
                     .unwrap_or_default();
-            let mut next_title_cache: HashMap<String, String> = HashMap::new();
+            let mut next_title_cache: HashMap<String, String> = session_title_cache
+                .lock()
+                .ok()
+                .map(|cache| cache.clone())
+                .unwrap_or_default();
             if let Some(records) = session_records.as_ref() {
+                next_title_cache.clear();
                 for record in records {
                     if let Some(title) = record.title.as_ref() {
                         next_title_cache.insert(record.session_id.clone(), title.clone());
@@ -408,11 +413,11 @@ fn select_status_match(
     status_matches: Vec<SessionStatusMatch>,
     complete_parent_map: Option<&HashMap<String, Option<String>>>,
 ) -> Option<SessionStatusMatch> {
+    let first = status_matches.first()?;
     let status_map: HashMap<String, &SessionStatusMatch> = status_matches
         .iter()
         .map(|m| (m.session_id.clone(), m))
         .collect();
-    let first = status_matches.first()?;
 
     let mut parent_map: HashMap<String, Option<String>> = status_matches
         .iter()
@@ -422,12 +427,14 @@ fn select_status_match(
     if let Some(complete_parent_map) = complete_parent_map {
         for (session_id, parent_session_id) in complete_parent_map {
             match parent_map.get_mut(session_id) {
-                Some(existing_parent)
-                    if existing_parent.is_none() && parent_session_id.is_some() =>
-                {
-                    *existing_parent = parent_session_id.clone();
+                Some(existing_parent) => {
+                    if existing_parent.is_none()
+                        || (parent_session_id.is_some()
+                            && existing_parent.as_ref() != parent_session_id.as_ref())
+                    {
+                        *existing_parent = parent_session_id.clone();
+                    }
                 }
-                Some(_) => {}
                 None => {
                     parent_map.insert(session_id.clone(), parent_session_id.clone());
                 }
@@ -435,7 +442,17 @@ fn select_status_match(
         }
     }
 
-    let eldest_id = find_eldest_ancestor_id(first, &parent_map);
+    let mut selected_match = first;
+    let mut selected_eldest = find_eldest_ancestor(first, &parent_map);
+    for status_match in status_matches.iter().skip(1) {
+        let candidate_eldest = find_eldest_ancestor(status_match, &parent_map);
+        if candidate_eldest.1 > selected_eldest.1 {
+            selected_match = status_match;
+            selected_eldest = candidate_eldest;
+        }
+    }
+
+    let eldest_id = selected_eldest.0;
     if let Some(eldest) = status_map.get(eldest_id.as_str()) {
         return Some((*eldest).clone());
     }
@@ -443,30 +460,32 @@ fn select_status_match(
     Some(SessionStatusMatch {
         session_id: eldest_id,
         parent_session_id: None,
-        status: first.status.clone(),
+        status: selected_match.status.clone(),
     })
 }
 
-fn find_eldest_ancestor_id<'a>(
+fn find_eldest_ancestor<'a>(
     session: &'a SessionStatusMatch,
     parent_map: &'a HashMap<String, Option<String>>,
-) -> String {
+) -> (String, usize) {
     let mut current = session.session_id.clone();
     let mut visited = HashSet::from([current.clone()]);
+    let mut depth = 0;
 
     loop {
         let Some(parent_id) = parent_map
             .get(current.as_str())
             .and_then(|parent| parent.as_ref())
         else {
-            return current;
+            return (current, depth);
         };
 
         if !visited.insert(parent_id.clone()) {
-            return current;
+            return (current, depth);
         }
 
         current = parent_id.clone();
+        depth += 1;
     }
 }
 
@@ -566,6 +585,39 @@ mod tests {
                 status_match("subagent-1", Some("middle-1")),
                 status_match("middle-1", None),
             ],
+            Some(&parent_map),
+        )
+        .expect("expected a selected match");
+
+        assert_eq!(selected.session_id, "root-1");
+        assert!(selected.parent_session_id.is_none());
+    }
+
+    #[test]
+    fn select_status_match_prefers_longest_ancestor_chain() {
+        let selected = select_status_match(
+            vec![
+                status_match("orphan-1", None),
+                status_match("subagent-1", Some("middle-1")),
+                status_match("middle-1", Some("root-1")),
+            ],
+            None,
+        )
+        .expect("expected a selected match");
+
+        assert_eq!(selected.session_id, "root-1");
+        assert!(selected.parent_session_id.is_none());
+    }
+
+    #[test]
+    fn select_status_match_complete_map_overrides_incorrect_parent_links() {
+        let mut parent_map = HashMap::new();
+        parent_map.insert("subagent-1".to_string(), Some("middle-1".to_string()));
+        parent_map.insert("middle-1".to_string(), Some("root-1".to_string()));
+        parent_map.insert("root-1".to_string(), None);
+
+        let selected = select_status_match(
+            vec![status_match("subagent-1", Some("stale-parent"))],
             Some(&parent_map),
         )
         .expect("expected a selected match");

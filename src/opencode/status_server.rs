@@ -317,6 +317,7 @@ fn parse_parent_session_id(value: &Value) -> Option<String> {
         "parentSessionId",
         "parent_session_id",
         "parentSessionID",
+        "parentID",
         "parentId",
         "parent_id",
     ];
@@ -911,7 +912,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_status_matches_parses_parent_session_id() {
         let port = spawn_single_response_server(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"root\":{\"state\":\"running\"},\"sub\":{\"state\":\"idle\",\"parentSessionId\":\"root\"}}".to_string(),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"root\":{\"state\":\"running\"},\"sub\":{\"state\":\"idle\",\"parentID\":\"root\"}}".to_string(),
         )
         .await;
         let provider = ServerStatusProvider::new(ServerStatusConfig {
@@ -941,7 +942,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn list_all_session_records_parses_parent_session_id() {
         let port = spawn_single_response_server(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[{\"id\":\"root\",\"directory\":\"/repo\"},{\"id\":\"sub\",\"directory\":\"/repo\",\"parentSessionId\":\"root\"}]".to_string(),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[{\"id\":\"root\",\"directory\":\"/repo\",\"title\":\"Root Session\"},{\"id\":\"sub\",\"directory\":\"/repo\",\"parentID\":\"root\",\"title\":\"Sub Session\"}]".to_string(),
         )
         .await;
         let provider = ServerStatusProvider::new(ServerStatusConfig {
@@ -960,12 +961,14 @@ mod tests {
             .find(|record| record.session_id == "root")
             .expect("root record should exist");
         assert!(root.parent_session_id.is_none());
+        assert_eq!(root.title.as_deref(), Some("Root Session"));
 
         let sub = records
             .iter()
             .find(|record| record.session_id == "sub")
             .expect("sub record should exist");
         assert_eq!(sub.parent_session_id.as_deref(), Some("root"));
+        assert_eq!(sub.title.as_deref(), Some("Sub Session"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
