@@ -145,9 +145,7 @@ impl Settings {
             .clamp(MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH);
 
         self.theme = match ThemePreset::from_str(&self.theme) {
-            Ok(ThemePreset::Default) => "default".to_string(),
-            Ok(ThemePreset::HighContrast) => "high-contrast".to_string(),
-            Ok(ThemePreset::Mono) => "mono".to_string(),
+            Ok(preset) => preset.as_str().to_string(),
             Err(()) => {
                 warn!(
                     "invalid theme '{}' in settings config; falling back to default",
@@ -316,6 +314,18 @@ mod tests {
         settings.validate();
 
         assert_eq!(settings.theme, "default");
+    }
+
+    #[test]
+    fn test_validate_light_theme_alias() {
+        let mut settings = Settings {
+            theme: "day".to_string(),
+            ..Settings::default()
+        };
+
+        settings.validate();
+
+        assert_eq!(settings.theme, "light");
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub use self::state::{
     RepoPickerDialogState, RepoSuggestionItem, RepoSuggestionKind, RepoUnavailableDialogState,
     SettingsSection, SettingsViewState, TodoVisualizationMode, View, ViewMode,
     WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
+    normalize_category_color_key,
 };
 
 use crate::command_palette::{CommandPaletteState, all_commands};
@@ -725,14 +726,11 @@ impl App {
                         SettingsSection::General => {
                             match state.general_selected_field {
                                 0 => {
-                                    self.settings.theme = match self.settings.theme.as_str() {
-                                        "default" => "high-contrast".to_string(),
-                                        "high-contrast" => "mono".to_string(),
-                                        _ => "default".to_string(),
-                                    };
-                                    let theme_preset = ThemePreset::from_str(&self.settings.theme)
-                                        .unwrap_or(ThemePreset::Default);
-                                    self.theme = Theme::from_preset(theme_preset);
+                                    let current = ThemePreset::from_str(&self.settings.theme)
+                                        .unwrap_or_default();
+                                    let next = current.next();
+                                    self.settings.theme = next.as_str().to_string();
+                                    self.theme = Theme::from_preset(next);
                                 }
                                 1 => {
                                     let next = self.settings.poll_interval_ms.saturating_add(500);
@@ -800,14 +798,11 @@ impl App {
                 {
                     match state.general_selected_field {
                         0 => {
-                            self.settings.theme = match self.settings.theme.as_str() {
-                                "high-contrast" => "default".to_string(),
-                                "mono" => "high-contrast".to_string(),
-                                _ => "mono".to_string(),
-                            };
-                            let theme_preset = ThemePreset::from_str(&self.settings.theme)
-                                .unwrap_or(ThemePreset::Default);
-                            self.theme = Theme::from_preset(theme_preset);
+                            let current =
+                                ThemePreset::from_str(&self.settings.theme).unwrap_or_default();
+                            let previous = current.previous();
+                            self.settings.theme = previous.as_str().to_string();
+                            self.theme = Theme::from_preset(previous);
                         }
                         1 => {
                             let prev = self.settings.poll_interval_ms.saturating_sub(500);
@@ -830,7 +825,7 @@ impl App {
                 {
                     match state.general_selected_field {
                         0 => {
-                            self.settings.theme = "default".to_string();
+                            self.settings.theme = ThemePreset::Default.as_str().to_string();
                             self.theme = Theme::from_preset(ThemePreset::Default);
                         }
                         1 => {
@@ -2809,13 +2804,10 @@ fn default_view_mode(settings: &crate::settings::Settings) -> ViewMode {
 }
 
 fn palette_index_for(current: Option<&str>) -> usize {
+    let normalized_current = normalize_category_color_key(current);
     CATEGORY_COLOR_PALETTE
         .iter()
-        .position(|candidate| match (candidate, current) {
-            (None, None) => true,
-            (Some(expected), Some(actual)) => expected.eq_ignore_ascii_case(actual),
-            _ => false,
-        })
+        .position(|candidate| *candidate == normalized_current)
         .unwrap_or(0)
 }
 
@@ -3882,7 +3874,7 @@ mod tests {
             .iter()
             .find(|category| category.id == in_progress_id)
             .and_then(|category| category.color.as_deref());
-        assert_eq!(confirmed_color, Some("cyan"));
+        assert_eq!(confirmed_color, Some("primary"));
 
         app.handle_key(key_char('p'))?;
         match &mut app.active_dialog {
@@ -3900,7 +3892,7 @@ mod tests {
             .iter()
             .find(|category| category.id == in_progress_id)
             .and_then(|category| category.color.as_deref());
-        assert_eq!(canceled_color, Some("cyan"));
+        assert_eq!(canceled_color, Some("primary"));
 
         Ok(())
     }
@@ -3924,7 +3916,7 @@ mod tests {
             .iter()
             .find(|category| category.id == in_progress_id)
             .and_then(|category| category.color.as_deref());
-        assert_eq!(toggled_color, Some("cyan"));
+        assert_eq!(toggled_color, Some("primary"));
 
         Ok(())
     }

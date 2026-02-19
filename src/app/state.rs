@@ -169,24 +169,42 @@ pub enum CategoryInputMode {
 
 pub const CATEGORY_COLOR_PALETTE: [Option<&str>; 7] = [
     None,
-    Some("cyan"),
-    Some("magenta"),
-    Some("blue"),
-    Some("green"),
-    Some("yellow"),
-    Some("red"),
+    Some("primary"),
+    Some("secondary"),
+    Some("tertiary"),
+    Some("success"),
+    Some("warning"),
+    Some("danger"),
 ];
 
+pub fn normalize_category_color_key(color: Option<&str>) -> Option<&'static str> {
+    let value = color?.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    match value.to_ascii_lowercase().as_str() {
+        "primary" | "cyan" => Some("primary"),
+        "secondary" | "magenta" => Some("secondary"),
+        "tertiary" | "blue" => Some("tertiary"),
+        "success" | "green" => Some("success"),
+        "warning" | "yellow" => Some("warning"),
+        "danger" | "red" => Some("danger"),
+        _ => None,
+    }
+}
+
 pub fn category_color_label(color: Option<&str>) -> &'static str {
-    match color {
-        None => "Default",
-        Some("cyan") => "Cyan",
-        Some("magenta") => "Magenta",
-        Some("blue") => "Blue",
-        Some("green") => "Green",
-        Some("yellow") => "Yellow",
-        Some("red") => "Red",
-        Some(_) => "Custom",
+    match (color, normalize_category_color_key(color)) {
+        (None, _) => "Default",
+        (Some(_), Some("primary")) => "Primary",
+        (Some(_), Some("secondary")) => "Secondary",
+        (Some(_), Some("tertiary")) => "Tertiary",
+        (Some(_), Some("success")) => "Success",
+        (Some(_), Some("warning")) => "Warning",
+        (Some(_), Some("danger")) => "Danger",
+        (Some(_), Some(_)) => "Custom",
+        (Some(_), None) => "Custom",
     }
 }
 

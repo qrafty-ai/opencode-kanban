@@ -88,6 +88,7 @@ cargo build --release
 
   ```bash
   opencode-kanban --theme default
+  opencode-kanban --theme light
   opencode-kanban --theme high-contrast
   opencode-kanban --theme mono
   ```

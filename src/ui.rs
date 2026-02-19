@@ -27,7 +27,7 @@ use crate::app::{
     SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode, category_color_label,
 };
 use crate::command_palette::all_commands;
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemePreset};
 use crate::types::{Category, SessionTodoItem, Task};
 
 #[derive(Clone, Copy)]
@@ -3395,20 +3395,21 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 TextSpan::new("Color palette used throughout the app.").fg(theme.base.text),
                 TextSpan::new(""),
             ];
-            for (preset, desc) in [
-                ("default", "Balanced colors for everyday use"),
-                ("high-contrast", "Enhanced visibility, bright on dark"),
-                ("mono", "Minimal monochrome aesthetic"),
-            ] {
-                let marker = if current == preset { "●" } else { "○" };
+            for preset in ThemePreset::ALL {
+                let preset_name = preset.as_str();
+                let marker = if current == preset_name { "●" } else { "○" };
                 lines.push(
-                    TextSpan::new(format!("  {} {:<16}  {}", marker, preset, desc)).fg(
-                        if current == preset {
-                            theme.interactive.focus
-                        } else {
-                            theme.base.text_muted
-                        },
-                    ),
+                    TextSpan::new(format!(
+                        "  {} {:<16}  {}",
+                        marker,
+                        preset_name,
+                        preset.description()
+                    ))
+                    .fg(if current == preset_name {
+                        theme.interactive.focus
+                    } else {
+                        theme.base.text_muted
+                    }),
                 );
             }
             lines.push(TextSpan::new(""));

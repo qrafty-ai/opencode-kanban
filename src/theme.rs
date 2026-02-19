@@ -6,8 +6,49 @@ use tuirealm::ratatui::style::Color;
 pub enum ThemePreset {
     #[default]
     Default,
+    Light,
     HighContrast,
     Mono,
+}
+
+impl ThemePreset {
+    pub const ALL: [Self; 4] = [Self::Default, Self::Light, Self::HighContrast, Self::Mono];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Light => "light",
+            Self::HighContrast => "high-contrast",
+            Self::Mono => "mono",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Default => "Balanced colors for everyday use",
+            Self::Light => "Bright background with dark text",
+            Self::HighContrast => "Enhanced visibility, bright on dark",
+            Self::Mono => "Minimal monochrome aesthetic",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Default => Self::Light,
+            Self::Light => Self::HighContrast,
+            Self::HighContrast => Self::Mono,
+            Self::Mono => Self::Default,
+        }
+    }
+
+    pub const fn previous(self) -> Self {
+        match self {
+            Self::Default => Self::Mono,
+            Self::Light => Self::Default,
+            Self::HighContrast => Self::Light,
+            Self::Mono => Self::HighContrast,
+        }
+    }
 }
 
 impl FromStr for ThemePreset {
@@ -16,6 +57,7 @@ impl FromStr for ThemePreset {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "default" => Ok(Self::Default),
+            "light" | "day" => Ok(Self::Light),
             "high-contrast" | "high_contrast" | "contrast" => Ok(Self::HighContrast),
             "mono" | "monochrome" => Ok(Self::Mono),
             _ => Err(()),
@@ -29,6 +71,7 @@ pub struct Theme {
     pub interactive: InteractivePalette,
     pub status: StatusPalette,
     pub tile: TilePalette,
+    pub category: CategoryAccentPalette,
     pub dialog: DialogPalette,
 }
 
@@ -77,6 +120,16 @@ pub struct DialogPalette {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct CategoryAccentPalette {
+    pub primary: Color,
+    pub secondary: Color,
+    pub tertiary: Color,
+    pub success: Color,
+    pub warning: Color,
+    pub danger: Color,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct TileStateColors {
     pub background: Color,
     pub border: Color,
@@ -114,11 +167,63 @@ impl Theme {
                     branch: Color::LightYellow,
                     todo: Color::DarkGray,
                 },
+                category: CategoryAccentPalette {
+                    primary: Color::Cyan,
+                    secondary: Color::Magenta,
+                    tertiary: Color::Blue,
+                    success: Color::Green,
+                    warning: Color::Yellow,
+                    danger: Color::Red,
+                },
                 dialog: DialogPalette {
                     surface: Color::Rgb(36, 40, 56),
                     input_bg: Color::Rgb(36, 40, 56),
                     button_bg: Color::Black,
                     button_fg: Color::Black,
+                },
+            },
+            ThemePreset::Light => Self {
+                base: BasePalette {
+                    canvas: Color::Rgb(246, 248, 252),
+                    surface: Color::Rgb(255, 255, 255),
+                    text: Color::Rgb(32, 38, 51),
+                    text_muted: Color::Rgb(95, 105, 122),
+                    header: Color::Rgb(37, 99, 235),
+                    accent: Color::Rgb(2, 132, 199),
+                    danger: Color::Rgb(185, 28, 28),
+                },
+                interactive: InteractivePalette {
+                    focus: Color::Rgb(37, 99, 235),
+                    selected_bg: Color::Rgb(227, 237, 255),
+                    selected_border: Color::Rgb(59, 130, 246),
+                    border: Color::Rgb(196, 208, 224),
+                },
+                status: StatusPalette {
+                    running: Color::Rgb(22, 163, 74),
+                    waiting: Color::Rgb(202, 138, 4),
+                    idle: Color::Rgb(71, 85, 105),
+                    dead: Color::Rgb(185, 28, 28),
+                    broken: Color::Rgb(185, 28, 28),
+                    unavailable: Color::Rgb(185, 28, 28),
+                },
+                tile: TilePalette {
+                    repo: Color::Rgb(14, 116, 144),
+                    branch: Color::Rgb(161, 98, 7),
+                    todo: Color::Rgb(95, 105, 122),
+                },
+                category: CategoryAccentPalette {
+                    primary: Color::Rgb(37, 99, 235),
+                    secondary: Color::Rgb(194, 65, 12),
+                    tertiary: Color::Rgb(124, 58, 237),
+                    success: Color::Rgb(22, 163, 74),
+                    warning: Color::Rgb(202, 138, 4),
+                    danger: Color::Rgb(185, 28, 28),
+                },
+                dialog: DialogPalette {
+                    surface: Color::Rgb(255, 255, 255),
+                    input_bg: Color::Rgb(241, 245, 249),
+                    button_bg: Color::Rgb(226, 232, 240),
+                    button_fg: Color::White,
                 },
             },
             ThemePreset::HighContrast => Self {
@@ -149,6 +254,14 @@ impl Theme {
                     repo: Color::LightCyan,
                     branch: Color::LightYellow,
                     todo: Color::Gray,
+                },
+                category: CategoryAccentPalette {
+                    primary: Color::LightCyan,
+                    secondary: Color::LightMagenta,
+                    tertiary: Color::LightBlue,
+                    success: Color::LightGreen,
+                    warning: Color::LightYellow,
+                    danger: Color::LightRed,
                 },
                 dialog: DialogPalette {
                     surface: Color::Rgb(20, 20, 20),
@@ -186,6 +299,14 @@ impl Theme {
                     branch: Color::Gray,
                     todo: Color::Gray,
                 },
+                category: CategoryAccentPalette {
+                    primary: Color::White,
+                    secondary: Color::Gray,
+                    tertiary: Color::White,
+                    success: Color::White,
+                    warning: Color::Gray,
+                    danger: Color::White,
+                },
                 dialog: DialogPalette {
                     surface: Color::Rgb(26, 26, 26),
                     input_bg: Color::Rgb(26, 26, 26),
@@ -197,9 +318,19 @@ impl Theme {
     }
 
     pub fn category_accent(&self, category_color: Option<&str>) -> Color {
-        category_color
-            .and_then(parse_color)
-            .unwrap_or(self.base.accent)
+        let Some(key) = category_color.map(str::trim) else {
+            return self.base.accent;
+        };
+
+        match key.to_ascii_lowercase().as_str() {
+            "primary" | "cyan" => self.category.primary,
+            "secondary" | "magenta" => self.category.secondary,
+            "tertiary" | "blue" => self.category.tertiary,
+            "success" | "green" => self.category.success,
+            "warning" | "yellow" => self.category.warning,
+            "danger" | "red" => self.category.danger,
+            _ => self.base.accent,
+        }
     }
 
     pub fn status_color(&self, status: &str) -> Color {
@@ -239,86 +370,9 @@ impl Default for Theme {
     }
 }
 
-pub fn parse_color(s: &str) -> Option<Color> {
-    let s = s.trim();
-
-    if s.starts_with('#') && s.len() == 7 {
-        let hex = &s[1..];
-        if let (Ok(r), Ok(g), Ok(b)) = (
-            u8::from_str_radix(&hex[0..2], 16),
-            u8::from_str_radix(&hex[2..4], 16),
-            u8::from_str_radix(&hex[4..6], 16),
-        ) {
-            return Some(Color::Rgb(r, g, b));
-        }
-        return None;
-    }
-
-    match s.to_lowercase().as_str() {
-        "black" => Some(Color::Black),
-        "red" => Some(Color::Red),
-        "green" => Some(Color::Green),
-        "yellow" => Some(Color::Yellow),
-        "blue" => Some(Color::Blue),
-        "magenta" => Some(Color::Magenta),
-        "cyan" => Some(Color::Cyan),
-        "white" => Some(Color::White),
-        "gray" | "grey" => Some(Color::Gray),
-        "darkgray" | "darkgrey" => Some(Color::DarkGray),
-        "lightred" => Some(Color::LightRed),
-        "lightgreen" => Some(Color::LightGreen),
-        "lightyellow" => Some(Color::LightYellow),
-        "lightblue" => Some(Color::LightBlue),
-        "lightmagenta" => Some(Color::LightMagenta),
-        "lightcyan" => Some(Color::LightCyan),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_color_named_cyan() {
-        assert_eq!(parse_color("cyan"), Some(Color::Cyan));
-    }
-
-    #[test]
-    fn test_parse_color_named_magenta() {
-        assert_eq!(parse_color("magenta"), Some(Color::Magenta));
-    }
-
-    #[test]
-    fn test_parse_color_hex_red() {
-        assert_eq!(parse_color("#FF0000"), Some(Color::Rgb(255, 0, 0)));
-    }
-
-    #[test]
-    fn test_parse_color_hex_green() {
-        assert_eq!(parse_color("#00FF00"), Some(Color::Rgb(0, 255, 0)));
-    }
-
-    #[test]
-    fn test_parse_color_hex_blue() {
-        assert_eq!(parse_color("#0000FF"), Some(Color::Rgb(0, 0, 255)));
-    }
-
-    #[test]
-    fn test_parse_color_invalid() {
-        assert_eq!(parse_color("invalid"), None);
-    }
-
-    #[test]
-    fn test_parse_color_invalid_hex() {
-        assert_eq!(parse_color("#GGG"), None);
-    }
-
-    #[test]
-    fn test_parse_color_case_insensitive() {
-        assert_eq!(parse_color("CYAN"), Some(Color::Cyan));
-        assert_eq!(parse_color("Cyan"), Some(Color::Cyan));
-    }
 
     #[test]
     fn test_theme_default_preset() {
@@ -331,13 +385,49 @@ mod tests {
     }
 
     #[test]
+    fn test_theme_light_preset() {
+        let theme = Theme::from_preset(ThemePreset::Light);
+        assert_eq!(theme.base.canvas, Color::Rgb(246, 248, 252));
+        assert_eq!(theme.base.text, Color::Rgb(32, 38, 51));
+        assert_eq!(theme.interactive.focus, Color::Rgb(37, 99, 235));
+        assert_eq!(theme.dialog.button_fg, Color::White);
+    }
+
+    #[test]
+    fn test_category_accent_supports_legacy_and_semantic_keys() {
+        let theme = Theme::from_preset(ThemePreset::Light);
+        assert_eq!(
+            theme.category_accent(Some("primary")),
+            theme.category.primary
+        );
+        assert_eq!(theme.category_accent(Some("cyan")), theme.category.primary);
+        assert_eq!(
+            theme.category_accent(Some("warning")),
+            theme.category.warning
+        );
+        assert_eq!(
+            theme.category_accent(Some("yellow")),
+            theme.category.warning
+        );
+    }
+
+    #[test]
     fn test_theme_preset_parse() {
         assert_eq!(ThemePreset::from_str("default"), Ok(ThemePreset::Default));
+        assert_eq!(ThemePreset::from_str("light"), Ok(ThemePreset::Light));
         assert_eq!(
             ThemePreset::from_str("high-contrast"),
             Ok(ThemePreset::HighContrast)
         );
         assert_eq!(ThemePreset::from_str("mono"), Ok(ThemePreset::Mono));
         assert!(ThemePreset::from_str("unknown").is_err());
+    }
+
+    #[test]
+    fn test_theme_preset_cycle() {
+        assert_eq!(ThemePreset::Default.next(), ThemePreset::Light);
+        assert_eq!(ThemePreset::Light.next(), ThemePreset::HighContrast);
+        assert_eq!(ThemePreset::Default.previous(), ThemePreset::Mono);
+        assert_eq!(ThemePreset::Light.previous(), ThemePreset::Default);
     }
 }
