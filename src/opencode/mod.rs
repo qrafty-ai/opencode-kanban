@@ -5,6 +5,10 @@ use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
+use reqwest::StatusCode;
+use reqwest::blocking::Client;
+use serde::Deserialize;
+use urlencoding::encode;
 
 use crate::tmux::tmux_get_pane_pid;
 use crate::types::SessionStatus;
@@ -203,60 +207,72 @@ pub fn opencode_attach_command(session_id: Option<&str>, worktree_dir: Option<&s
 }
 
 pub fn opencode_query_session_by_dir(working_dir: &Path) -> Result<Option<String>> {
-    let db_path = dirs::data_dir()
-        .context("failed to determine home directory for opencode database")?
-        .join("opencode")
-        .join("opencode.db");
-
-    tracing::debug!("Checking for opencode DB at: {}", db_path.display());
-
-    if !db_path.exists() {
-        tracing::debug!("OpenCode DB not found, returning None");
-        return Ok(None);
+    #[derive(Debug, Deserialize)]
+    struct SessionListEntry {
+        #[serde(default)]
+        id: String,
     }
 
+    let config = status_server::ServerStatusConfig::default();
     let dir_str = working_dir.to_string_lossy();
-    let query = format!(
-        "SELECT id FROM session WHERE directory = '{}' ORDER BY time_created DESC LIMIT 1",
-        dir_str.replace('\'', "''")
+    let session_url = format!(
+        "http://{}:{}/session?directory={}",
+        config.hostname,
+        config.port,
+        encode(&dir_str)
     );
 
-    tracing::debug!("Querying opencode DB: {}", query);
+    tracing::debug!("Querying OpenCode session API: {session_url}");
 
-    let output = Command::new("sqlite3")
-        .args(["-batch", "-readonly", db_path.to_str().unwrap_or_default()])
-        .arg(&query)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to query opencode database for directory {}",
-                dir_str
-            )
-        })?;
+    let client = Client::builder()
+        .timeout(config.request_timeout)
+        .build()
+        .context("failed to build OpenCode session lookup client")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!("SQLite query failed: {}", stderr.trim());
-        bail!("sqlite3 query failed: {}", stderr.trim());
+    let response = client
+        .get(&session_url)
+        .send()
+        .with_context(|| format!("failed to query OpenCode sessions for directory {dir_str}"))?;
+
+    let status = response.status();
+    if status == StatusCode::UNAUTHORIZED {
+        bail!("OpenCode server rejected session lookup with HTTP 401");
+    }
+    if status != StatusCode::OK {
+        bail!("OpenCode server returned HTTP {status} for /session");
     }
 
-    let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let body = response
+        .text()
+        .context("failed to read OpenCode /session response body")?;
+    let sessions: Vec<SessionListEntry> =
+        serde_json::from_str(&body).context("failed to parse OpenCode /session response JSON")?;
 
-    if result.is_empty() {
-        tracing::debug!("No session found for directory: {}", dir_str);
-        return Ok(None);
+    let session_id = sessions
+        .into_iter()
+        .find_map(|entry| match entry.id.trim() {
+            "" => None,
+            id => Some(id.to_string()),
+        });
+
+    if let Some(found) = &session_id {
+        tracing::debug!("Found session ID for directory {dir_str}: {found}");
+    } else {
+        tracing::debug!("No OpenCode session found for directory: {dir_str}");
     }
 
-    tracing::debug!("Found session ID for directory {}: {}", dir_str, result);
-    Ok(Some(result))
+    Ok(session_id)
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
     use std::sync::{LazyLock, Mutex, MutexGuard};
+    use std::thread;
     use std::time::SystemTime;
 
     use anyhow::Result;
@@ -593,5 +609,107 @@ mod tests {
                     error: None,
                 })
         }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<str>) -> Self {
+            let previous = env::var(key).ok();
+            unsafe {
+                env::set_var(key, value.as_ref());
+            }
+
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                unsafe {
+                    env::set_var(self.key, previous);
+                }
+            } else {
+                unsafe {
+                    env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn spawn_session_lookup_server(
+        response_body: &str,
+    ) -> Result<(u16, thread::JoinHandle<String>)> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let body = response_body.to_string();
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("mock session lookup server should accept request");
+
+            let mut request = [0u8; 2048];
+            let bytes_read = stream
+                .read(&mut request)
+                .expect("mock session lookup server should read request");
+            let request_text = String::from_utf8_lossy(&request[..bytes_read]).to_string();
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("mock session lookup server should write response");
+
+            request_text
+        });
+
+        Ok((port, handle))
+    }
+
+    #[test]
+    fn test_query_session_by_dir_uses_api_with_directory_filter() -> Result<()> {
+        let _guard = TEST_ENV_LOCK.lock().expect("test env mutex should lock");
+        let working_dir = tempfile::tempdir()?;
+        let (port, handle) =
+            spawn_session_lookup_server(r#"[{"id":"sid-latest","directory":"/tmp/project"}]"#)?;
+        let _port_guard = EnvVarGuard::set("OPENCODE_KANBAN_STATUS_PORT", port.to_string());
+
+        let found = opencode_query_session_by_dir(working_dir.path())?;
+        assert_eq!(found.as_deref(), Some("sid-latest"));
+
+        let request_text = handle
+            .join()
+            .expect("mock session lookup server thread should join");
+        let encoded_directory = encode(&working_dir.path().to_string_lossy()).to_string();
+        assert!(
+            request_text.starts_with(&format!("GET /session?directory={encoded_directory}")),
+            "request did not include expected encoded directory filter: {request_text}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_session_by_dir_returns_none_when_no_sessions() -> Result<()> {
+        let _guard = TEST_ENV_LOCK.lock().expect("test env mutex should lock");
+        let working_dir = tempfile::tempdir()?;
+        let (port, handle) = spawn_session_lookup_server("[]")?;
+        let _port_guard = EnvVarGuard::set("OPENCODE_KANBAN_STATUS_PORT", port.to_string());
+
+        let found = opencode_query_session_by_dir(working_dir.path())?;
+        assert_eq!(found, None);
+
+        let _ = handle
+            .join()
+            .expect("mock session lookup server thread should join");
+        Ok(())
     }
 }
