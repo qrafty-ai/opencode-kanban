@@ -9,6 +9,16 @@ pub struct Branch {
     pub is_remote: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitChangeSummary {
+    pub base_ref: String,
+    pub commits_ahead: usize,
+    pub files_changed: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+    pub top_files: Vec<String>,
+}
+
 pub fn git_detect_default_branch(repo_path: &Path) -> String {
     if let Ok(output) = run_git_output(repo_path, ["symbolic-ref", "refs/remotes/origin/HEAD"]) {
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -200,6 +210,128 @@ pub fn git_get_remote_url(repo_path: &Path) -> Option<String> {
     let output = run_git_output(repo_path, ["remote", "get-url", "origin"]).ok()?;
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if value.is_empty() { None } else { Some(value) }
+}
+
+pub fn git_change_summary_against_nearest_ancestor(repo_path: &Path) -> Result<GitChangeSummary> {
+    let base_ref = resolve_nearest_ancestor_ref(repo_path).with_context(|| {
+        format!(
+            "failed to resolve nearest ancestor ref in {}",
+            repo_path.display()
+        )
+    })?;
+
+    let merge_base_output = run_git_output(repo_path, ["merge-base", "HEAD", base_ref.as_str()])
+        .with_context(|| format!("failed to resolve merge-base for `{base_ref}`"))?;
+    let merge_base = String::from_utf8_lossy(&merge_base_output.stdout)
+        .trim()
+        .to_string();
+
+    let ahead_spec = format!("{merge_base}..HEAD");
+    let ahead_output = run_git_output(repo_path, ["rev-list", "--count", ahead_spec.as_str()])
+        .context("failed to count commits ahead of ancestor")?;
+    let commits_ahead = String::from_utf8_lossy(&ahead_output.stdout)
+        .trim()
+        .parse::<usize>()
+        .context("failed to parse commit-ahead count")?;
+
+    let shortstat_output = run_git_output(repo_path, ["diff", "--shortstat", merge_base.as_str()])
+        .context("failed to read git shortstat against ancestor")?;
+    let shortstat = String::from_utf8_lossy(&shortstat_output.stdout)
+        .trim()
+        .to_string();
+    let (files_changed, insertions, deletions) = parse_shortstat(&shortstat);
+    let names_output = run_git_output(repo_path, ["diff", "--name-only", merge_base.as_str()])
+        .context("failed to read changed file list against ancestor")?;
+    let top_files = parse_top_files(String::from_utf8_lossy(&names_output.stdout).as_ref(), 5);
+
+    Ok(GitChangeSummary {
+        base_ref,
+        commits_ahead,
+        files_changed,
+        insertions,
+        deletions,
+        top_files,
+    })
+}
+
+fn resolve_nearest_ancestor_ref(repo_path: &Path) -> Result<String> {
+    if let Ok(output) = run_git_output(
+        repo_path,
+        ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    ) {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if let Some(ref_name) = value.strip_prefix("refs/remotes/")
+            && !ref_name.is_empty()
+        {
+            return Ok(ref_name.to_string());
+        }
+    }
+
+    for candidate in ["origin/main", "origin/master", "main", "master"] {
+        if run_git_output(repo_path, ["rev-parse", "--verify", candidate]).is_ok() {
+            return Ok(candidate.to_string());
+        }
+    }
+
+    let detected = git_detect_default_branch(repo_path);
+    let remote_detected = format!("origin/{detected}");
+    if run_git_output(
+        repo_path,
+        ["rev-parse", "--verify", remote_detected.as_str()],
+    )
+    .is_ok()
+    {
+        return Ok(remote_detected);
+    }
+    if run_git_output(repo_path, ["rev-parse", "--verify", detected.as_str()]).is_ok() {
+        return Ok(detected);
+    }
+
+    bail!("no candidate ancestor branch found")
+}
+
+fn parse_shortstat(shortstat: &str) -> (usize, usize, usize) {
+    let mut files_changed = 0;
+    let mut insertions = 0;
+    let mut deletions = 0;
+
+    for segment in shortstat.split(',') {
+        let trimmed = segment.trim();
+        let value = trimmed
+            .split_whitespace()
+            .next()
+            .and_then(|raw| raw.parse::<usize>().ok());
+        let Some(value) = value else {
+            continue;
+        };
+
+        if trimmed.contains("file changed") || trimmed.contains("files changed") {
+            files_changed = value;
+        } else if trimmed.contains("insertion") {
+            insertions = value;
+        } else if trimmed.contains("deletion") {
+            deletions = value;
+        }
+    }
+
+    (files_changed, insertions, deletions)
+}
+
+fn parse_top_files(name_only: &str, limit: usize) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for line in name_only.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !files.iter().any(|existing| existing == trimmed) {
+            files.push(trimmed.to_string());
+            if files.len() >= limit {
+                break;
+            }
+        }
+    }
+    files
 }
 
 pub fn derive_worktree_path(base_dir: &Path, repo_path: &Path, branch_name: &str) -> PathBuf {
@@ -443,6 +575,92 @@ mod tests {
         assert_eq!(
             remote.as_deref(),
             Some("https://example.com/remote-url.git")
+        );
+    }
+
+    #[test]
+    fn test_change_summary_against_nearest_ancestor() {
+        let repo =
+            TestRepo::new_with_origin_main("change-summary").expect("repo should be created");
+        repo.git(["checkout", "-b", "feature/change-summary"])
+            .expect("feature branch should be created");
+
+        let note_path = repo.path().join("notes.txt");
+        fs::write(&note_path, "hello\n").expect("notes should be written");
+        repo.git(["add", "notes.txt"])
+            .expect("notes should be staged");
+        repo.git(["commit", "-m", "add notes"])
+            .expect("notes commit should be created");
+
+        let summary = git_change_summary_against_nearest_ancestor(repo.path())
+            .expect("change summary should be computed");
+        assert_eq!(summary.base_ref, "origin/main");
+        assert_eq!(summary.commits_ahead, 1);
+        assert_eq!(summary.files_changed, 1);
+        assert_eq!(summary.insertions, 1);
+        assert_eq!(summary.deletions, 0);
+        assert_eq!(summary.top_files, vec!["notes.txt".to_string()]);
+
+        fs::write(&note_path, "hello\nworld\n").expect("notes should be modified");
+        let with_unstaged = git_change_summary_against_nearest_ancestor(repo.path())
+            .expect("change summary should include unstaged changes");
+        assert_eq!(with_unstaged.commits_ahead, 1);
+        assert_eq!(with_unstaged.files_changed, 1);
+        assert_eq!(with_unstaged.insertions, 2);
+        assert_eq!(with_unstaged.deletions, 0);
+        assert_eq!(with_unstaged.top_files, vec!["notes.txt".to_string()]);
+    }
+
+    #[test]
+    fn test_change_summary_includes_unstaged_without_commits() {
+        let repo = TestRepo::new_with_origin_main("change-summary-unstaged")
+            .expect("repo should be created");
+
+        let readme_path = repo.path().join("README.md");
+        fs::write(&readme_path, "initial\n").expect("readme should be created");
+        repo.git(["add", "README.md"])
+            .expect("readme should be staged");
+        repo.git(["commit", "-m", "add readme"])
+            .expect("readme commit should be created");
+        repo.git(["update-ref", "refs/remotes/origin/main", "HEAD"])
+            .expect("origin/main tracking ref should be updated");
+
+        repo.git(["checkout", "-b", "feature/unstaged"])
+            .expect("feature branch should be created");
+
+        fs::write(&readme_path, "initial\nlocal change\n")
+            .expect("readme should be modified unstaged");
+
+        let summary = git_change_summary_against_nearest_ancestor(repo.path())
+            .expect("change summary should include unstaged-only changes");
+        assert_eq!(summary.commits_ahead, 0);
+        assert_eq!(summary.files_changed, 1);
+        assert_eq!(summary.insertions, 1);
+        assert_eq!(summary.deletions, 0);
+        assert_eq!(summary.top_files, vec!["README.md".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_shortstat_handles_missing_fields() {
+        assert_eq!(parse_shortstat(""), (0, 0, 0));
+        assert_eq!(
+            parse_shortstat("2 files changed, 4 insertions(+)"),
+            (2, 4, 0)
+        );
+    }
+
+    #[test]
+    fn test_parse_top_files_limits_and_deduplicates() {
+        let parsed = parse_top_files("a.rs\nb.rs\na.rs\nc.rs\nd.rs\ne.rs\nf.rs\n", 5);
+        assert_eq!(
+            parsed,
+            vec![
+                "a.rs".to_string(),
+                "b.rs".to_string(),
+                "c.rs".to_string(),
+                "d.rs".to_string(),
+                "e.rs".to_string(),
+            ]
         );
     }
 

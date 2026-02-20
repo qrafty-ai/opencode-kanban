@@ -3,6 +3,7 @@ use std::time::{Duration, SystemTime};
 
 use reqwest::Client;
 use reqwest::StatusCode;
+use serde::Deserialize;
 use serde_json::Value;
 use urlencoding::encode;
 
@@ -79,8 +80,13 @@ impl ServerStatusProvider {
         format!("http://{}:{}", self.config.hostname, self.config.port)
     }
 
-    fn session_url(&self) -> String {
-        format!("{}/session", self.base_url())
+    fn session_url(&self, directory: Option<&str>) -> String {
+        let base = format!("{}/session", self.base_url());
+        if let Some(directory) = directory {
+            format!("{base}?directory={}", encode(directory))
+        } else {
+            base
+        }
     }
 
     fn session_status_url(&self) -> String {
@@ -95,18 +101,24 @@ impl ServerStatusProvider {
         format!("{}/session/{}/message", self.base_url(), encode(session_id))
     }
 
-    pub async fn list_all_sessions(&self) -> Result<Vec<(String, String)>, SessionStatusError> {
-        let records = self.list_all_session_records().await?;
+    pub async fn list_all_sessions(
+        &self,
+        directory: Option<&str>,
+    ) -> Result<Vec<(String, String)>, SessionStatusError> {
+        let records = self.list_all_session_records(directory).await?;
         Ok(records
             .into_iter()
             .map(|record| (record.session_id, record.directory))
             .collect())
     }
 
-    pub async fn list_all_session_records(&self) -> Result<Vec<SessionRecord>, SessionStatusError> {
+    pub async fn list_all_session_records(
+        &self,
+        directory: Option<&str>,
+    ) -> Result<Vec<SessionRecord>, SessionStatusError> {
         let response = self
             .client
-            .get(self.session_url())
+            .get(self.session_url(directory))
             .send()
             .await
             .map_err(|err| map_reqwest_error(err, "SERVER_CONNECT_FAILED"))?;
@@ -131,16 +143,6 @@ impl ServerStatusProvider {
             .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
 
         parse_session_records_body(&body)
-    }
-
-    pub async fn fetch_session_parent_map(
-        &self,
-    ) -> Result<HashMap<String, Option<String>>, SessionStatusError> {
-        let records = self.list_all_session_records().await?;
-        Ok(records
-            .into_iter()
-            .map(|record| (record.session_id, record.parent_session_id))
-            .collect())
     }
 
     pub async fn fetch_all_statuses(
@@ -274,31 +276,108 @@ impl ServerStatusProvider {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawStatusEntry {
+    String(String),
+    Object(RawStatusObject),
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawStatusObject {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default, rename = "parentID")]
+    parent_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSessionRecord {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    directory: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "parentID")]
+    parent_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawTodoEntry {
+    String(String),
+    Object(RawTodoObject),
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawTodoObject {
+    #[serde(default, alias = "text", alias = "title", alias = "label")]
+    content: Option<String>,
+    #[serde(default, alias = "done")]
+    completed: Option<bool>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawMessagePayload {
+    Array(Vec<RawMessageEntry>),
+    Object(RawMessageEnvelope),
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawMessageEnvelope {
+    #[serde(default)]
+    messages: Option<Vec<RawMessageEntry>>,
+    #[serde(default)]
+    items: Option<Vec<RawMessageEntry>>,
+    #[serde(default)]
+    data: Option<Vec<RawMessageEntry>>,
+}
+
+impl RawMessageEnvelope {
+    fn into_entries(self) -> Option<Vec<RawMessageEntry>> {
+        self.messages.or(self.items).or(self.data)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawMessageEntry {
+    String(String),
+    Object(Value),
+}
+
 fn parse_status_matches_body(
     body: &str,
     fetched_at: SystemTime,
 ) -> Result<Vec<SessionStatusMatch>, SessionStatusError> {
-    let payload: Value = serde_json::from_str(body).map_err(|err| SessionStatusError {
-        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
-        message: format!("failed to parse /session/status response JSON: {err}"),
-    })?;
+    let payload: HashMap<String, RawStatusEntry> =
+        serde_json::from_str(body).map_err(|err| SessionStatusError {
+            code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+            message: format!("failed to parse /session/status response JSON: {err}"),
+        })?;
 
-    let object = payload.as_object().ok_or_else(|| SessionStatusError {
-        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
-        message: "expected /session/status response to be a JSON object keyed by session id"
-            .to_string(),
-    })?;
-
-    let mut statuses = Vec::with_capacity(object.len());
-    for (session_id, value) in object {
-        let state = parse_session_state(value).map_err(|err| SessionStatusError {
+    let mut statuses = Vec::with_capacity(payload.len());
+    for (session_id, entry) in payload {
+        let state = parse_session_state(&entry).map_err(|err| SessionStatusError {
             code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
             message: format!("invalid /session/status entry for session {session_id}: {err}"),
         })?;
-        let parent_session_id = parse_parent_session_id(value);
+        let parent_session_id = parse_parent_session_id(&entry);
 
         statuses.push(SessionStatusMatch {
-            session_id: session_id.clone(),
+            session_id,
             parent_session_id,
             status: SessionStatus {
                 state,
@@ -312,66 +391,33 @@ fn parse_status_matches_body(
     Ok(statuses)
 }
 
-fn parse_parent_session_id(value: &Value) -> Option<String> {
-    const PARENT_SESSION_ID_KEYS: &[&str] = &[
-        "parentSessionId",
-        "parent_session_id",
-        "parentSessionID",
-        "parentID",
-        "parentId",
-        "parent_id",
-    ];
-
-    let obj = value.as_object()?;
-    for key in PARENT_SESSION_ID_KEYS {
-        if let Some(parent_session_id) = obj.get(*key).and_then(Value::as_str) {
-            let trimmed = parent_session_id.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            return Some(trimmed.to_string());
-        }
-    }
-
-    None
+fn parse_parent_session_id(entry: &RawStatusEntry) -> Option<String> {
+    let RawStatusEntry::Object(object) = entry else {
+        return None;
+    };
+    normalize_optional_text(object.parent_session_id.as_deref())
 }
 
 fn parse_session_records_body(body: &str) -> Result<Vec<SessionRecord>, SessionStatusError> {
-    let payload: Value = serde_json::from_str(body).map_err(|err| SessionStatusError {
-        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
-        message: format!("failed to parse /session response JSON: {err}"),
-    })?;
-
-    let array = payload.as_array().ok_or_else(|| SessionStatusError {
-        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
-        message: "expected /session response to be a JSON array".to_string(),
-    })?;
-
-    let mut sessions = Vec::new();
-    for item in array {
-        let obj = item.as_object().ok_or_else(|| SessionStatusError {
+    let records: Vec<RawSessionRecord> =
+        serde_json::from_str(body).map_err(|err| SessionStatusError {
             code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
-            message: "expected /session array entries to be objects".to_string(),
+            message: format!("failed to parse /session response JSON: {err}"),
         })?;
 
-        let Some(session_id) = obj.get("id").and_then(|v| v.as_str()) else {
+    let mut sessions = Vec::with_capacity(records.len());
+    for record in records {
+        let Some(session_id) = record.id else {
             continue;
         };
-        let directory = obj.get("directory").and_then(|v| v.as_str()).unwrap_or("");
-        let title = obj
-            .get("title")
-            .and_then(|v| v.as_str())
-            .or_else(|| obj.get("name").and_then(|v| v.as_str()))
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let parent_session_id = parse_parent_session_id(item);
+        let title = normalize_optional_text(record.title.as_deref())
+            .or_else(|| normalize_optional_text(record.name.as_deref()));
 
         sessions.push(SessionRecord {
-            session_id: session_id.to_string(),
-            directory: directory.to_string(),
+            session_id,
+            directory: record.directory.unwrap_or_default(),
             title,
-            parent_session_id,
+            parent_session_id: normalize_optional_text(record.parent_session_id.as_deref()),
         });
     }
 
@@ -379,19 +425,15 @@ fn parse_session_records_body(body: &str) -> Result<Vec<SessionRecord>, SessionS
 }
 
 fn parse_session_todo_body(body: &str) -> Result<Vec<SessionTodoItem>, SessionStatusError> {
-    let payload: Value = serde_json::from_str(body).map_err(|err| SessionStatusError {
-        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
-        message: format!("failed to parse /session/:id/todo response JSON: {err}"),
-    })?;
+    let entries: Vec<RawTodoEntry> =
+        serde_json::from_str(body).map_err(|err| SessionStatusError {
+            code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+            message: format!("failed to parse /session/:id/todo response JSON: {err}"),
+        })?;
 
-    let array = payload.as_array().ok_or_else(|| SessionStatusError {
-        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
-        message: "expected /session/:id/todo response to be a JSON array".to_string(),
-    })?;
-
-    let mut todos = Vec::with_capacity(array.len());
-    for (index, todo) in array.iter().enumerate() {
-        let parsed = parse_session_todo_item(todo).map_err(|err| SessionStatusError {
+    let mut todos = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let parsed = parse_session_todo_item(entry).map_err(|err| SessionStatusError {
             code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
             message: format!("invalid /session/:id/todo entry at index {index}: {err}"),
         })?;
@@ -402,37 +444,25 @@ fn parse_session_todo_body(body: &str) -> Result<Vec<SessionTodoItem>, SessionSt
 }
 
 fn parse_session_message_body(body: &str) -> Result<Vec<SessionMessageItem>, SessionStatusError> {
-    let payload: Value = serde_json::from_str(body).map_err(|err| SessionStatusError {
-        code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
-        message: format!("failed to parse /session/:id/message response JSON: {err}"),
-    })?;
+    let payload: RawMessagePayload =
+        serde_json::from_str(body).map_err(|err| SessionStatusError {
+            code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
+            message: format!("failed to parse /session/:id/message response JSON: {err}"),
+        })?;
 
-    let array = if let Some(array) = payload.as_array() {
-        array
-    } else if let Some(obj) = payload.as_object() {
-        if let Some(array) = obj.get("messages").and_then(Value::as_array) {
-            array
-        } else if let Some(array) = obj.get("items").and_then(Value::as_array) {
-            array
-        } else if let Some(array) = obj.get("data").and_then(Value::as_array) {
-            array
-        } else {
-            return Err(SessionStatusError {
+    let entries = match payload {
+        RawMessagePayload::Array(entries) => entries,
+        RawMessagePayload::Object(wrapper) => {
+            wrapper.into_entries().ok_or_else(|| SessionStatusError {
                 code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
                 message: "expected /session/:id/message response to be a JSON array or object containing messages/items/data array".to_string(),
-            });
+            })?
         }
-    } else {
-        return Err(SessionStatusError {
-            code: "SERVER_CONTRACT_PARSE_ERROR".to_string(),
-            message: "expected /session/:id/message response to be a JSON array or object"
-                .to_string(),
-        });
     };
 
-    let mut messages = Vec::with_capacity(array.len());
-    for value in array {
-        if let Ok(Some(parsed)) = parse_session_message_item(value) {
+    let mut messages = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        if let Ok(Some(parsed)) = parse_session_message_item(entry) {
             messages.push(parsed);
         }
     }
@@ -440,20 +470,29 @@ fn parse_session_message_body(body: &str) -> Result<Vec<SessionMessageItem>, Ses
     Ok(messages)
 }
 
-fn parse_session_message_item(value: &Value) -> Result<Option<SessionMessageItem>, &'static str> {
-    if let Some(content) = value.as_str() {
-        let content = content.trim();
-        if content.is_empty() {
-            return Ok(None);
+fn parse_session_message_item(
+    entry: &RawMessageEntry,
+) -> Result<Option<SessionMessageItem>, &'static str> {
+    match entry {
+        RawMessageEntry::String(content) => {
+            let content = content.trim();
+            if content.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(SessionMessageItem {
+                message_type: Some("text".to_string()),
+                role: None,
+                content: content.to_string(),
+                timestamp: None,
+            }))
         }
-        return Ok(Some(SessionMessageItem {
-            message_type: Some("text".to_string()),
-            role: None,
-            content: content.to_string(),
-            timestamp: None,
-        }));
+        RawMessageEntry::Object(value) => parse_session_message_item_from_object(value),
     }
+}
 
+fn parse_session_message_item_from_object(
+    value: &Value,
+) -> Result<Option<SessionMessageItem>, &'static str> {
     let obj = value
         .as_object()
         .ok_or("expected message entry to be a string or object")?;
@@ -702,46 +741,29 @@ fn scalar_timestamp(value: &Value) -> Option<String> {
     None
 }
 
-fn parse_session_todo_item(value: &Value) -> Result<SessionTodoItem, &'static str> {
-    if let Some(content) = value.as_str() {
-        return Ok(SessionTodoItem {
+fn parse_session_todo_item(entry: &RawTodoEntry) -> Result<SessionTodoItem, &'static str> {
+    match entry {
+        RawTodoEntry::String(content) => Ok(SessionTodoItem {
             content: content.to_string(),
             completed: false,
-        });
+        }),
+        RawTodoEntry::Object(todo) => {
+            let content = todo.content.as_deref().ok_or(
+                "expected todo object to contain `content`, `text`, `title`, or `label` string",
+            )?;
+
+            let completed = todo
+                .completed
+                .or_else(|| todo.status.as_deref().map(is_completed_status))
+                .or_else(|| todo.state.as_deref().map(is_completed_status))
+                .unwrap_or(false);
+
+            Ok(SessionTodoItem {
+                content: content.to_string(),
+                completed,
+            })
+        }
     }
-
-    let obj = value
-        .as_object()
-        .ok_or("expected todo entry to be a string or object")?;
-
-    let content = obj
-        .get("content")
-        .and_then(Value::as_str)
-        .or_else(|| obj.get("text").and_then(Value::as_str))
-        .or_else(|| obj.get("title").and_then(Value::as_str))
-        .or_else(|| obj.get("label").and_then(Value::as_str))
-        .ok_or("expected todo object to contain `content`, `text`, `title`, or `label` string")?;
-
-    let completed = obj
-        .get("completed")
-        .and_then(Value::as_bool)
-        .or_else(|| obj.get("done").and_then(Value::as_bool))
-        .or_else(|| {
-            obj.get("status")
-                .and_then(Value::as_str)
-                .map(is_completed_status)
-        })
-        .or_else(|| {
-            obj.get("state")
-                .and_then(Value::as_str)
-                .map(is_completed_status)
-        })
-        .unwrap_or(false);
-
-    Ok(SessionTodoItem {
-        content: content.to_string(),
-        completed,
-    })
 }
 
 fn is_completed_status(raw: &str) -> bool {
@@ -751,32 +773,33 @@ fn is_completed_status(raw: &str) -> bool {
     )
 }
 
-fn parse_session_state(value: &Value) -> Result<SessionState, &'static str> {
-    if let Some(raw) = value.as_str() {
-        return parse_state_str(raw);
+fn parse_session_state(entry: &RawStatusEntry) -> Result<SessionState, &'static str> {
+    match entry {
+        RawStatusEntry::String(raw) => parse_state_str(raw),
+        RawStatusEntry::Object(obj) => {
+            if let Some(kind) = obj.kind.as_deref() {
+                return match kind {
+                    "idle" => Ok(SessionState::Idle),
+                    "busy" => Ok(SessionState::Running),
+                    "retry" => Ok(SessionState::Idle),
+                    _ => Err("unrecognized session type value"),
+                };
+            }
+            if let Some(raw) = obj.state.as_deref() {
+                return parse_state_str(raw);
+            }
+            if let Some(raw) = obj.status.as_deref() {
+                return parse_state_str(raw);
+            }
+            Err("expected object entry to contain `type`, `state`, or `status` string")
+        }
     }
+}
 
-    if let Some(obj) = value.as_object() {
-        // OpenCode format: { "type": "idle" | "busy" | "retry" }
-        if let Some(typ) = obj.get("type").and_then(Value::as_str) {
-            return match typ {
-                "idle" => Ok(SessionState::Idle),
-                "busy" => Ok(SessionState::Running),
-                "retry" => Ok(SessionState::Idle),
-                _ => Err("unrecognized session type value"),
-            };
-        }
-        // Legacy format: { "state": "running" } or { "status": "running" }
-        if let Some(raw) = obj.get("state").and_then(Value::as_str) {
-            return parse_state_str(raw);
-        }
-        if let Some(raw) = obj.get("status").and_then(Value::as_str) {
-            return parse_state_str(raw);
-        }
-        return Err("expected object entry to contain `type`, `state`, or `status` string");
-    }
-
-    Err("expected status entry to be a string or object")
+fn normalize_optional_text(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn parse_state_str(state: &str) -> Result<SessionState, &'static str> {
@@ -952,7 +975,7 @@ mod tests {
         });
 
         let records = provider
-            .list_all_session_records()
+            .list_all_session_records(None)
             .await
             .expect("session records should parse");
 

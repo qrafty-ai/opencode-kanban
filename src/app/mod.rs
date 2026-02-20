@@ -43,7 +43,10 @@ pub use self::state::{
 
 use crate::command_palette::{CommandPaletteState, all_commands};
 use crate::db::Database;
-use crate::git::{derive_worktree_path, git_delete_branch, git_remove_worktree};
+use crate::git::{
+    GitChangeSummary, derive_worktree_path, git_change_summary_against_nearest_ancestor,
+    git_delete_branch, git_remove_worktree,
+};
 use crate::keybindings::{KeyAction, KeyContext, Keybindings};
 use crate::matching::recency_frequency_bonus;
 use crate::opencode::{
@@ -82,6 +85,12 @@ pub enum SidePanelRow {
         category_id: Uuid,
         task: Box<Task>,
     },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SubagentTodoSummary {
+    pub title: String,
+    pub todo_summary: Option<(usize, usize)>,
 }
 
 pub struct ProjectDetailCache {
@@ -131,6 +140,7 @@ pub struct App {
     pub archive_selected_index: usize,
     pub collapsed_categories: HashSet<Uuid>,
     pub current_log_buffer: Option<String>,
+    pub current_change_summary: Option<GitChangeSummary>,
     pub detail_focus: DetailFocus,
     pub detail_scroll_offset: usize,
     pub log_scroll_offset: usize,
@@ -139,6 +149,7 @@ pub struct App {
     pub log_expanded_scroll_offset: usize,
     pub log_expanded_entries: HashSet<usize>,
     pub session_todo_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionTodoItem>>>>,
+    pub session_subagent_cache: Arc<Mutex<HashMap<Uuid, Vec<SubagentTodoSummary>>>>,
     pub session_title_cache: Arc<Mutex<HashMap<String, String>>>,
     pub session_message_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionMessageItem>>>>,
     pub todo_visualization_mode: TodoVisualizationMode,
@@ -192,6 +203,7 @@ impl App {
         let server_manager = ensure_server_ready();
         let poller_stop = Arc::new(AtomicBool::new(false));
         let session_todo_cache = Arc::new(Mutex::new(HashMap::new()));
+        let session_subagent_cache = Arc::new(Mutex::new(HashMap::new()));
         let session_title_cache = Arc::new(Mutex::new(HashMap::new()));
         let session_message_cache = Arc::new(Mutex::new(HashMap::new()));
         let settings = crate::settings::Settings::load();
@@ -248,6 +260,7 @@ impl App {
             archive_selected_index: 0,
             collapsed_categories: HashSet::new(),
             current_log_buffer: None,
+            current_change_summary: None,
             detail_focus: DetailFocus::List,
             detail_scroll_offset: 0,
             log_scroll_offset: 0,
@@ -256,6 +269,7 @@ impl App {
             log_expanded_scroll_offset: 0,
             log_expanded_entries: HashSet::new(),
             session_todo_cache,
+            session_subagent_cache,
             session_title_cache,
             session_message_cache,
             todo_visualization_mode,
@@ -290,6 +304,7 @@ impl App {
             db_path,
             Arc::clone(&app.poller_stop),
             Arc::clone(&app.session_todo_cache),
+            Arc::clone(&app.session_subagent_cache),
             Arc::clone(&app.session_title_cache),
             Arc::clone(&app.session_message_cache),
             app.settings.poll_interval_ms,
@@ -317,6 +332,14 @@ impl App {
 
         let completed = todos.iter().filter(|todo| todo.completed).count();
         Some((completed, todos.len()))
+    }
+
+    pub fn session_subagent_summaries(&self, task_id: Uuid) -> Vec<SubagentTodoSummary> {
+        self.session_subagent_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&task_id).cloned())
+            .unwrap_or_default()
     }
 
     pub fn opencode_session_title(&self, session_id: &str) -> Option<String> {
@@ -390,6 +413,7 @@ impl App {
             self.poller_db_path(),
             Arc::clone(&self.poller_stop),
             Arc::clone(&self.session_todo_cache),
+            Arc::clone(&self.session_subagent_cache),
             Arc::clone(&self.session_title_cache),
             Arc::clone(&self.session_message_cache),
             self.settings.poll_interval_ms,
@@ -417,6 +441,9 @@ impl App {
         self.repos = self.db.list_repos().context("failed to load repos")?;
 
         if let Ok(mut cache) = self.session_todo_cache.lock() {
+            cache.retain(|task_id, _| self.tasks.iter().any(|task| task.id == *task_id));
+        }
+        if let Ok(mut cache) = self.session_subagent_cache.lock() {
             cache.retain(|task_id, _| self.tasks.iter().any(|task| task.id == *task_id));
         }
         if let Ok(mut cache) = self.session_message_cache.lock() {
@@ -498,6 +525,9 @@ impl App {
         if let Ok(mut cache) = self.session_todo_cache.lock() {
             cache.clear();
         }
+        if let Ok(mut cache) = self.session_subagent_cache.lock() {
+            cache.clear();
+        }
         if let Ok(mut cache) = self.session_title_cache.lock() {
             cache.clear();
         }
@@ -512,6 +542,7 @@ impl App {
             path.clone(),
             Arc::clone(&self.poller_stop),
             Arc::clone(&self.session_todo_cache),
+            Arc::clone(&self.session_subagent_cache),
             Arc::clone(&self.session_title_cache),
             Arc::clone(&self.session_message_cache),
             self.settings.poll_interval_ms,
@@ -542,6 +573,7 @@ impl App {
                 if self.view_mode == ViewMode::SidePanel {
                     let Some(task) = self.selected_task() else {
                         self.current_log_buffer = None;
+                        self.current_change_summary = None;
                         self.maybe_show_tmux_mouse_hint();
                         return Ok(());
                     };
@@ -552,6 +584,8 @@ impl App {
                         let messages = self.session_messages(task.id);
                         self.current_log_buffer = Self::build_log_buffer_from_messages(&messages);
                     }
+
+                    self.current_change_summary = self.task_change_summary(&task);
                 }
             }
             Message::Resize(w, h) => {
@@ -2143,6 +2177,7 @@ impl App {
             self.side_panel_selected_row = 0;
             if clear_log {
                 self.current_log_buffer = None;
+                self.current_change_summary = None;
                 self.detail_scroll_offset = 0;
                 self.log_scroll_offset = 0;
                 self.log_expanded_scroll_offset = 0;
@@ -2174,6 +2209,7 @@ impl App {
 
         if clear_log {
             self.current_log_buffer = None;
+            self.current_change_summary = None;
             self.detail_scroll_offset = 0;
             self.log_scroll_offset = 0;
             self.log_expanded_scroll_offset = 0;
@@ -2221,6 +2257,16 @@ impl App {
             .iter()
             .find(|repo| repo.id == task.repo_id)
             .cloned()
+    }
+
+    fn task_change_summary(&self, task: &Task) -> Option<GitChangeSummary> {
+        let repo = self.repo_for_task(task)?;
+        let path = task
+            .worktree_path
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or_else(|| Path::new(&repo.path));
+        git_change_summary_against_nearest_ancestor(path).ok()
     }
 
     fn move_category_left(&mut self) -> Result<()> {
@@ -3829,6 +3875,7 @@ mod tests {
             archive_selected_index: 0,
             collapsed_categories: HashSet::new(),
             current_log_buffer: None,
+            current_change_summary: None,
             detail_focus: DetailFocus::List,
             detail_scroll_offset: 0,
             log_scroll_offset: 0,
@@ -3837,6 +3884,7 @@ mod tests {
             log_expanded_scroll_offset: 0,
             log_expanded_entries: HashSet::new(),
             session_todo_cache: Arc::new(Mutex::new(HashMap::new())),
+            session_subagent_cache: Arc::new(Mutex::new(HashMap::new())),
             session_title_cache: Arc::new(Mutex::new(HashMap::new())),
             session_message_cache: Arc::new(Mutex::new(HashMap::new())),
             todo_visualization_mode: TodoVisualizationMode::Checklist,

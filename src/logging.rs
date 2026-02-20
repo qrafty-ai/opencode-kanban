@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use chrono::Local;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+const LOG_LEVEL_ENV: &str = "OPENCODE_KANBAN_LOG_LEVEL";
+
 pub fn init_logging() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let log_dir = get_log_directory()?;
     fs::create_dir_all(&log_dir)?;
@@ -15,8 +17,7 @@ pub fn init_logging() -> Result<PathBuf, Box<dyn std::error::Error>> {
 
     std::mem::forget(guard);
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,opencode_kanban=debug"));
+    let env_filter = build_log_filter();
 
     let file_layer = fmt::layer()
         .with_writer(non_blocking)
@@ -34,6 +35,26 @@ pub fn init_logging() -> Result<PathBuf, Box<dyn std::error::Error>> {
     tracing::info!("Logging initialized. Log file: {}", log_file_path.display());
 
     Ok(log_file_path)
+}
+
+fn build_log_filter() -> EnvFilter {
+    let default_level = "warn";
+    let level = std::env::var(LOG_LEVEL_ENV)
+        .ok()
+        .and_then(|raw| normalize_log_level(raw.as_str()))
+        .unwrap_or(default_level);
+    EnvFilter::new(format!("{level},opencode_kanban={level}"))
+}
+
+fn normalize_log_level(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "trace" => Some("trace"),
+        "debug" => Some("debug"),
+        "info" => Some("info"),
+        "warn" | "warning" => Some("warn"),
+        "error" => Some("error"),
+        _ => None,
+    }
 }
 
 pub fn get_log_directory() -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -97,5 +118,12 @@ mod tests {
         let path_str = path.to_string_lossy();
         assert!(path_str.contains("opencode-kanban-"));
         assert!(path_str.ends_with(".log"));
+    }
+
+    #[test]
+    fn test_normalize_log_level() {
+        assert_eq!(normalize_log_level("TRACE"), Some("trace"));
+        assert_eq!(normalize_log_level("warning"), Some("warn"));
+        assert_eq!(normalize_log_level("nope"), None);
     }
 }

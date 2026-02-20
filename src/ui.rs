@@ -13,7 +13,11 @@ use tuirealm::{
         Frame,
         layout::{Constraint, Direction, Layout, Rect},
         style::Style as RatatuiStyle,
-        widgets::{Clear, Scrollbar, ScrollbarOrientation, ScrollbarState},
+        text::{Line as RatatuiLine, Span as RatatuiSpan},
+        widgets::{
+            Block, Borders as RatatuiBorders, Clear, Paragraph as RatatuiParagraph, Scrollbar,
+            ScrollbarOrientation, ScrollbarState,
+        },
     },
 };
 
@@ -740,7 +744,6 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &mut A
         .find(|repo| repo.id == task.repo_id)
         .map(|repo| repo.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
-
     let runtime_status = task.tmux_status.to_ascii_uppercase();
     let todo_summary = app
         .session_todo_summary(task.id)
@@ -750,43 +753,148 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &mut A
     let session = task
         .opencode_session_id
         .as_deref()
-        .and_then(|session_id| app.opencode_session_title(session_id))
+        .map(|session_id| {
+            app.opencode_session_title(session_id)
+                .unwrap_or_else(|| session_id.to_string())
+        })
         .unwrap_or_else(|| "n/a".to_string());
 
-    let mut lines = vec![
-        TextSpan::new("OVERVIEW").fg(theme.base.header).bold(),
-        TextSpan::new(detail_kv("Title", &task.title)).fg(theme.base.text),
-        TextSpan::new(detail_kv("Repo", &repo_name)).fg(theme.base.text),
-        TextSpan::new(detail_kv("Branch", &task.branch)).fg(theme.base.text),
-        TextSpan::new(""),
-        TextSpan::new("RUNTIME").fg(theme.base.header).bold(),
-        TextSpan::new(detail_kv("Status", &runtime_status))
-            .fg(theme.status_color(task.tmux_status.as_str())),
-        TextSpan::new(detail_kv("Todos", &todo_summary)).fg(theme.tile.todo),
-        TextSpan::new(detail_kv("TodoView", todo_view)).fg(theme.base.text_muted),
-        TextSpan::new(detail_kv("Session", &session)).fg(theme.base.text),
+    let mut lines: Vec<Vec<TextSpan>> = vec![
+        vec![TextSpan::new("OVERVIEW").fg(theme.base.header).bold()],
+        vec![TextSpan::new(detail_kv("Title", &task.title)).fg(theme.base.text)],
+        vec![
+            TextSpan::new(format!("{:>8}: ", "Target")).fg(theme.base.text),
+            TextSpan::new(repo_name.clone()).fg(theme.tile.repo),
+            TextSpan::new(":").fg(theme.base.text_muted),
+            TextSpan::new(task.branch.clone()).fg(theme.tile.branch),
+        ],
+        vec![TextSpan::new("")],
+        vec![TextSpan::new("RUNTIME").fg(theme.base.header).bold()],
+        vec![
+            TextSpan::new(detail_kv("Status", &runtime_status))
+                .fg(theme.status_color(task.tmux_status.as_str())),
+        ],
+        vec![TextSpan::new(detail_kv("Todos", &todo_summary)).fg(theme.tile.todo)],
+        vec![TextSpan::new(detail_kv("TodoView", todo_view)).fg(theme.base.text_muted)],
+        vec![TextSpan::new(detail_kv("Session", &session)).fg(theme.base.text)],
     ];
 
     if app.todo_visualization_mode == TodoVisualizationMode::Checklist {
         let task_todos = app.session_todos(task.id);
         let checklist_lines = todo_checklist_lines(&task_todos);
         if !checklist_lines.is_empty() {
-            lines.push(TextSpan::new(""));
-            lines.push(TextSpan::new("WORK PLAN").fg(theme.base.header).bold());
+            lines.push(vec![TextSpan::new("")]);
+            lines.push(vec![
+                TextSpan::new("WORK PLAN").fg(theme.base.header).bold(),
+            ]);
             for (line, state) in checklist_lines {
-                lines.push(TextSpan::new(line).fg(todo_state_color(theme, state)));
+                lines.push(vec![TextSpan::new(line).fg(todo_state_color(theme, state))]);
             }
         }
     }
 
-    lines.push(TextSpan::new(""));
-    lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
-    lines.push(
+    let subagents = app.session_subagent_summaries(task.id);
+    if !subagents.is_empty() {
+        lines.push(vec![TextSpan::new("")]);
+        lines.push(vec![
+            TextSpan::new("LIVE SUBAGENTS").fg(theme.base.header).bold(),
+        ]);
+        for subagent in &subagents {
+            let title = clamp_text(subagent.title.as_str(), 48);
+            let todo = subagent
+                .todo_summary
+                .map(|(done, total)| format!("{done}/{total}"))
+                .unwrap_or_else(|| "--".to_string());
+            let spinner = status_spinner_ascii("running", app.pulse_phase);
+            lines.push(vec![
+                TextSpan::new(format!("{spinner} ")).fg(theme.status.running),
+                TextSpan::new(title).fg(theme.base.text),
+                TextSpan::new("  todo ").fg(theme.tile.todo),
+                TextSpan::new(todo).fg(subagent_count_color(theme, subagent.todo_summary)),
+            ]);
+        }
+    }
+
+    lines.push(vec![TextSpan::new("")]);
+    lines.push(vec![TextSpan::new("CHANGES").fg(theme.base.header).bold()]);
+    if let Some(summary) = app.current_change_summary.as_ref() {
+        const CHANGE_LABEL_WIDTH: usize = 11;
+        let change_indent = " ".repeat(CHANGE_LABEL_WIDTH + 2);
+
+        lines.push(vec![
+            TextSpan::new(format!("{:>width$}: ", "Base", width = CHANGE_LABEL_WIDTH))
+                .fg(theme.base.text_muted),
+            TextSpan::new(summary.base_ref.clone()).fg(theme.base.text),
+        ]);
+        lines.push(vec![
+            TextSpan::new(format!(
+                "{:>width$}: ",
+                "CommitsAhead",
+                width = CHANGE_LABEL_WIDTH
+            ))
+            .fg(theme.base.text_muted),
+            TextSpan::new(summary.commits_ahead.to_string()).fg(theme.base.text),
+        ]);
+        lines.push(vec![
+            TextSpan::new(format!("{:>width$}: ", "Diff", width = CHANGE_LABEL_WIDTH))
+                .fg(theme.base.text_muted),
+            TextSpan::new(format!("{} files", summary.files_changed)).fg(theme.base.text),
+        ]);
+        lines.push(vec![
+            TextSpan::new(format!("{:>width$}: ", "Delta", width = CHANGE_LABEL_WIDTH))
+                .fg(theme.base.text_muted),
+            TextSpan::new(format!("+{}", summary.insertions)).fg(theme.status.running),
+            TextSpan::new(" / ").fg(theme.base.text_muted),
+            TextSpan::new(format!("-{}", summary.deletions)).fg(theme.status.dead),
+        ]);
+        if summary.top_files.is_empty() {
+            lines.push(vec![
+                TextSpan::new(format!(
+                    "{:>width$}: ",
+                    "TopFiles",
+                    width = CHANGE_LABEL_WIDTH
+                ))
+                .fg(theme.tile.todo),
+                TextSpan::new("n/a").fg(theme.base.text_muted),
+            ]);
+        } else {
+            let mut top_files = summary
+                .top_files
+                .iter()
+                .take(5)
+                .map(|file| clamp_text(file, 64));
+            if let Some(first_file) = top_files.next() {
+                lines.push(vec![
+                    TextSpan::new(format!(
+                        "{:>width$}: ",
+                        "TopFiles",
+                        width = CHANGE_LABEL_WIDTH
+                    ))
+                    .fg(theme.tile.todo),
+                    TextSpan::new(first_file).fg(theme.base.text_muted),
+                ]);
+            }
+            for file in top_files {
+                lines.push(vec![
+                    TextSpan::new(format!("{change_indent}{file}")).fg(theme.base.text_muted),
+                ]);
+            }
+        }
+    } else {
+        lines.push(vec![
+            TextSpan::new(format!("{:>width$}: ", "Base", width = 11)).fg(theme.base.text_muted),
+            TextSpan::new("n/a").fg(theme.base.text_muted),
+        ]);
+    }
+
+    lines.push(vec![TextSpan::new("")]);
+    lines.push(vec![TextSpan::new("ACTIONS").fg(theme.base.header).bold()]);
+    lines.push(vec![
         TextSpan::new(
             "d delete  Tab focus  j/k select  Ctrl+u/d half-page  gg/G top/bottom  e/Enter toggle  +/- resize  f expand",
         )
-            .fg(theme.base.text_muted),
-    );
+        .fg(theme.base.text_muted),
+    ]);
 
     let detail_viewport = list_inner_height(sections[0]);
     let detail_line_count = lines.len();
@@ -796,7 +904,7 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &mut A
         app.detail_scroll_offset
             .min(detail_line_count.saturating_sub(detail_viewport))
     };
-    let visible_lines = if detail_viewport == 0 {
+    let visible_lines: Vec<Vec<TextSpan>> = if detail_viewport == 0 {
         lines
     } else {
         lines
@@ -812,13 +920,48 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &mut A
         theme.base.text_muted
     };
 
-    let mut paragraph = Paragraph::default()
-        .title("Details", Alignment::Left)
-        .borders(rounded_borders(detail_border))
-        .foreground(theme.base.text)
-        .background(theme.base.surface)
-        .text(visible_lines);
-    paragraph.view(frame, sections[0]);
+    let ratatui_lines: Vec<RatatuiLine<'static>> = visible_lines
+        .into_iter()
+        .map(|line| {
+            RatatuiLine::from(
+                line.into_iter()
+                    .map(|segment| {
+                        let fg = if segment.fg == Color::Reset {
+                            theme.base.text
+                        } else {
+                            segment.fg
+                        };
+                        let bg = if segment.bg == Color::Reset {
+                            theme.base.surface
+                        } else {
+                            segment.bg
+                        };
+                        RatatuiSpan::styled(
+                            segment.content,
+                            RatatuiStyle::default()
+                                .fg(fg)
+                                .bg(bg)
+                                .add_modifier(segment.modifiers),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let details_block = Block::default()
+        .title("Details")
+        .borders(RatatuiBorders::ALL)
+        .border_type(tuirealm::ratatui::widgets::BorderType::Rounded)
+        .border_style(RatatuiStyle::default().fg(detail_border))
+        .style(RatatuiStyle::default().bg(theme.base.surface));
+    let paragraph = RatatuiParagraph::new(ratatui_lines)
+        .block(details_block)
+        .style(
+            RatatuiStyle::default()
+                .fg(theme.base.text)
+                .bg(theme.base.surface),
+        );
+    frame.render_widget(paragraph, sections[0]);
 
     if detail_viewport > 0 && detail_line_count > detail_viewport {
         let mut state = ScrollbarState::new(detail_line_count)
@@ -2686,6 +2829,14 @@ fn todo_state_color(theme: Theme, state: TodoLineState) -> Color {
         TodoLineState::Completed => theme.status.running,
         TodoLineState::Active => theme.status.waiting,
         TodoLineState::Pending => theme.base.text_muted,
+    }
+}
+
+fn subagent_count_color(theme: Theme, todo_summary: Option<(usize, usize)>) -> Color {
+    match todo_summary {
+        Some((done, total)) if total > 0 && done >= total => theme.status.running,
+        Some((_, total)) if total > 0 => theme.tile.todo,
+        _ => theme.base.text_muted,
     }
 }
 
