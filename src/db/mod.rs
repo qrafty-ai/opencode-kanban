@@ -595,8 +595,10 @@ impl Database {
     }
 
     pub async fn rename_category_async(&self, id: Uuid, name: impl AsRef<str>) -> Result<()> {
-        sqlx::query("UPDATE categories SET name = ? WHERE id = ?")
-            .bind(name.as_ref())
+        let name = name.as_ref();
+        sqlx::query("UPDATE categories SET name = ?, slug = ? WHERE id = ?")
+            .bind(name)
+            .bind(normalize_category_slug(name))
             .bind(id.to_string())
             .execute(&self.pool)
             .await
@@ -1261,6 +1263,32 @@ mod tests {
         assert!(delete_in_use_category.is_err());
 
         std::fs::remove_dir_all(&repo_dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_rename_category_updates_slug() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let todo = db
+            .get_category_by_slug("todo")?
+            .expect("todo category should exist");
+
+        db.rename_category(todo.id, "Code Review")?;
+
+        let categories = db.list_categories()?;
+        let renamed = categories
+            .iter()
+            .find(|category| category.id == todo.id)
+            .expect("renamed category should still exist");
+        assert_eq!(renamed.name, "Code Review");
+        assert_eq!(renamed.slug, "code-review");
+
+        let by_new_slug = db
+            .get_category_by_slug("code-review")?
+            .expect("updated slug should resolve category");
+        assert_eq!(by_new_slug.id, todo.id);
+        assert!(db.get_category_by_slug("todo")?.is_none());
+
         Ok(())
     }
 
