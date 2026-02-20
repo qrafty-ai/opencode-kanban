@@ -1326,4 +1326,110 @@ mod tests {
         let resolved = resolve_task_id_selector(&db, &short).expect("short id should resolve");
         assert_eq!(resolved, task.id);
     }
+
+    #[test]
+    fn test_render_text_table_empty() {
+        let result = render_text_table(&[], &[]);
+        assert!(result.contains("++"));
+    }
+
+    #[test]
+    fn test_render_text_table_basic() {
+        let headers = &["Name", "Value"];
+        let rows = &[
+            vec!["Alice".to_string(), "25".to_string()],
+            vec!["Bob".to_string(), "30".to_string()],
+        ];
+        let result = render_text_table(headers, rows);
+        assert!(result.contains("Name"));
+        assert!(result.contains("Value"));
+        assert!(result.contains("Alice"));
+        assert!(result.contains("Bob"));
+    }
+
+    #[test]
+    fn test_canonical_path_best_effort_valid() {
+        let temp_dir = std::env::temp_dir();
+        let result = canonical_path_best_effort(temp_dir.to_str().unwrap());
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_canonical_path_best_effort_invalid() {
+        let result = canonical_path_best_effort("/nonexistent/path/that/should/not/exist");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_error_constructors() {
+        let usage = usage_error("USAGE_ERR", "test message");
+        assert_eq!(usage.exit_code, 2);
+        assert_eq!(usage.code, "USAGE_ERR");
+        assert_eq!(usage.message, "test message");
+
+        let not_found = not_found_error("NOT_FOUND", "resource not found");
+        assert_eq!(not_found.exit_code, 3);
+        assert_eq!(not_found.code, "NOT_FOUND");
+        assert_eq!(not_found.message, "resource not found");
+
+        let runtime = runtime_error("database error");
+        assert_eq!(runtime.exit_code, 5);
+        assert_eq!(runtime.code, "RUNTIME_ERROR");
+        assert!(runtime.message.contains("database error"));
+    }
+
+    #[test]
+    fn test_category_json_format() {
+        let category = Category {
+            id: Uuid::new_v4(),
+            slug: "test-cat".to_string(),
+            name: "Test Category".to_string(),
+            position: 5,
+            color: Some("#FF0000".to_string()),
+            created_at: "2024-01-01".to_string(),
+        };
+
+        let json = category_json(&category);
+        assert_eq!(json["slug"], "test-cat");
+        assert_eq!(json["name"], "Test Category");
+        assert_eq!(json["position"], 5);
+        assert_eq!(json["color"], "#FF0000");
+    }
+
+    #[test]
+    fn test_category_json_no_color() {
+        let category = Category {
+            id: Uuid::new_v4(),
+            slug: "no-color".to_string(),
+            name: "No Color".to_string(),
+            position: 0,
+            color: None,
+            created_at: "now".to_string(),
+        };
+
+        let json = category_json(&category);
+        assert_eq!(json["color"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_resolve_default_category_id() {
+        let db = Database::open(":memory:").expect("db should open");
+        let result = resolve_default_category_id(&db);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_find_constraint_detail_found() {
+        let err = anyhow::anyhow!("UNIQUE constraint failed: tasks.repo_id, tasks.branch");
+        let detail = find_constraint_detail(&err, "UNIQUE constraint failed");
+        assert!(detail.is_some());
+        assert!(detail.unwrap().contains("tasks.repo_id"));
+    }
+
+    #[test]
+    fn test_find_constraint_detail_not_found() {
+        let err = anyhow::anyhow!("some random error");
+        let detail = find_constraint_detail(&err, "UNIQUE constraint failed");
+        assert!(detail.is_none());
+    }
 }

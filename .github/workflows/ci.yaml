@@ -21,6 +21,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+          components: llvm-tools-preview
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux
@@ -43,8 +44,20 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run unit tests
-        run: cargo test --lib
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+
+      - name: Run tests with coverage
+        run: cargo llvm-cov --lib --codecov --output-path codecov.json
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./codecov.json
+          flags: unittests
+          name: code-coverage
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   lint:
     name: Lint

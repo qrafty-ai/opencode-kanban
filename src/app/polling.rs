@@ -791,6 +791,67 @@ mod tests {
     }
 
     #[test]
+    fn test_is_descendant_of_session_direct_parent() {
+        let mut parent_map = HashMap::new();
+        parent_map.insert("child".to_string(), Some("parent".to_string()));
+        parent_map.insert("parent".to_string(), None);
+
+        assert!(is_descendant_of_session("child", "parent", &parent_map));
+    }
+
+    #[test]
+    fn test_is_descendant_of_session_grandparent() {
+        let mut parent_map = HashMap::new();
+        parent_map.insert("grandchild".to_string(), Some("child".to_string()));
+        parent_map.insert("child".to_string(), Some("parent".to_string()));
+        parent_map.insert("parent".to_string(), None);
+
+        assert!(is_descendant_of_session(
+            "grandchild",
+            "parent",
+            &parent_map
+        ));
+    }
+
+    #[test]
+    fn test_is_descendant_of_session_not_descendant() {
+        let mut parent_map = HashMap::new();
+        parent_map.insert("sibling".to_string(), Some("parent".to_string()));
+        parent_map.insert("other".to_string(), None);
+
+        assert!(!is_descendant_of_session("other", "parent", &parent_map));
+    }
+
+    #[test]
+    fn test_is_descendant_of_session_no_parent() {
+        let parent_map = HashMap::<String, Option<String>>::new();
+
+        assert!(!is_descendant_of_session("orphan", "parent", &parent_map));
+    }
+
+    #[test]
+    fn test_is_descendant_of_session_cycle_detection() {
+        let mut parent_map = HashMap::new();
+        parent_map.insert("a".to_string(), Some("b".to_string()));
+        parent_map.insert("b".to_string(), Some("a".to_string()));
+
+        assert!(!is_descendant_of_session("a", "ancestor", &parent_map));
+    }
+
+    #[test]
+    fn live_subagent_session_ids_empty_list() {
+        let ids = live_subagent_session_ids(&[], "root-1", None);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn live_subagent_session_ids_excludes_root() {
+        let statuses = vec![status_match("root-1", None)];
+        let ids = live_subagent_session_ids(&statuses, "root-1", None);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
     fn live_subagent_session_ids_only_include_running_descendants() {
         let statuses = vec![
             status_match("root-1", None),
