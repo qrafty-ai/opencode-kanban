@@ -18,32 +18,27 @@ A Rust terminal kanban board for managing Git worktrees and OpenCode tmux sessio
 - `opencode` installed and available on `PATH` (recommended for attach/resume workflows)
 
 ## Quickstart (2 minutes)
-
-1. Install:
-
-   ```bash
-   npm install -g @qrafty-ai/opencode-kanban
-   ```
-
-2. Verify runtime tools:
+1. Verify runtime tools:
 
    ```bash
-   opencode-kanban --version
    tmux -V
    opencode --version
    ```
 
-3. Start the app:
+2. Start the app:
 
    ```bash
-   opencode-kanban
+   npx @qrafty-ai/opencode-kanban
    ```
 
-4. In the UI:
+3. In the UI:
    - Press `n` to create a task
    - Press `Enter` on a task to attach
    - Press `?` for built-in help
    - Press `q` to quit
+4. In the attached tmux session:
+   - Press `<prefix>+O` for help overlay
+   - Press `<prefix>+K` to return to kanban session
 
 If you start outside tmux, `opencode-kanban` auto-creates or auto-attaches to a tmux session named `opencode-kanban`.
 
