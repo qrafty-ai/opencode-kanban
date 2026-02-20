@@ -189,3 +189,156 @@ fn convert_button(button: RealmMouseButton) -> CrosstermMouseButton {
         RealmMouseButton::Middle => CrosstermMouseButton::Middle,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_convert_key_code() {
+        assert_eq!(
+            convert_key_code(RealmKey::Backspace),
+            CrosstermKeyCode::Backspace
+        );
+        assert_eq!(convert_key_code(RealmKey::Enter), CrosstermKeyCode::Enter);
+        assert_eq!(convert_key_code(RealmKey::Left), CrosstermKeyCode::Left);
+        assert_eq!(convert_key_code(RealmKey::Right), CrosstermKeyCode::Right);
+        assert_eq!(convert_key_code(RealmKey::Up), CrosstermKeyCode::Up);
+        assert_eq!(convert_key_code(RealmKey::Down), CrosstermKeyCode::Down);
+        assert_eq!(convert_key_code(RealmKey::Home), CrosstermKeyCode::Home);
+        assert_eq!(convert_key_code(RealmKey::End), CrosstermKeyCode::End);
+        assert_eq!(convert_key_code(RealmKey::PageUp), CrosstermKeyCode::PageUp);
+        assert_eq!(
+            convert_key_code(RealmKey::PageDown),
+            CrosstermKeyCode::PageDown
+        );
+        assert_eq!(convert_key_code(RealmKey::Tab), CrosstermKeyCode::Tab);
+        assert_eq!(
+            convert_key_code(RealmKey::BackTab),
+            CrosstermKeyCode::BackTab
+        );
+        assert_eq!(convert_key_code(RealmKey::Delete), CrosstermKeyCode::Delete);
+        assert_eq!(convert_key_code(RealmKey::Insert), CrosstermKeyCode::Insert);
+        assert_eq!(
+            convert_key_code(RealmKey::Function(1)),
+            CrosstermKeyCode::F(1)
+        );
+        assert_eq!(
+            convert_key_code(RealmKey::Function(12)),
+            CrosstermKeyCode::F(12)
+        );
+        assert_eq!(
+            convert_key_code(RealmKey::Char('a')),
+            CrosstermKeyCode::Char('a')
+        );
+        assert_eq!(
+            convert_key_code(RealmKey::Char('Z')),
+            CrosstermKeyCode::Char('Z')
+        );
+        assert_eq!(convert_key_code(RealmKey::Esc), CrosstermKeyCode::Esc);
+    }
+
+    #[test]
+    fn test_convert_key_modifiers() {
+        let empty = RealmKeyModifiers::empty();
+        assert_eq!(convert_key_modifiers(empty), CrosstermKeyModifiers::empty());
+
+        let shift = RealmKeyModifiers::SHIFT;
+        assert!(convert_key_modifiers(shift).contains(CrosstermKeyModifiers::SHIFT));
+
+        let ctrl = RealmKeyModifiers::CONTROL;
+        assert!(convert_key_modifiers(ctrl).contains(CrosstermKeyModifiers::CONTROL));
+
+        let alt = RealmKeyModifiers::ALT;
+        assert!(convert_key_modifiers(alt).contains(CrosstermKeyModifiers::ALT));
+
+        let combined = RealmKeyModifiers::SHIFT | RealmKeyModifiers::CONTROL;
+        let converted = convert_key_modifiers(combined);
+        assert!(converted.contains(CrosstermKeyModifiers::SHIFT));
+        assert!(converted.contains(CrosstermKeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn test_convert_button() {
+        assert_eq!(
+            convert_button(RealmMouseButton::Left),
+            CrosstermMouseButton::Left
+        );
+        assert_eq!(
+            convert_button(RealmMouseButton::Right),
+            CrosstermMouseButton::Right
+        );
+        assert_eq!(
+            convert_button(RealmMouseButton::Middle),
+            CrosstermMouseButton::Middle
+        );
+    }
+
+    #[test]
+    fn test_convert_mouse_kind() {
+        assert_eq!(
+            convert_mouse_kind(RealmMouseEventKind::Down(RealmMouseButton::Left)),
+            CrosstermMouseEventKind::Down(CrosstermMouseButton::Left)
+        );
+        assert_eq!(
+            convert_mouse_kind(RealmMouseEventKind::Up(RealmMouseButton::Right)),
+            CrosstermMouseEventKind::Up(CrosstermMouseButton::Right)
+        );
+        assert_eq!(
+            convert_mouse_kind(RealmMouseEventKind::Drag(RealmMouseButton::Middle)),
+            CrosstermMouseEventKind::Drag(CrosstermMouseButton::Middle)
+        );
+        assert_eq!(
+            convert_mouse_kind(RealmMouseEventKind::Moved),
+            CrosstermMouseEventKind::Moved
+        );
+        assert_eq!(
+            convert_mouse_kind(RealmMouseEventKind::ScrollDown),
+            CrosstermMouseEventKind::ScrollDown
+        );
+        assert_eq!(
+            convert_mouse_kind(RealmMouseEventKind::ScrollUp),
+            CrosstermMouseEventKind::ScrollUp
+        );
+        assert_eq!(
+            convert_mouse_kind(RealmMouseEventKind::ScrollLeft),
+            CrosstermMouseEventKind::ScrollUp
+        );
+        assert_eq!(
+            convert_mouse_kind(RealmMouseEventKind::ScrollRight),
+            CrosstermMouseEventKind::ScrollDown
+        );
+    }
+
+    #[test]
+    fn test_convert_mouse_event() {
+        let realm_event = RealmMouseEvent {
+            kind: RealmMouseEventKind::Down(RealmMouseButton::Left),
+            column: 10,
+            row: 20,
+            modifiers: RealmKeyModifiers::empty(),
+        };
+        let crossterm_event = convert_mouse_event(realm_event);
+        assert_eq!(crossterm_event.column, 10);
+        assert_eq!(crossterm_event.row, 20);
+        assert!(matches!(
+            crossterm_event.kind,
+            CrosstermMouseEventKind::Down(CrosstermMouseButton::Left)
+        ));
+    }
+
+    #[test]
+    fn test_convert_key_event() {
+        let realm_key = RealmKeyEvent {
+            code: RealmKey::Char('a'),
+            modifiers: RealmKeyModifiers::CONTROL,
+        };
+        let crossterm_key = convert_key_event(realm_key);
+        assert_eq!(crossterm_key.code, CrosstermKeyCode::Char('a'));
+        assert!(
+            crossterm_key
+                .modifiers
+                .contains(CrosstermKeyModifiers::CONTROL)
+        );
+    }
+}

@@ -1049,6 +1049,7 @@ fn repo_default_base(repo: &Repo) -> String {
 mod tests {
     use super::*;
 
+    use crate::app::{CategoryInputMode, ErrorDialogState};
     use crossterm::event::KeyModifiers;
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -1280,6 +1281,332 @@ mod tests {
         assert!(suggestions.contains(&parent_entry));
         assert!(suggestions.contains(&tea_entry));
         assert!(!suggestions.contains(&cache_entry));
+        Ok(())
+    }
+
+    #[test]
+    fn test_handle_delete_task_dialog_key() {
+        let mut state = DeleteTaskDialogState {
+            task_id: Uuid::new_v4(),
+            task_title: "Test".to_string(),
+            task_branch: "feature/test".to_string(),
+            kill_tmux: false,
+            remove_worktree: false,
+            delete_branch: false,
+            focused_field: DeleteTaskField::Delete,
+        };
+        let mut follow_up = None;
+
+        handle_delete_task_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::ConfirmDeleteTask));
+
+        state.focused_field = DeleteTaskField::Cancel;
+        follow_up = None;
+        handle_delete_task_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::DismissDialog));
+    }
+
+    #[test]
+    fn test_handle_delete_category_dialog_key() {
+        let mut state = DeleteCategoryDialogState {
+            category_id: Uuid::new_v4(),
+            category_name: "Test".to_string(),
+            task_count: 0,
+            focused_field: ConfirmCancelField::Confirm,
+        };
+        let mut follow_up = None;
+
+        handle_delete_category_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::ConfirmDeleteCategory));
+    }
+
+    #[test]
+    fn test_handle_archive_task_dialog_key_confirm() {
+        let mut state = ArchiveTaskDialogState {
+            task_id: Uuid::new_v4(),
+            task_title: "Test".to_string(),
+            focused_field: ConfirmCancelField::Confirm,
+        };
+        let mut follow_up = None;
+
+        handle_archive_task_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::ConfirmArchiveTask));
+    }
+
+    #[test]
+    fn test_handle_archive_task_dialog_key_cancel() {
+        let mut state = ArchiveTaskDialogState {
+            task_id: Uuid::new_v4(),
+            task_title: "Test".to_string(),
+            focused_field: ConfirmCancelField::Cancel,
+        };
+        let mut follow_up = None;
+
+        handle_archive_task_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::DismissDialog));
+    }
+
+    #[test]
+    fn test_handle_confirm_quit_dialog_key() {
+        let mut state = ConfirmQuitDialogState {
+            active_session_count: 2,
+            focused_field: ConfirmCancelField::Confirm,
+        };
+        let mut follow_up = None;
+
+        handle_confirm_quit_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::ConfirmQuit));
+    }
+
+    #[test]
+    fn test_handle_confirm_cancel_dialog_key() {
+        let mut field = ConfirmCancelField::Confirm;
+        let mut follow_up = None;
+
+        handle_confirm_cancel_dialog_key(
+            &mut field,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+            Message::ConfirmDeleteProject,
+            Message::DismissDialog,
+            &mut follow_up,
+        );
+        assert_eq!(field, ConfirmCancelField::Cancel);
+
+        handle_confirm_cancel_dialog_key(
+            &mut field,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+            Message::ConfirmDeleteProject,
+            Message::DismissDialog,
+            &mut follow_up,
+        );
+        assert_eq!(field, ConfirmCancelField::Confirm);
+
+        handle_confirm_cancel_dialog_key(
+            &mut field,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            Message::ConfirmDeleteProject,
+            Message::DismissDialog,
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::ConfirmDeleteProject));
+    }
+
+    #[test]
+    fn test_handle_new_project_dialog_key() {
+        let _db = Database::open(":memory:").unwrap();
+        let mut state = NewProjectDialogState {
+            name_input: "test".to_string(),
+            focused_field: NewProjectField::Name,
+            error_message: None,
+        };
+        let mut follow_up = None;
+
+        handle_new_project_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::CreateProject));
+    }
+
+    #[test]
+    fn test_handle_rename_project_dialog_key() {
+        let mut state = RenameProjectDialogState {
+            name_input: "new-name".to_string(),
+            focused_field: RenameProjectField::Name,
+        };
+        let mut follow_up = None;
+
+        handle_rename_project_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::ConfirmRenameProject));
+
+        handle_rename_project_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::DismissDialog));
+    }
+
+    #[test]
+    fn test_handle_rename_repo_dialog_key() {
+        let mut state = RenameRepoDialogState {
+            repo_id: Uuid::new_v4(),
+            name_input: "new-repo-name".to_string(),
+            focused_field: RenameRepoField::Name,
+        };
+        let mut follow_up = None;
+
+        handle_rename_repo_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::ConfirmRenameRepo));
+
+        handle_rename_repo_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::DismissDialog));
+    }
+
+    #[test]
+    fn test_handle_worktree_not_found_dialog_key() {
+        let mut state = WorktreeNotFoundDialogState {
+            task_id: Uuid::new_v4(),
+            task_title: "Test".to_string(),
+            focused_field: WorktreeNotFoundField::Recreate,
+        };
+        let mut follow_up = None;
+
+        handle_worktree_not_found_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::WorktreeNotFoundRecreate));
+
+        state.focused_field = WorktreeNotFoundField::MarkBroken;
+        follow_up = None;
+        handle_worktree_not_found_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::WorktreeNotFoundMarkBroken));
+
+        state.focused_field = WorktreeNotFoundField::Cancel;
+        follow_up = None;
+        handle_worktree_not_found_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::DismissDialog));
+    }
+
+    #[test]
+    fn test_handle_category_input_dialog_key() {
+        let mut state = CategoryInputDialogState {
+            mode: CategoryInputMode::Add,
+            category_id: None,
+            name_input: "New Category".to_string(),
+            focused_field: CategoryInputField::Name,
+        };
+        let mut follow_up = None;
+
+        handle_category_input_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::SubmitCategoryInput));
+
+        handle_category_input_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::DismissDialog));
+    }
+
+    #[test]
+    fn test_handle_category_color_dialog_key() {
+        let mut state = CategoryColorDialogState {
+            category_id: Uuid::new_v4(),
+            category_name: "Test".to_string(),
+            selected_index: 0,
+            focused_field: CategoryColorField::Palette,
+        };
+        let mut follow_up = None;
+
+        handle_category_color_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(state.selected_index, 1);
+
+        handle_category_color_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(follow_up, Some(Message::ConfirmCategoryColor));
+    }
+
+    #[test]
+    fn test_handle_dialog_key_error_dialog() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let mut repos: Vec<Repo> = vec![];
+        let mut categories: Vec<Category> = vec![];
+        let mut dialog = ActiveDialog::Error(ErrorDialogState {
+            title: "Test".to_string(),
+            detail: "Details".to_string(),
+        });
+        let mut focused_column = 0;
+
+        let _result = handle_dialog_key(
+            &mut dialog,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &db,
+            repos.as_mut_slice(),
+            categories.as_mut_slice(),
+            &mut focused_column,
+        )?;
+
+        assert!(matches!(dialog, ActiveDialog::None));
+        Ok(())
+    }
+
+    #[test]
+    fn test_handle_dialog_key_help_dialog() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let mut repos: Vec<Repo> = vec![];
+        let mut categories: Vec<Category> = vec![];
+        let mut dialog = ActiveDialog::Help;
+        let mut focused_column = 0;
+
+        let _result = handle_dialog_key(
+            &mut dialog,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            &db,
+            repos.as_mut_slice(),
+            categories.as_mut_slice(),
+            &mut focused_column,
+        )?;
+
+        assert!(matches!(dialog, ActiveDialog::None));
         Ok(())
     }
 }

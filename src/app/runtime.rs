@@ -222,3 +222,144 @@ pub fn worktrees_root_for_repo(repo_path: &Path) -> PathBuf {
         })
         .join(".opencode-kanban-worktrees")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_next_available_session_name_by_reuse_existing_if_available() {
+        let existing_name = "my-session";
+        let result =
+            next_available_session_name_by(Some(existing_name), None, "repo", "branch", |_name| {
+                false
+            });
+        assert_eq!(result, existing_name);
+    }
+
+    #[test]
+    fn test_next_available_session_name_by_existing_taken_generates_new() {
+        let result =
+            next_available_session_name_by(Some("taken"), Some("proj"), "myrepo", "main", |name| {
+                name == "taken" || name == "ok-proj-myrepo-main"
+            });
+        assert_eq!(result, "ok-proj-myrepo-main-2");
+    }
+
+    #[test]
+    fn test_next_available_session_name_by_base_available() {
+        let result =
+            next_available_session_name_by(None, Some("proj"), "myrepo", "feature/test", |_name| {
+                false
+            });
+        assert_eq!(result, "ok-proj-myrepo-feature-test");
+    }
+
+    #[test]
+    fn test_next_available_session_name_by_finds_first_available_suffix() {
+        let taken = vec![
+            "ok-proj-repo-main",
+            "ok-proj-repo-main-2",
+            "ok-proj-repo-main-3",
+        ];
+        let result = next_available_session_name_by(None, Some("proj"), "repo", "main", |name| {
+            taken.contains(&name)
+        });
+        assert_eq!(result, "ok-proj-repo-main-4");
+    }
+
+    #[test]
+    fn test_next_available_session_name_by_no_project_slug() {
+        let result = next_available_session_name_by(None, None, "myrepo", "main", |_name| false);
+        assert_eq!(result, "ok-myrepo-main");
+    }
+
+    #[test]
+    fn test_next_available_session_name_by_no_project_slug_taken() {
+        let taken = vec!["ok-myrepo-main", "ok-myrepo-main-2"];
+        let result = next_available_session_name_by(None, None, "myrepo", "main", |name| {
+            taken.contains(&name)
+        });
+        assert_eq!(result, "ok-myrepo-main-3");
+    }
+
+    #[test]
+    fn test_worktrees_root_for_repo_uses_home_dir() {
+        let repo_path = Path::new("/some/path/to/repo");
+        let result = worktrees_root_for_repo(repo_path);
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result, home.join(".opencode-kanban-worktrees"));
+    }
+
+    struct MockRecoveryRuntime {
+        session_exists_fn: Box<dyn Fn(&str) -> bool + Send + Sync>,
+    }
+
+    impl MockRecoveryRuntime {
+        fn new<F>(f: F) -> Self
+        where
+            F: Fn(&str) -> bool + Send + Sync + 'static,
+        {
+            Self {
+                session_exists_fn: Box::new(f),
+            }
+        }
+    }
+
+    impl RecoveryRuntime for MockRecoveryRuntime {
+        fn repo_exists(&self, _path: &Path) -> bool {
+            true
+        }
+
+        fn worktree_exists(&self, _worktree_path: &Path) -> bool {
+            true
+        }
+
+        fn session_exists(&self, session_name: &str) -> bool {
+            (self.session_exists_fn)(session_name)
+        }
+
+        fn create_session(
+            &self,
+            _session_name: &str,
+            _working_dir: &Path,
+            _command: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn switch_client(
+            &self,
+            _session_name: &str,
+            _reopen_lines: &[String],
+            _style: &PopupThemeStyle,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn show_attach_popup(&self, _lines: &[String], _style: &PopupThemeStyle) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_next_available_session_name_with_runtime() {
+        let runtime = MockRecoveryRuntime::new(|name| name == "existing-session");
+        let result = next_available_session_name(
+            Some("existing-session"),
+            Some("proj"),
+            "repo",
+            "main",
+            &runtime,
+        );
+        assert_eq!(result, "ok-proj-repo-main");
+    }
+
+    #[test]
+    fn test_next_available_session_name_with_runtime_reuses_existing() {
+        let runtime = MockRecoveryRuntime::new(|_name| false);
+        let result =
+            next_available_session_name(Some("my-session"), Some("proj"), "repo", "main", &runtime);
+        assert_eq!(result, "my-session");
+    }
+}
