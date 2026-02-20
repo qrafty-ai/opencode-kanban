@@ -35,9 +35,9 @@ pub use self::state::{
     DeleteTaskDialogState, DeleteTaskField, DetailFocus, ErrorDialogState, MoveTaskDialogState,
     NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
     RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
-    RepoPickerDialogState, RepoSuggestionItem, RepoSuggestionKind, RepoUnavailableDialogState,
-    SettingsSection, SettingsViewState, TodoVisualizationMode, View, ViewMode,
-    WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
+    RepoPickerDialogState, RepoPickerTarget, RepoSuggestionItem, RepoSuggestionKind,
+    RepoUnavailableDialogState, SettingsSection, SettingsViewState, TodoVisualizationMode, View,
+    ViewMode, WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
     normalize_category_color_key,
 };
 
@@ -633,12 +633,14 @@ impl App {
                     repo_idx: preferred_repo_idx,
                     repo_input: String::new(),
                     repo_picker: None,
+                    use_existing_directory: false,
+                    existing_dir_input: String::new(),
                     branch_input: String::new(),
                     base_input: default_base,
                     title_input: String::new(),
                     ensure_base_up_to_date: true,
                     loading_message: None,
-                    focused_field: NewTaskField::Repo,
+                    focused_field: NewTaskField::UseExistingDirectory,
                 });
             }
             Message::OpenCommandPalette => {
@@ -1237,6 +1239,18 @@ impl App {
                     state.ensure_base_up_to_date = !state.ensure_base_up_to_date;
                 }
             }
+            Message::ToggleNewTaskExistingDirectory => {
+                if let ActiveDialog::NewTask(state) = &mut self.active_dialog {
+                    state.focused_field = NewTaskField::UseExistingDirectory;
+                    state.use_existing_directory = !state.use_existing_directory;
+                }
+            }
+            Message::SetNewTaskUseExistingDirectory(enabled) => {
+                if let ActiveDialog::NewTask(state) = &mut self.active_dialog {
+                    state.focused_field = NewTaskField::UseExistingDirectory;
+                    state.use_existing_directory = enabled;
+                }
+            }
             Message::FocusCategoryInputField(field) => {
                 if let ActiveDialog::CategoryInput(state) = &mut self.active_dialog {
                     state.focused_field = field;
@@ -1250,11 +1264,15 @@ impl App {
             Message::FocusDeleteTaskField(field) => {
                 if let ActiveDialog::DeleteTask(state) = &mut self.active_dialog {
                     state.focused_field = field;
+                    if field != DeleteTaskField::Delete {
+                        state.confirm_destructive = false;
+                    }
                 }
             }
             Message::ToggleDeleteTaskCheckbox(field) => {
                 if let ActiveDialog::DeleteTask(state) = &mut self.active_dialog {
                     state.focused_field = field;
+                    state.confirm_destructive = false;
                     match field {
                         DeleteTaskField::KillTmux => state.kill_tmux = !state.kill_tmux,
                         DeleteTaskField::RemoveWorktree => {
@@ -2490,8 +2508,9 @@ impl App {
             task_title: task.title.clone(),
             task_branch: task.branch.clone(),
             kill_tmux: true,
-            remove_worktree: true,
+            remove_worktree: false,
             delete_branch: false,
+            confirm_destructive: false,
             focused_field: DeleteTaskField::Cancel,
         });
         Ok(())
@@ -2581,9 +2600,17 @@ impl App {
     }
 
     fn confirm_delete_task(&mut self) -> Result<()> {
-        let ActiveDialog::DeleteTask(state) = self.active_dialog.clone() else {
+        let ActiveDialog::DeleteTask(mut state) = self.active_dialog.clone() else {
             return Ok(());
         };
+
+        let destructive_cleanup_requested = state.remove_worktree || state.delete_branch;
+        if destructive_cleanup_requested && !state.confirm_destructive {
+            state.confirm_destructive = true;
+            state.focused_field = DeleteTaskField::Delete;
+            self.active_dialog = ActiveDialog::DeleteTask(state);
+            return Ok(());
+        }
 
         let task = self
             .tasks
@@ -2761,7 +2788,11 @@ impl App {
             return Ok(());
         };
 
-        dialog_state.loading_message = Some("Fetching git refs and creating task...".to_string());
+        dialog_state.loading_message = Some(if dialog_state.use_existing_directory {
+            "Creating task from existing directory...".to_string()
+        } else {
+            "Fetching git refs and creating task...".to_string()
+        });
         self.active_dialog = ActiveDialog::NewTask(dialog_state.clone());
 
         let todo_category = self
@@ -3291,54 +3322,125 @@ fn create_task_pipeline_with_runtime(
     runtime: &impl CreateTaskRuntime,
 ) -> Result<CreateTaskOutcome> {
     let mut warning = None;
-    let repo = resolve_repo_for_creation(db, repos, state, runtime)?;
-    let repo_path = PathBuf::from(&repo.path);
+    let (repo, branch, repo_path, worktree_path, remove_worktree_on_failure) = if state
+        .use_existing_directory
+    {
+        let existing_dir_input = state.existing_dir_input.trim();
+        if existing_dir_input.is_empty() {
+            anyhow::bail!("existing directory cannot be empty");
+        }
 
-    let branch = state.branch_input.trim();
-    if branch.is_empty() {
-        anyhow::bail!("branch cannot be empty");
-    }
-    runtime
-        .git_validate_branch(&repo_path, branch)
-        .context("branch validation failed")?;
+        let existing_dir_path = PathBuf::from(existing_dir_input);
+        if !existing_dir_path.exists() {
+            anyhow::bail!(
+                "existing directory does not exist: {}",
+                existing_dir_path.display()
+            );
+        }
+        if !existing_dir_path.is_dir() {
+            anyhow::bail!(
+                "existing directory is not a folder: {}",
+                existing_dir_path.display()
+            );
+        }
+        if !runtime.git_is_valid_repo(&existing_dir_path) {
+            anyhow::bail!(
+                "existing directory is not a git repository: {}",
+                existing_dir_path.display()
+            );
+        }
 
-    let base_ref = if state.base_input.trim().is_empty() {
-        runtime.git_detect_default_branch(&repo_path)
-    } else {
-        state.base_input.trim().to_string()
-    };
+        let canonical = fs::canonicalize(&existing_dir_path).with_context(|| {
+            format!(
+                "failed to canonicalize existing directory {}",
+                existing_dir_path.display()
+            )
+        })?;
 
-    if let Err(err) = runtime.git_fetch(&repo_path) {
-        let message = format!("fetch from origin failed, continuing offline: {err:#}");
-        tracing::warn!("{message}");
-        warning = Some(message);
-    }
+        let repo_root = runtime
+            .git_resolve_repo_root(&canonical)
+            .context("failed to resolve repository root for existing directory")?;
+        let canonical_repo_root = fs::canonicalize(&repo_root).with_context(|| {
+            format!(
+                "failed to canonicalize repository root {}",
+                repo_root.display()
+            )
+        })?;
+        let repo = resolve_repo_for_existing_directory(db, repos, &canonical_repo_root)?;
 
-    if state.ensure_base_up_to_date {
-        runtime
-            .git_check_branch_up_to_date(&repo_path, &base_ref)
-            .context("base branch check failed")?;
-    }
+        let branch = runtime
+            .git_current_branch(&canonical)
+            .context("failed to detect branch from existing directory")?;
+        if branch.trim().is_empty() {
+            anyhow::bail!("existing directory is in detached HEAD state; switch to a branch first");
+        }
 
-    let worktrees_root = worktrees_root_for_repo(&repo_path);
-    fs::create_dir_all(&worktrees_root).with_context(|| {
-        format!(
-            "failed to create worktree root {}",
-            worktrees_root.display()
+        (
+            repo,
+            branch.trim().to_string(),
+            canonical_repo_root,
+            canonical,
+            false,
         )
-    })?;
-    let worktree_path = derive_worktree_path(&worktrees_root, &repo_path, branch);
+    } else {
+        let repo = resolve_repo_for_creation(db, repos, state, runtime)?;
+        let repo_path = PathBuf::from(&repo.path);
 
-    runtime
-        .git_create_worktree(&repo_path, &worktree_path, branch, &base_ref)
-        .context("worktree creation failed")?;
+        let branch = state.branch_input.trim();
+        if branch.is_empty() {
+            anyhow::bail!("branch cannot be empty");
+        }
+        runtime
+            .git_validate_branch(&repo_path, branch)
+            .context("branch validation failed")?;
+
+        let base_ref = if state.base_input.trim().is_empty() {
+            runtime.git_detect_default_branch(&repo_path)
+        } else {
+            state.base_input.trim().to_string()
+        };
+
+        if let Err(err) = runtime.git_fetch(&repo_path) {
+            let message = format!("fetch from origin failed, continuing offline: {err:#}");
+            tracing::warn!("{message}");
+            warning = Some(message);
+        }
+
+        if state.ensure_base_up_to_date {
+            runtime
+                .git_check_branch_up_to_date(&repo_path, &base_ref)
+                .context("base branch check failed")?;
+        }
+
+        let worktrees_root = worktrees_root_for_repo(&repo_path);
+        fs::create_dir_all(&worktrees_root).with_context(|| {
+            format!(
+                "failed to create worktree root {}",
+                worktrees_root.display()
+            )
+        })?;
+        let derived_worktree_path = derive_worktree_path(&worktrees_root, &repo_path, branch);
+
+        runtime
+            .git_create_worktree(&repo_path, &derived_worktree_path, branch, &base_ref)
+            .context("worktree creation failed")?;
+
+        (
+            repo,
+            branch.to_string(),
+            repo_path,
+            derived_worktree_path,
+            true,
+        )
+    };
 
     let mut created_session_name: Option<String> = None;
     let mut created_task_id: Option<Uuid> = None;
+    let branch_name = branch.clone();
 
     let mut operation = || -> Result<()> {
         let session_name =
-            next_available_session_name_by(None, project_slug, &repo.name, branch, |name| {
+            next_available_session_name_by(None, project_slug, &repo.name, &branch_name, |name| {
                 runtime.tmux_session_exists(name)
             });
 
@@ -3350,7 +3452,12 @@ fn create_task_pipeline_with_runtime(
         created_session_name = Some(session_name.clone());
 
         let task = db
-            .add_task(repo.id, branch, state.title_input.trim(), todo_category_id)
+            .add_task(
+                repo.id,
+                &branch_name,
+                state.title_input.trim(),
+                todo_category_id,
+            )
             .context("failed to save task")?;
         created_task_id = Some(task.id);
 
@@ -3381,7 +3488,9 @@ fn create_task_pipeline_with_runtime(
         if let Some(session_name) = created_session_name {
             let _ = runtime.tmux_kill_session(&session_name);
         }
-        let _ = runtime.git_remove_worktree(&repo_path, &worktree_path);
+        if remove_worktree_on_failure {
+            let _ = runtime.git_remove_worktree(&repo_path, &worktree_path);
+        }
         return Err(err);
     }
 
@@ -3435,6 +3544,26 @@ fn resolve_repo_for_creation(
         .get(state.repo_idx)
         .cloned()
         .context("select a repo or enter a repository path")
+}
+
+fn resolve_repo_for_existing_directory(
+    db: &Database,
+    repos: &mut Vec<Repo>,
+    repo_root: &Path,
+) -> Result<Repo> {
+    if let Some(existing) = repos
+        .iter()
+        .find(|repo| Path::new(&repo.path) == repo_root)
+        .cloned()
+    {
+        return Ok(existing);
+    }
+
+    let repo = db
+        .add_repo(repo_root)
+        .with_context(|| format!("failed to save repo {}", repo_root.display()))?;
+    repos.push(repo.clone());
+    Ok(repo)
 }
 
 fn repo_selection_command_id(repo_id: Uuid) -> String {
@@ -3800,6 +3929,8 @@ mod tests {
             repo_idx: 0,
             repo_input: "backend".to_string(),
             repo_picker: None,
+            use_existing_directory: false,
+            existing_dir_input: String::new(),
             branch_input: String::new(),
             base_input: String::new(),
             title_input: String::new(),
@@ -4319,6 +4450,75 @@ mod tests {
     }
 
     #[test]
+    fn mouse_click_toggles_delete_task_checkbox() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        app.update(Message::OpenDeleteTaskDialog)?;
+
+        app.interaction_map.register_click(
+            InteractionLayer::Dialog,
+            Rect::new(12, 12, 10, 3),
+            Message::ToggleDeleteTaskCheckbox(DeleteTaskField::KillTmux),
+        );
+
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 15, 13))?;
+
+        match &app.active_dialog {
+            ActiveDialog::DeleteTask(state) => {
+                assert_eq!(state.focused_field, DeleteTaskField::KillTmux);
+                assert!(!state.kill_tmux);
+            }
+            other => panic!("expected DeleteTask dialog, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_task_dialog_defaults_to_kill_tmux_only() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        app.update(Message::OpenDeleteTaskDialog)?;
+
+        match &app.active_dialog {
+            ActiveDialog::DeleteTask(state) => {
+                assert!(state.kill_tmux);
+                assert!(!state.remove_worktree);
+                assert!(!state.delete_branch);
+                assert!(!state.confirm_destructive);
+            }
+            other => panic!("expected DeleteTask dialog, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_task_requires_second_confirm_for_destructive_cleanup() -> Result<()> {
+        let (mut app, _repo_dir, task_id, _category_ids) = test_app_with_middle_task()?;
+        app.update(Message::OpenDeleteTaskDialog)?;
+        app.update(Message::ToggleDeleteTaskCheckbox(
+            DeleteTaskField::RemoveWorktree,
+        ))?;
+
+        app.update(Message::ConfirmDeleteTask)?;
+
+        match &app.active_dialog {
+            ActiveDialog::DeleteTask(state) => {
+                assert!(state.remove_worktree);
+                assert!(state.confirm_destructive);
+                assert_eq!(state.focused_field, DeleteTaskField::Delete);
+            }
+            other => panic!("expected DeleteTask dialog, got {other:?}"),
+        }
+        assert!(app.db.get_task(task_id).is_ok());
+
+        app.update(Message::ConfirmDeleteTask)?;
+
+        assert!(matches!(app.active_dialog, ActiveDialog::None));
+        assert!(app.db.get_task(task_id).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn side_panel_rows_are_grouped_by_sorted_category_position() {
         let todo_id = Uuid::new_v4();
         let doing_id = Uuid::new_v4();
@@ -4409,6 +4609,134 @@ mod tests {
             selected_task_from_side_panel_rows(&rows, 1).is_some(),
             "task row should resolve to selected task"
         );
+    }
+
+    #[test]
+    fn test_log_kind_label() {
+        assert_eq!(log_kind_label(Some("text")), "SAY");
+        assert_eq!(log_kind_label(None), "SAY");
+        assert_eq!(log_kind_label(Some("tool")), "TOOL");
+        assert_eq!(log_kind_label(Some("reasoning")), "THINK");
+        assert_eq!(log_kind_label(Some("step-start")), "STEP+");
+        assert_eq!(log_kind_label(Some("patch")), "PATCH");
+        assert_eq!(log_kind_label(Some("file")), "FILE");
+        assert_eq!(log_kind_label(Some("unknown")), "UNKNOWN");
+    }
+
+    #[test]
+    fn test_log_role_label() {
+        assert_eq!(log_role_label(Some("user")), "USER");
+        assert_eq!(log_role_label(Some("assistant")), "ASSISTANT");
+        assert_eq!(log_role_label(None), "UNKNOWN");
+        assert_eq!(log_role_label(Some("system")), "SYSTEM");
+    }
+
+    #[test]
+    fn test_log_time_label() {
+        assert_eq!(log_time_label(None), "--:--:--");
+        assert_eq!(log_time_label(Some("2024-01-15T10:30:00Z")), "10:30:00");
+        assert_eq!(log_time_label(Some("2024-01-15 10:30:00")), "10:30:00");
+        assert_eq!(log_time_label(Some("invalid")), "invalid");
+    }
+
+    #[test]
+    fn test_format_numeric_timestamp() {
+        assert!(format_numeric_timestamp("1705315800").is_some());
+        assert!(format_numeric_timestamp("1705315800.123").is_some());
+        assert!(format_numeric_timestamp("invalid").is_none());
+        assert!(format_numeric_timestamp("").is_none());
+    }
+
+    #[test]
+    fn test_palette_index_for() {
+        assert_eq!(palette_index_for(None), 0);
+        assert_eq!(palette_index_for(Some("primary")), 1);
+        assert_eq!(palette_index_for(Some("secondary")), 2);
+        assert_eq!(palette_index_for(Some("tertiary")), 3);
+        assert_eq!(palette_index_for(Some("success")), 4);
+        assert_eq!(palette_index_for(Some("warning")), 5);
+        assert_eq!(palette_index_for(Some("danger")), 6);
+        assert_eq!(palette_index_for(Some("unknown")), 0);
+    }
+
+    #[test]
+    fn test_next_palette_color() {
+        assert_eq!(next_palette_color(None), Some("primary".to_string()));
+        assert_eq!(
+            next_palette_color(Some("primary")),
+            Some("secondary".to_string())
+        );
+        assert_eq!(next_palette_color(Some("danger")), None);
+    }
+
+    #[test]
+    fn test_sorted_categories_with_indexes() {
+        let cat_a = test_category(Uuid::new_v4(), "A", 0);
+        let cat_b = test_category(Uuid::new_v4(), "B", 1);
+        let cat_c = test_category(Uuid::new_v4(), "C", 2);
+        let categories = vec![cat_c.clone(), cat_a.clone(), cat_b.clone()];
+        let sorted = sorted_categories_with_indexes(&categories);
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(sorted[0].1.position, 0);
+        assert_eq!(sorted[1].1.position, 1);
+        assert_eq!(sorted[2].1.position, 2);
+    }
+
+    #[test]
+    fn test_default_view_mode() {
+        let kanban_settings = crate::settings::Settings {
+            default_view: "kanban".to_string(),
+            ..crate::settings::Settings::default()
+        };
+        assert_eq!(default_view_mode(&kanban_settings), ViewMode::Kanban);
+
+        let detail_settings = crate::settings::Settings {
+            default_view: "detail".to_string(),
+            ..crate::settings::Settings::default()
+        };
+        assert_eq!(default_view_mode(&detail_settings), ViewMode::SidePanel);
+
+        let unknown_settings = crate::settings::Settings {
+            default_view: "unknown".to_string(),
+            ..crate::settings::Settings::default()
+        };
+        assert_eq!(default_view_mode(&unknown_settings), ViewMode::Kanban);
+    }
+
+    #[test]
+    fn test_tmux_hex_color() {
+        use tuirealm::ratatui::style::Color;
+        assert_eq!(tmux_hex_color(Color::Rgb(255, 0, 0)), "#ff0000");
+        assert_eq!(tmux_hex_color(Color::Black), "#000000");
+        assert_eq!(tmux_hex_color(Color::White), "#ffffff");
+    }
+
+    #[test]
+    fn test_point_in_rect() {
+        use tuirealm::ratatui::layout::Rect;
+        let rect = Rect::new(10, 20, 30, 40);
+        assert!(point_in_rect(15, 25, rect));
+        assert!(point_in_rect(10, 20, rect));
+        assert!(!point_in_rect(5, 25, rect));
+        assert!(!point_in_rect(45, 25, rect));
+        assert!(!point_in_rect(15, 15, rect));
+        assert!(!point_in_rect(15, 65, rect));
+    }
+
+    #[test]
+    fn test_repo_selection_command_id() {
+        let id = Uuid::new_v4();
+        let cmd_id = repo_selection_command_id(id);
+        assert!(cmd_id.contains(&id.to_string()));
+    }
+
+    #[test]
+    fn test_repo_match_candidates() {
+        let repo = test_repo("my-project", "/work/company/my-project");
+        let candidates = repo_match_candidates(&repo);
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().any(|(s, _)| s == "my-project"));
+        assert!(candidates.iter().any(|(s, _)| s.contains("company")));
     }
 }
 
