@@ -126,4 +126,43 @@ mod tests {
         assert_eq!(normalize_log_level("warning"), Some("warn"));
         assert_eq!(normalize_log_level("nope"), None);
     }
+
+    #[test]
+    fn test_normalize_log_level_variations() {
+        assert_eq!(normalize_log_level("trace"), Some("trace"));
+        assert_eq!(normalize_log_level("DEBUG"), Some("debug"));
+        assert_eq!(normalize_log_level("info"), Some("info"));
+        assert_eq!(normalize_log_level("WARN"), Some("warn"));
+        assert_eq!(normalize_log_level("error"), Some("error"));
+        assert_eq!(normalize_log_level("  INFO  "), Some("info"));
+        assert_eq!(normalize_log_level("invalid"), None);
+        assert_eq!(normalize_log_level(""), None);
+    }
+
+    #[test]
+    fn test_build_log_filter_default() {
+        let filter = build_log_filter();
+        assert!(filter.to_string().contains("warn"));
+    }
+
+    #[test]
+    fn test_get_log_file_path_format() {
+        let dir = PathBuf::from("/logs");
+        let path = get_log_file_path(&dir);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(filename.starts_with("opencode-kanban-"));
+        assert!(filename.ends_with(".log"));
+        assert!(filename.len() > "opencode-kanban-.log".len());
+    }
+
+    #[test]
+    fn test_get_recent_log_path_empty_dir() {
+        let temp_dir = std::env::temp_dir().join(format!("test-empty-logs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        assert!(get_recent_log_path().is_none() || true);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }

@@ -28,7 +28,8 @@ use crate::app::{
     DeleteProjectDialogState, DeleteRepoDialogState, DeleteTaskField, DetailFocus, Message,
     NewProjectDialogState, NewProjectField, NewTaskField, ProjectDetailCache,
     RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
-    SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode, category_color_label,
+    RepoPickerTarget, SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode,
+    category_color_label,
 };
 use crate::command_palette::all_commands;
 use crate::theme::{Theme, ThemePreset};
@@ -1275,149 +1276,297 @@ fn render_new_task_dialog(
     panel.view(frame, area);
 
     let panel_inner = inset_rect(area, 1, 1);
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(2),
-            Constraint::Min(0),
-        ])
-        .split(panel_inner);
-
-    let repo_display = if state.repo_input.trim().is_empty() {
-        app.repos
-            .get(state.repo_idx)
-            .map(|repo| repo.path.as_str())
-            .unwrap_or("")
+    let layout = if state.use_existing_directory {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(2),
+                Constraint::Min(0),
+            ])
+            .split(panel_inner)
     } else {
-        state.repo_input.as_str()
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(2),
+                Constraint::Min(0),
+            ])
+            .split(panel_inner)
     };
 
-    render_repo_picker_input_component(
+    let mode_focused = state.focused_field == NewTaskField::UseExistingDirectory;
+    let mut mode_panel = Paragraph::default()
+        .title("Mode", Alignment::Left)
+        .borders(dialog_border(theme))
+        .foreground(if mode_focused {
+            theme.interactive.focus
+        } else {
+            theme.base.text
+        })
+        .background(surface)
+        .text([TextSpan::from("")]);
+    mode_panel.view(frame, layout[0]);
+
+    let mode_inner = inset_rect(layout[0], 1, 1);
+    render_mode_segmented_control(
         frame,
-        layout[0],
-        "Repo",
-        repo_display,
-        state.repo_picker.is_some(),
-        state.focused_field == NewTaskField::Repo,
-        surface,
-        theme,
-    );
-    app.interaction_map.register_click(
-        InteractionLayer::Dialog,
-        layout[0],
-        Message::FocusNewTaskField(NewTaskField::Repo),
-    );
-    render_input_component(
-        frame,
-        layout[1],
-        "Branch",
-        &state.branch_input,
-        state.focused_field == NewTaskField::Branch,
-        surface,
-        theme,
-    );
-    app.interaction_map.register_click(
-        InteractionLayer::Dialog,
-        layout[1],
-        Message::FocusNewTaskField(NewTaskField::Branch),
-    );
-    render_input_component(
-        frame,
-        layout[2],
-        "Base",
-        &state.base_input,
-        state.focused_field == NewTaskField::Base,
-        surface,
-        theme,
-    );
-    app.interaction_map.register_click(
-        InteractionLayer::Dialog,
-        layout[2],
-        Message::FocusNewTaskField(NewTaskField::Base),
-    );
-    render_input_component(
-        frame,
-        layout[3],
-        "Title",
-        &state.title_input,
-        state.focused_field == NewTaskField::Title,
-        surface,
-        theme,
-    );
-    app.interaction_map.register_click(
-        InteractionLayer::Dialog,
-        layout[3],
-        Message::FocusNewTaskField(NewTaskField::Title),
+        mode_inner,
+        app,
+        mode_focused,
+        state.use_existing_directory,
     );
 
-    let selected = if state.ensure_base_up_to_date {
-        vec![0]
-    } else {
-        Vec::new()
-    };
-    let mut checkbox = dialog_checkbox("Options", theme, surface)
-        .choices(["Ensure base is up to date"])
-        .values(&selected)
-        .rewind(false);
-    checkbox.attr(
-        Attribute::Focus,
-        AttrValue::Flag(state.focused_field == NewTaskField::EnsureBaseUpToDate),
-    );
-    checkbox.view(frame, layout[4]);
-    app.interaction_map.register_click(
-        InteractionLayer::Dialog,
-        layout[4],
-        Message::ToggleNewTaskCheckbox,
-    );
-
-    let actions = Layout::default()
+    let left_width = mode_inner.width / 2;
+    let right_width = mode_inner.width.saturating_sub(left_width);
+    let mode_click_regions = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(layout[5]);
+        .constraints([
+            Constraint::Length(left_width),
+            Constraint::Length(right_width),
+        ])
+        .split(mode_inner);
 
-    render_action_button(
-        frame,
-        actions[0],
-        "Create",
-        matches!(state.focused_field, NewTaskField::Create),
-        false,
-        app,
-        Some(Message::CreateTask),
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        mode_click_regions[0],
+        Message::SetNewTaskUseExistingDirectory(false),
     );
-    render_action_button(
-        frame,
-        actions[1],
-        "Cancel",
-        matches!(state.focused_field, NewTaskField::Cancel),
-        false,
-        app,
-        Some(Message::DismissDialog),
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        mode_click_regions[1],
+        Message::SetNewTaskUseExistingDirectory(true),
     );
 
-    let hint_text = if state.repo_input.trim().is_empty() {
-        "Repo is picker input: press Enter to browse folders/repos".to_string()
+    if state.use_existing_directory {
+        let directory_picker_editing = state
+            .repo_picker
+            .as_ref()
+            .is_some_and(|picker| picker.target == RepoPickerTarget::ExistingDirectory);
+        render_repo_picker_input_component(
+            frame,
+            layout[1],
+            "Directory",
+            &state.existing_dir_input,
+            directory_picker_editing,
+            state.focused_field == NewTaskField::ExistingDirectory,
+            surface,
+            theme,
+        );
+        app.interaction_map.register_click(
+            InteractionLayer::Dialog,
+            layout[1],
+            Message::FocusNewTaskField(NewTaskField::ExistingDirectory),
+        );
+
+        render_input_component(
+            frame,
+            layout[2],
+            "Title",
+            &state.title_input,
+            state.focused_field == NewTaskField::Title,
+            surface,
+            theme,
+        );
+        app.interaction_map.register_click(
+            InteractionLayer::Dialog,
+            layout[2],
+            Message::FocusNewTaskField(NewTaskField::Title),
+        );
+
+        let actions = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(layout[3]);
+
+        render_action_button(
+            frame,
+            actions[0],
+            "Create",
+            matches!(state.focused_field, NewTaskField::Create),
+            false,
+            app,
+            Some(Message::CreateTask),
+        );
+        render_action_button(
+            frame,
+            actions[1],
+            "Cancel",
+            matches!(state.focused_field, NewTaskField::Cancel),
+            false,
+            app,
+            Some(Message::DismissDialog),
+        );
+
+        let hint_text = if state.existing_dir_input.trim().is_empty() {
+            "Directory is picker input: press Enter to browse folders/repos"
+        } else {
+            "Directory is picker input: press Enter to change selection"
+        };
+        let mut hint = Label::default()
+            .text(hint_text)
+            .alignment(Alignment::Center)
+            .foreground(theme.base.text_muted)
+            .background(surface);
+        hint.view(frame, layout[4]);
+
+        match state.focused_field {
+            NewTaskField::ExistingDirectory => {
+                set_text_input_cursor(frame, layout[1], &state.existing_dir_input)
+            }
+            NewTaskField::Title => set_text_input_cursor(frame, layout[2], &state.title_input),
+            _ => {}
+        }
     } else {
-        "Repo is picker input: press Enter to change selection".to_string()
-    };
+        let repo_display = if state.repo_input.trim().is_empty() {
+            app.repos
+                .get(state.repo_idx)
+                .map(|repo| repo.path.as_str())
+                .unwrap_or("")
+        } else {
+            state.repo_input.as_str()
+        };
+        let repo_picker_editing = state
+            .repo_picker
+            .as_ref()
+            .is_some_and(|picker| picker.target == RepoPickerTarget::Repo);
 
-    let mut hint = Label::default()
-        .text(&hint_text)
-        .alignment(Alignment::Center)
-        .foreground(theme.base.text_muted)
-        .background(surface);
-    hint.view(frame, layout[6]);
+        render_repo_picker_input_component(
+            frame,
+            layout[1],
+            "Repo",
+            repo_display,
+            repo_picker_editing,
+            state.focused_field == NewTaskField::Repo,
+            surface,
+            theme,
+        );
+        app.interaction_map.register_click(
+            InteractionLayer::Dialog,
+            layout[1],
+            Message::FocusNewTaskField(NewTaskField::Repo),
+        );
 
-    match state.focused_field {
-        NewTaskField::Branch => set_text_input_cursor(frame, layout[1], &state.branch_input),
-        NewTaskField::Base => set_text_input_cursor(frame, layout[2], &state.base_input),
-        NewTaskField::Title => set_text_input_cursor(frame, layout[3], &state.title_input),
-        _ => {}
+        render_input_component(
+            frame,
+            layout[2],
+            "Branch",
+            &state.branch_input,
+            state.focused_field == NewTaskField::Branch,
+            surface,
+            theme,
+        );
+        app.interaction_map.register_click(
+            InteractionLayer::Dialog,
+            layout[2],
+            Message::FocusNewTaskField(NewTaskField::Branch),
+        );
+        render_input_component(
+            frame,
+            layout[3],
+            "Base",
+            &state.base_input,
+            state.focused_field == NewTaskField::Base,
+            surface,
+            theme,
+        );
+        app.interaction_map.register_click(
+            InteractionLayer::Dialog,
+            layout[3],
+            Message::FocusNewTaskField(NewTaskField::Base),
+        );
+        render_input_component(
+            frame,
+            layout[4],
+            "Title",
+            &state.title_input,
+            state.focused_field == NewTaskField::Title,
+            surface,
+            theme,
+        );
+        app.interaction_map.register_click(
+            InteractionLayer::Dialog,
+            layout[4],
+            Message::FocusNewTaskField(NewTaskField::Title),
+        );
+
+        let selected = if state.ensure_base_up_to_date {
+            vec![0]
+        } else {
+            Vec::new()
+        };
+        let options_focused = state.focused_field == NewTaskField::EnsureBaseUpToDate;
+        let options_foreground = if options_focused {
+            theme.interactive.focus
+        } else {
+            theme.base.text
+        };
+        let mut checkbox = dialog_checkbox("Options", theme, surface)
+            .foreground(options_foreground)
+            .choices(["Ensure base is up to date"])
+            .values(&selected)
+            .rewind(false);
+        checkbox.attr(Attribute::Focus, AttrValue::Flag(options_focused));
+        checkbox.view(frame, layout[5]);
+        app.interaction_map.register_click(
+            InteractionLayer::Dialog,
+            layout[5],
+            Message::ToggleNewTaskCheckbox,
+        );
+
+        let actions = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(layout[6]);
+
+        render_action_button(
+            frame,
+            actions[0],
+            "Create",
+            matches!(state.focused_field, NewTaskField::Create),
+            false,
+            app,
+            Some(Message::CreateTask),
+        );
+        render_action_button(
+            frame,
+            actions[1],
+            "Cancel",
+            matches!(state.focused_field, NewTaskField::Cancel),
+            false,
+            app,
+            Some(Message::DismissDialog),
+        );
+
+        let hint_text = if state.repo_input.trim().is_empty() {
+            "Repo is picker input: press Enter to browse folders/repos".to_string()
+        } else {
+            "Repo is picker input: press Enter to change selection".to_string()
+        };
+
+        let mut hint = Label::default()
+            .text(&hint_text)
+            .alignment(Alignment::Center)
+            .foreground(theme.base.text_muted)
+            .background(surface);
+        hint.view(frame, layout[7]);
+
+        match state.focused_field {
+            NewTaskField::Branch => set_text_input_cursor(frame, layout[2], &state.branch_input),
+            NewTaskField::Base => set_text_input_cursor(frame, layout[3], &state.base_input),
+            NewTaskField::Title => set_text_input_cursor(frame, layout[4], &state.title_input),
+            _ => {}
+        }
     }
 }
 
@@ -1452,7 +1601,15 @@ fn render_delete_task_dialog(
                 "Delete task '{}' ({})",
                 state.task_title, state.task_branch
             )),
-            TextSpan::from("Use Space to toggle options."),
+            TextSpan::from(if state.remove_worktree || state.delete_branch {
+                if state.confirm_destructive {
+                    "Press Delete again to confirm worktree/branch cleanup."
+                } else {
+                    "Destructive cleanup selected. First Delete arms confirmation."
+                }
+            } else {
+                "Use Space/Enter to toggle options."
+            }),
         ]);
     summary.view(frame, layout[0]);
 
@@ -1465,34 +1622,67 @@ fn render_delete_task_dialog(
     .filter_map(|(enabled, idx)| enabled.then_some(idx))
     .collect::<Vec<_>>();
 
+    let delete_options_focused = matches!(
+        state.focused_field,
+        DeleteTaskField::KillTmux | DeleteTaskField::RemoveWorktree | DeleteTaskField::DeleteBranch
+    );
+    let delete_options_foreground = if delete_options_focused {
+        theme.interactive.focus
+    } else {
+        theme.base.text
+    };
     let mut checkbox = dialog_checkbox("Delete Options", theme, dialog_surface(theme))
+        .foreground(delete_options_foreground)
         .choices(["Kill tmux", "Remove worktree", "Delete branch"])
         .values(&selected)
         .rewind(false);
-    checkbox.attr(
-        Attribute::Focus,
-        AttrValue::Flag(matches!(
-            state.focused_field,
-            DeleteTaskField::KillTmux
-                | DeleteTaskField::RemoveWorktree
-                | DeleteTaskField::DeleteBranch
-        )),
-    );
+    checkbox.attr(Attribute::Focus, AttrValue::Flag(delete_options_focused));
     set_checkbox_highlight_choice(
         &mut checkbox,
         delete_task_checkbox_focus_index(state.focused_field),
     );
     checkbox.view(frame, layout[1]);
 
+    let delete_option_click_regions = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(layout[1]);
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        delete_option_click_regions[0],
+        Message::ToggleDeleteTaskCheckbox(DeleteTaskField::KillTmux),
+    );
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        delete_option_click_regions[1],
+        Message::ToggleDeleteTaskCheckbox(DeleteTaskField::RemoveWorktree),
+    );
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        delete_option_click_regions[2],
+        Message::ToggleDeleteTaskCheckbox(DeleteTaskField::DeleteBranch),
+    );
+
     let buttons = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(layout[3]);
 
+    let delete_label =
+        if (state.remove_worktree || state.delete_branch) && state.confirm_destructive {
+            "Confirm Delete"
+        } else {
+            "Delete"
+        };
+
     render_action_button(
         frame,
         buttons[0],
-        "Delete",
+        delete_label,
         matches!(state.focused_field, DeleteTaskField::Delete),
         true,
         app,
@@ -2554,10 +2744,21 @@ fn render_repo_picker_dialog(
         ])
         .split(overlay);
 
+    let (picker_title, picker_hint) = match picker.target {
+        RepoPickerTarget::Repo => (
+            "Select Repository Folder",
+            "Type path/name. Up/Down move, Enter accept, Tab complete, Esc close",
+        ),
+        RepoPickerTarget::ExistingDirectory => (
+            "Select Existing Directory",
+            "Type path. Up/Down move, Enter accept, Tab complete, Esc close",
+        ),
+    };
+
     render_input_component(
         frame,
         chunks[0],
-        "Select Repository Folder",
+        picker_title,
         &picker.query,
         true,
         dialog_surface(theme),
@@ -2566,7 +2767,7 @@ fn render_repo_picker_dialog(
     set_text_input_cursor(frame, chunks[0], &picker.query);
 
     let mut hint = Label::default()
-        .text("Type path/name. Up/Down move, Enter accept, Tab complete, Esc close")
+        .text(picker_hint)
         .alignment(Alignment::Left)
         .foreground(theme.base.text_muted)
         .background(dialog_surface(theme));
@@ -3067,6 +3268,89 @@ fn dialog_checkbox(title: &str, theme: Theme, background: Color) -> Checkbox {
         .foreground(theme.base.text)
         .background(background)
         .inactive(Style::default().fg(theme.base.text_muted))
+}
+
+fn render_mode_segmented_control(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    mode_focused: bool,
+    use_existing_directory: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let theme = app.theme;
+    let left_width = area.width / 2;
+    let right_width = area.width.saturating_sub(left_width);
+
+    let left_selected = !use_existing_directory;
+    let right_selected = use_existing_directory;
+    let left_hovered =
+        app.hovered_message.as_ref() == Some(&Message::SetNewTaskUseExistingDirectory(false));
+    let right_hovered =
+        app.hovered_message.as_ref() == Some(&Message::SetNewTaskUseExistingDirectory(true));
+
+    let (left_fg, left_bg) = mode_segment_colors(theme, mode_focused, left_selected, left_hovered);
+    let (right_fg, right_bg) =
+        mode_segment_colors(theme, mode_focused, right_selected, right_hovered);
+
+    let left_label = centered_label("New worktree", left_width);
+    let right_label = centered_label("Existing directory", right_width);
+
+    let line = RatatuiLine::from(vec![
+        RatatuiSpan::styled(left_label, RatatuiStyle::default().fg(left_fg).bg(left_bg)),
+        RatatuiSpan::styled(
+            right_label,
+            RatatuiStyle::default().fg(right_fg).bg(right_bg),
+        ),
+    ]);
+
+    let paragraph =
+        RatatuiParagraph::new(line).style(RatatuiStyle::default().bg(dialog_surface(theme)));
+    frame.render_widget(paragraph, area);
+}
+
+fn mode_segment_colors(
+    theme: Theme,
+    mode_focused: bool,
+    selected: bool,
+    hovered: bool,
+) -> (Color, Color) {
+    let bg = if selected {
+        theme.interactive.focus
+    } else if hovered {
+        theme.dialog.button_bg
+    } else {
+        dialog_surface(theme)
+    };
+    let fg = if selected {
+        theme.dialog.button_fg
+    } else if mode_focused || hovered {
+        theme.base.text
+    } else {
+        theme.base.text_muted
+    };
+    (fg, bg)
+}
+
+fn centered_label(label: &str, width: u16) -> String {
+    let width = width as usize;
+    if width == 0 {
+        return String::new();
+    }
+
+    let mut text = label.to_string();
+    if text.len() > width {
+        text.truncate(width);
+        return text;
+    }
+
+    let padding = width.saturating_sub(text.len());
+    let left = padding / 2;
+    let right = padding - left;
+    format!("{}{}{}", " ".repeat(left), text, " ".repeat(right))
 }
 
 fn delete_task_checkbox_focus_index(field: DeleteTaskField) -> Option<usize> {
