@@ -4410,6 +4410,134 @@ mod tests {
             "task row should resolve to selected task"
         );
     }
+
+    #[test]
+    fn test_log_kind_label() {
+        assert_eq!(log_kind_label(Some("text")), "SAY");
+        assert_eq!(log_kind_label(None), "SAY");
+        assert_eq!(log_kind_label(Some("tool")), "TOOL");
+        assert_eq!(log_kind_label(Some("reasoning")), "THINK");
+        assert_eq!(log_kind_label(Some("step-start")), "STEP+");
+        assert_eq!(log_kind_label(Some("patch")), "PATCH");
+        assert_eq!(log_kind_label(Some("file")), "FILE");
+        assert_eq!(log_kind_label(Some("unknown")), "UNKNOWN");
+    }
+
+    #[test]
+    fn test_log_role_label() {
+        assert_eq!(log_role_label(Some("user")), "USER");
+        assert_eq!(log_role_label(Some("assistant")), "ASSISTANT");
+        assert_eq!(log_role_label(None), "UNKNOWN");
+        assert_eq!(log_role_label(Some("system")), "SYSTEM");
+    }
+
+    #[test]
+    fn test_log_time_label() {
+        assert_eq!(log_time_label(None), "--:--:--");
+        assert_eq!(log_time_label(Some("2024-01-15T10:30:00Z")), "10:30:00");
+        assert_eq!(log_time_label(Some("2024-01-15 10:30:00")), "10:30:00");
+        assert_eq!(log_time_label(Some("invalid")), "invalid");
+    }
+
+    #[test]
+    fn test_format_numeric_timestamp() {
+        assert!(format_numeric_timestamp("1705315800").is_some());
+        assert!(format_numeric_timestamp("1705315800.123").is_some());
+        assert!(format_numeric_timestamp("invalid").is_none());
+        assert!(format_numeric_timestamp("").is_none());
+    }
+
+    #[test]
+    fn test_palette_index_for() {
+        assert_eq!(palette_index_for(None), 0);
+        assert_eq!(palette_index_for(Some("primary")), 1);
+        assert_eq!(palette_index_for(Some("secondary")), 2);
+        assert_eq!(palette_index_for(Some("tertiary")), 3);
+        assert_eq!(palette_index_for(Some("success")), 4);
+        assert_eq!(palette_index_for(Some("warning")), 5);
+        assert_eq!(palette_index_for(Some("danger")), 6);
+        assert_eq!(palette_index_for(Some("unknown")), 0);
+    }
+
+    #[test]
+    fn test_next_palette_color() {
+        assert_eq!(next_palette_color(None), Some("primary".to_string()));
+        assert_eq!(
+            next_palette_color(Some("primary")),
+            Some("secondary".to_string())
+        );
+        assert_eq!(next_palette_color(Some("danger")), None);
+    }
+
+    #[test]
+    fn test_sorted_categories_with_indexes() {
+        let cat_a = test_category(Uuid::new_v4(), "A", 0);
+        let cat_b = test_category(Uuid::new_v4(), "B", 1);
+        let cat_c = test_category(Uuid::new_v4(), "C", 2);
+        let categories = vec![cat_c.clone(), cat_a.clone(), cat_b.clone()];
+        let sorted = sorted_categories_with_indexes(&categories);
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(sorted[0].1.position, 0);
+        assert_eq!(sorted[1].1.position, 1);
+        assert_eq!(sorted[2].1.position, 2);
+    }
+
+    #[test]
+    fn test_default_view_mode() {
+        let kanban_settings = crate::settings::Settings {
+            default_view: "kanban".to_string(),
+            ..crate::settings::Settings::default()
+        };
+        assert_eq!(default_view_mode(&kanban_settings), ViewMode::Kanban);
+
+        let detail_settings = crate::settings::Settings {
+            default_view: "detail".to_string(),
+            ..crate::settings::Settings::default()
+        };
+        assert_eq!(default_view_mode(&detail_settings), ViewMode::SidePanel);
+
+        let unknown_settings = crate::settings::Settings {
+            default_view: "unknown".to_string(),
+            ..crate::settings::Settings::default()
+        };
+        assert_eq!(default_view_mode(&unknown_settings), ViewMode::Kanban);
+    }
+
+    #[test]
+    fn test_tmux_hex_color() {
+        use tuirealm::ratatui::style::Color;
+        assert_eq!(tmux_hex_color(Color::Rgb(255, 0, 0)), "#ff0000");
+        assert_eq!(tmux_hex_color(Color::Black), "#000000");
+        assert_eq!(tmux_hex_color(Color::White), "#ffffff");
+    }
+
+    #[test]
+    fn test_point_in_rect() {
+        use tuirealm::ratatui::layout::Rect;
+        let rect = Rect::new(10, 20, 30, 40);
+        assert!(point_in_rect(15, 25, rect));
+        assert!(point_in_rect(10, 20, rect));
+        assert!(!point_in_rect(5, 25, rect));
+        assert!(!point_in_rect(45, 25, rect));
+        assert!(!point_in_rect(15, 15, rect));
+        assert!(!point_in_rect(15, 65, rect));
+    }
+
+    #[test]
+    fn test_repo_selection_command_id() {
+        let id = Uuid::new_v4();
+        let cmd_id = repo_selection_command_id(id);
+        assert!(cmd_id.contains(&id.to_string()));
+    }
+
+    #[test]
+    fn test_repo_match_candidates() {
+        let repo = test_repo("my-project", "/work/company/my-project");
+        let candidates = repo_match_candidates(&repo);
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().any(|(s, _)| s == "my-project"));
+        assert!(candidates.iter().any(|(s, _)| s.contains("company")));
+    }
 }
 
 fn default_db_path() -> Result<PathBuf> {
