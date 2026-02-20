@@ -93,6 +93,8 @@ pub enum Message {
     ConfirmDeleteRepo,
     FocusNewTaskField(NewTaskField),
     ToggleNewTaskCheckbox,
+    ToggleNewTaskExistingDirectory,
+    SetNewTaskUseExistingDirectory(bool),
     FocusCategoryInputField(CategoryInputField),
     FocusNewProjectField(NewProjectField),
     FocusDeleteTaskField(DeleteTaskField),

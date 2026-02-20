@@ -65,6 +65,8 @@ impl RecoveryRuntime for RealRecoveryRuntime {
 /// Runtime trait for task creation operations
 pub trait CreateTaskRuntime {
     fn git_is_valid_repo(&self, path: &Path) -> bool;
+    fn git_resolve_repo_root(&self, path: &Path) -> Result<PathBuf>;
+    fn git_current_branch(&self, path: &Path) -> Result<String>;
     fn git_detect_default_branch(&self, repo_path: &Path) -> String;
     fn git_fetch(&self, repo_path: &Path) -> Result<()>;
     fn git_validate_branch(&self, repo_path: &Path, branch_name: &str) -> Result<()>;
@@ -93,6 +95,49 @@ pub struct RealCreateTaskRuntime;
 impl CreateTaskRuntime for RealCreateTaskRuntime {
     fn git_is_valid_repo(&self, path: &Path) -> bool {
         git_is_valid_repo(path)
+    }
+
+    fn git_resolve_repo_root(&self, path: &Path) -> Result<PathBuf> {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(path)
+            .output()
+            .with_context(|| format!("failed to resolve repo root in {}", path.display()))?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "failed to resolve repo root in {}\nstdout: {}\nstderr: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if raw.is_empty() {
+            anyhow::bail!("git returned empty repo root in {}", path.display());
+        }
+
+        Ok(PathBuf::from(raw))
+    }
+
+    fn git_current_branch(&self, path: &Path) -> Result<String> {
+        let output = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(path)
+            .output()
+            .with_context(|| format!("failed to detect current branch in {}", path.display()))?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "failed to detect current branch in {}\nstdout: {}\nstderr: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     fn git_detect_default_branch(&self, repo_path: &Path) -> String {

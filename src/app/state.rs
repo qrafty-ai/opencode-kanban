@@ -10,8 +10,10 @@ use crate::command_palette::CommandPaletteState;
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum NewTaskField {
     Repo,
+    UseExistingDirectory,
     Branch,
     Base,
+    ExistingDirectory,
     Title,
     EnsureBaseUpToDate,
     Create,
@@ -25,6 +27,12 @@ pub enum RepoSuggestionKind {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub enum RepoPickerTarget {
+    Repo,
+    ExistingDirectory,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RepoSuggestionItem {
     pub label: String,
     pub value: String,
@@ -33,6 +41,7 @@ pub struct RepoSuggestionItem {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RepoPickerDialogState {
+    pub target: RepoPickerTarget,
     pub query: String,
     pub selected_index: usize,
     pub suggestions: Vec<RepoSuggestionItem>,
@@ -43,6 +52,8 @@ pub struct NewTaskDialogState {
     pub repo_idx: usize,
     pub repo_input: String,
     pub repo_picker: Option<RepoPickerDialogState>,
+    pub use_existing_directory: bool,
+    pub existing_dir_input: String,
     pub branch_input: String,
     pub base_input: String,
     pub title_input: String,
@@ -139,6 +150,7 @@ pub struct DeleteTaskDialogState {
     pub kill_tmux: bool,
     pub remove_worktree: bool,
     pub delete_branch: bool,
+    pub confirm_destructive: bool,
     pub focused_field: DeleteTaskField,
 }
 

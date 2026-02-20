@@ -264,7 +264,7 @@ mod tests {
     use super::*;
     use crate::app::{
         CategoryInputDialogState, CategoryInputField, CategoryInputMode, ConfirmCancelField,
-        DeleteCategoryDialogState, DeleteTaskDialogState, DeleteTaskField, ErrorDialogState,
+        DeleteCategoryDialogState, DeleteTaskDialogState, DeleteTaskField,
     };
     use crate::db::Database;
     use std::path::PathBuf;
@@ -539,6 +539,7 @@ mod tests {
             kill_tmux: false,
             remove_worktree: false,
             delete_branch: false,
+            confirm_destructive: false,
             focused_field: DeleteTaskField::Delete,
         });
 
