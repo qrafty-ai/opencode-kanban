@@ -117,3 +117,157 @@ pub struct CommandFrequency {
     pub use_count: i64,
     pub last_used: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_state_as_str() {
+        assert_eq!(SessionState::Running.as_str(), "running");
+        assert_eq!(SessionState::Idle.as_str(), "idle");
+    }
+
+    #[test]
+    fn test_session_state_from_raw_status_running() {
+        assert_eq!(
+            SessionState::from_raw_status("running"),
+            SessionState::Running
+        );
+        assert_eq!(
+            SessionState::from_raw_status("  Running  "),
+            SessionState::Running
+        );
+        assert_eq!(
+            SessionState::from_raw_status("active"),
+            SessionState::Running
+        );
+        assert_eq!(
+            SessionState::from_raw_status("thinking"),
+            SessionState::Running
+        );
+        assert_eq!(
+            SessionState::from_raw_status("processing"),
+            SessionState::Running
+        );
+        assert_eq!(SessionState::from_raw_status("BUSY"), SessionState::Running);
+    }
+
+    #[test]
+    fn test_session_state_from_raw_status_idle() {
+        assert_eq!(SessionState::from_raw_status("idle"), SessionState::Idle);
+        assert_eq!(
+            SessionState::from_raw_status("  Idle  "),
+            SessionState::Idle
+        );
+        assert_eq!(
+            SessionState::from_raw_status("completed"),
+            SessionState::Idle
+        );
+        assert_eq!(SessionState::from_raw_status("stopped"), SessionState::Idle);
+        assert_eq!(SessionState::from_raw_status(""), SessionState::Idle);
+    }
+
+    #[test]
+    fn test_session_status_source_as_str() {
+        assert_eq!(SessionStatusSource::Server.as_str(), "server");
+        assert_eq!(SessionStatusSource::None.as_str(), "none");
+    }
+
+    #[test]
+    fn test_repo_struct_creation() {
+        let repo = Repo {
+            id: Uuid::new_v4(),
+            path: "/path/to/repo".to_string(),
+            name: "test-repo".to_string(),
+            default_base: Some("main".to_string()),
+            remote_url: Some("https://github.com/test/repo.git".to_string()),
+            created_at: "2024-01-01".to_string(),
+            updated_at: "2024-01-02".to_string(),
+        };
+        assert_eq!(repo.name, "test-repo");
+        assert_eq!(repo.path, "/path/to/repo");
+    }
+
+    #[test]
+    fn test_category_struct_creation() {
+        let category = Category {
+            id: Uuid::new_v4(),
+            slug: "todo".to_string(),
+            name: "To Do".to_string(),
+            position: 0,
+            color: Some("#FF0000".to_string()),
+            created_at: "2024-01-01".to_string(),
+        };
+        assert_eq!(category.slug, "todo");
+        assert_eq!(category.name, "To Do");
+    }
+
+    #[test]
+    fn test_task_struct_creation() {
+        let task = Task {
+            id: Uuid::new_v4(),
+            title: "Test Task".to_string(),
+            repo_id: Uuid::new_v4(),
+            branch: "feature/test".to_string(),
+            category_id: Uuid::new_v4(),
+            position: 0,
+            tmux_session_name: Some("session-1".to_string()),
+            worktree_path: Some("/path/to/worktree".to_string()),
+            tmux_status: "idle".to_string(),
+            status_source: "none".to_string(),
+            status_fetched_at: Some("2024-01-01".to_string()),
+            status_error: None,
+            opencode_session_id: Some("sess-123".to_string()),
+            archived: false,
+            archived_at: None,
+            created_at: "2024-01-01".to_string(),
+            updated_at: "2024-01-02".to_string(),
+        };
+        assert_eq!(task.title, "Test Task");
+        assert!(!task.archived);
+    }
+
+    #[test]
+    fn test_session_todo_item_struct() {
+        let item = SessionTodoItem {
+            content: "Test todo".to_string(),
+            completed: true,
+        };
+        assert_eq!(item.content, "Test todo");
+        assert!(item.completed);
+    }
+
+    #[test]
+    fn test_session_message_item_struct() {
+        let item = SessionMessageItem {
+            message_type: Some("text".to_string()),
+            role: Some("user".to_string()),
+            content: "Hello".to_string(),
+            timestamp: Some("2024-01-01".to_string()),
+        };
+        assert_eq!(item.content, "Hello");
+        assert_eq!(item.role, Some("user".to_string()));
+    }
+
+    #[test]
+    fn test_session_status_error_struct() {
+        let error = SessionStatusError {
+            code: "404".to_string(),
+            message: "Not found".to_string(),
+        };
+        assert_eq!(error.code, "404");
+        assert_eq!(error.message, "Not found");
+    }
+
+    #[test]
+    fn test_command_frequency_struct() {
+        let freq = CommandFrequency {
+            command_id: "cmd-1".to_string(),
+            use_count: 42,
+            last_used: "2024-01-01".to_string(),
+        };
+        assert_eq!(freq.command_id, "cmd-1");
+        assert_eq!(freq.use_count, 42);
+    }
+}
