@@ -3147,6 +3147,14 @@ fn attach_task_with_runtime(
         let popup_style = popup_style_from_theme(theme);
         let popup_lines = build_attach_popup_lines(task, repo, session_name, task_todos);
         runtime.switch_client(session_name, &popup_lines, &popup_style)?;
+        if let Err(err) = runtime.show_attach_popup(&popup_lines, &popup_style) {
+            warn!(
+                error = %err,
+                task_id = %task.id,
+                session_name = %session_name,
+                "failed to show attach popup overlay"
+            );
+        }
         return Ok(AttachTaskResult::Attached);
     }
 
@@ -3594,6 +3602,7 @@ mod tests {
     use super::interaction::InteractionLayer;
     use super::*;
 
+    use std::cell::{Cell, RefCell};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
@@ -3676,6 +3685,75 @@ mod tests {
         }
     }
 
+    struct RecordingRecoveryRuntime {
+        repo_exists: bool,
+        worktree_exists: bool,
+        session_exists: bool,
+        create_session_calls: Cell<usize>,
+        switch_client_calls: Cell<usize>,
+        show_attach_popup_calls: Cell<usize>,
+        switched_session_names: RefCell<Vec<String>>,
+    }
+
+    impl RecordingRecoveryRuntime {
+        fn with_session_exists(session_exists: bool) -> Self {
+            Self {
+                repo_exists: true,
+                worktree_exists: true,
+                session_exists,
+                create_session_calls: Cell::new(0),
+                switch_client_calls: Cell::new(0),
+                show_attach_popup_calls: Cell::new(0),
+                switched_session_names: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl RecoveryRuntime for RecordingRecoveryRuntime {
+        fn repo_exists(&self, _path: &Path) -> bool {
+            self.repo_exists
+        }
+
+        fn worktree_exists(&self, _worktree_path: &Path) -> bool {
+            self.worktree_exists
+        }
+
+        fn session_exists(&self, _session_name: &str) -> bool {
+            self.session_exists
+        }
+
+        fn create_session(
+            &self,
+            _session_name: &str,
+            _working_dir: &Path,
+            _command: &str,
+        ) -> Result<()> {
+            self.create_session_calls
+                .set(self.create_session_calls.get() + 1);
+            Ok(())
+        }
+
+        fn switch_client(
+            &self,
+            session_name: &str,
+            _reopen_lines: &[String],
+            _style: &PopupThemeStyle,
+        ) -> Result<()> {
+            self.switch_client_calls
+                .set(self.switch_client_calls.get() + 1);
+            self.switched_session_names
+                .borrow_mut()
+                .push(session_name.to_string());
+            Ok(())
+        }
+
+        fn show_attach_popup(&self, _lines: &[String], _style: &PopupThemeStyle) -> Result<()> {
+            self.show_attach_popup_calls
+                .set(self.show_attach_popup_calls.get() + 1);
+            Ok(())
+        }
+    }
+
     #[test]
     fn build_attach_popup_lines_contains_task_context_and_navigation() {
         let mut task = test_task(Uuid::new_v4(), 0, "add popup overlay");
@@ -3714,6 +3792,28 @@ mod tests {
         assert!(lines.iter().any(|line| line == "[x] done"));
         assert!(lines.iter().any(|line| line == "[>] active"));
         assert!(lines.iter().any(|line| line == "[ ] pending"));
+    }
+
+    #[test]
+    fn attach_task_with_existing_session_shows_attach_popup_overlay() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let mut task = test_task(Uuid::new_v4(), 0, "existing-session");
+        task.tmux_session_name = Some("ok-existing-session".to_string());
+        let repo = test_repo("repo", "/tmp/repo");
+        let runtime = RecordingRecoveryRuntime::with_session_exists(true);
+        let result =
+            attach_task_with_runtime(&db, None, &task, &repo, &[], &Theme::default(), &runtime)?;
+
+        assert_eq!(result, AttachTaskResult::Attached);
+        assert_eq!(runtime.create_session_calls.get(), 0);
+        assert_eq!(runtime.switch_client_calls.get(), 1);
+        assert_eq!(runtime.show_attach_popup_calls.get(), 1);
+        assert_eq!(
+            runtime.switched_session_names.borrow().as_slice(),
+            ["ok-existing-session"]
+        );
+
+        Ok(())
     }
 
     #[test]
