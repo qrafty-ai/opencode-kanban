@@ -969,6 +969,7 @@ fn task_json(
         "status_fetched_at": task.status_fetched_at,
         "status_error": task.status_error,
         "opencode_session_id": task.opencode_session_id,
+        "attach_overlay_shown": task.attach_overlay_shown,
         "created_at": task.created_at,
         "updated_at": task.updated_at
     })
@@ -1265,6 +1266,7 @@ mod tests {
             status_fetched_at: None,
             status_error: None,
             opencode_session_id: None,
+            attach_overlay_shown: false,
             archived: false,
             archived_at: None,
             created_at: "now".to_string(),

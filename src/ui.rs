@@ -4251,6 +4251,7 @@ mod tests {
             status_fetched_at: None,
             status_error: None,
             opencode_session_id: None,
+            attach_overlay_shown: false,
             archived: false,
             archived_at: None,
             created_at: "now".to_string(),

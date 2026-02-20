@@ -39,6 +39,8 @@ pub struct Task {
     pub status_fetched_at: Option<String>,
     pub status_error: Option<String>,
     pub opencode_session_id: Option<String>,
+    #[serde(default)]
+    pub attach_overlay_shown: bool,
     pub archived: bool,
     pub archived_at: Option<String>,
     pub created_at: String,
