@@ -13,16 +13,18 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 use uuid::Uuid;
 
+use super::SubagentTodoSummary;
 use crate::db::Database;
 use crate::opencode::status_server::SessionStatusMatch;
 use crate::opencode::{ServerStatusProvider, Status};
-use crate::types::{SessionMessageItem, SessionStatusSource, SessionTodoItem};
+use crate::types::{SessionMessageItem, SessionState, SessionStatusSource, SessionTodoItem};
 
 /// Spawn a background task that polls task status from the OpenCode server
 pub fn spawn_status_poller(
     db_path: PathBuf,
     stop: Arc<AtomicBool>,
     session_todo_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionTodoItem>>>>,
+    session_subagent_cache: Arc<Mutex<HashMap<Uuid, Vec<SubagentTodoSummary>>>>,
     session_title_cache: Arc<Mutex<HashMap<String, String>>>,
     session_message_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionMessageItem>>>>,
     poll_interval_ms: u64,
@@ -65,18 +67,17 @@ pub fn spawn_status_poller(
                 }
             };
             let fetched_at = SystemTime::now();
-            let session_records = server_provider.list_all_session_records().await.ok();
-            let complete_session_parent_map = session_records.as_ref().map(|records| {
-                records
-                    .iter()
-                    .map(|record| (record.session_id.clone(), record.parent_session_id.clone()))
-                    .collect::<HashMap<_, _>>()
-            });
             let mut next_todo_cache: HashMap<Uuid, Vec<SessionTodoItem>> = session_todo_cache
                 .lock()
                 .ok()
                 .map(|cache| cache.clone())
                 .unwrap_or_default();
+            let mut next_subagent_cache: HashMap<Uuid, Vec<SubagentTodoSummary>> =
+                session_subagent_cache
+                    .lock()
+                    .ok()
+                    .map(|cache| cache.clone())
+                    .unwrap_or_default();
             let mut next_message_cache: HashMap<Uuid, Vec<SessionMessageItem>> =
                 session_message_cache
                     .lock()
@@ -88,14 +89,6 @@ pub fn spawn_status_poller(
                 .ok()
                 .map(|cache| cache.clone())
                 .unwrap_or_default();
-            if let Some(records) = session_records.as_ref() {
-                next_title_cache.clear();
-                for record in records {
-                    if let Some(title) = record.title.as_ref() {
-                        next_title_cache.insert(record.session_id.clone(), title.clone());
-                    }
-                }
-            }
 
             debug!(
                 poll_interval_ms,
@@ -107,6 +100,8 @@ pub fn spawn_status_poller(
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
+
+                next_subagent_cache.remove(&task.id);
 
                 let repo_available = repo_paths
                     .get(&task.repo_id)
@@ -132,17 +127,65 @@ pub fn spawn_status_poller(
                     if let Some(worktree_path) = task.worktree_path.as_deref() {
                         debug!("Fetching status for task {} at {}", task.id, worktree_path);
                         let mut bound_session_id = task.opencode_session_id.clone();
+                        let task_session_records = match server_provider
+                            .list_all_session_records(Some(worktree_path))
+                            .await
+                        {
+                            Ok(records) => {
+                                debug!(
+                                    task_id = %task.id,
+                                    worktree_path,
+                                    session_records = ?records,
+                                    "fetched session records for task directory"
+                                );
+                                Some(records)
+                            }
+                            Err(err) => {
+                                tracing::error!(
+                                    task_id = %task.id,
+                                    worktree_path,
+                                    "failed to fetch session records for task directory: {:?}",
+                                    err
+                                );
+                                None
+                            }
+                        };
+                        let complete_session_parent_map =
+                            task_session_records.as_ref().map(|records| {
+                                records
+                                    .iter()
+                                    .map(|record| {
+                                        (
+                                            record.session_id.clone(),
+                                            record.parent_session_id.clone(),
+                                        )
+                                    })
+                                    .collect::<HashMap<_, _>>()
+                            });
+                        if let Some(records) = task_session_records.as_ref() {
+                            for record in records {
+                                if let Some(title) = record.title.as_ref() {
+                                    next_title_cache
+                                        .insert(record.session_id.clone(), title.clone());
+                                }
+                            }
+                        }
 
                         match server_provider
                             .fetch_status_matches(fetched_at, Some(worktree_path))
                             .await
                         {
                             Ok(statuses) => {
-                                debug!("Got {} statuses for task {}", statuses.len(), task.id);
-                                if let Some(status_match) = select_status_match(
-                                    statuses,
+                                let selected_status_match = select_status_match(
+                                    statuses.clone(),
                                     complete_session_parent_map.as_ref(),
-                                ) {
+                                );
+                                let root_session_id = selected_status_match
+                                    .as_ref()
+                                    .map(|status_match| status_match.session_id.clone());
+
+                                debug!("Got {} statuses for task {}", statuses.len(), task.id);
+                                if let Some(status_match) = selected_status_match {
                                     debug!(
                                         "Task {} matched to session {} with status {:?}",
                                         task.id, status_match.session_id, status_match.status.state
@@ -214,6 +257,24 @@ pub fn spawn_status_poller(
                                                 Some(missing_error),
                                             )
                                             .await;
+                                    }
+                                }
+
+                                if let Some(root_id) = root_session_id.as_deref() {
+                                    let subagent_session_ids = live_subagent_session_ids(
+                                        &statuses,
+                                        root_id,
+                                        complete_session_parent_map.as_ref(),
+                                    );
+                                    let summaries = build_subagent_todo_summaries(
+                                        &server_provider,
+                                        task.id,
+                                        &subagent_session_ids,
+                                        &next_title_cache,
+                                    )
+                                    .await;
+                                    if !summaries.is_empty() {
+                                        next_subagent_cache.insert(task.id, summaries);
                                     }
                                 }
                             }
@@ -319,6 +380,11 @@ pub fn spawn_status_poller(
                 cache.extend(next_todo_cache);
             }
 
+            if let Ok(mut cache) = session_subagent_cache.lock() {
+                cache.clear();
+                cache.extend(next_subagent_cache);
+            }
+
             if let Ok(mut cache) = session_title_cache.lock() {
                 cache.clear();
                 cache.extend(next_title_cache);
@@ -337,6 +403,105 @@ pub fn spawn_status_poller(
             interruptible_sleep(Duration::from_millis(poll_interval_ms), &stop).await;
         }
     })
+}
+
+fn live_subagent_session_ids(
+    status_matches: &[SessionStatusMatch],
+    root_session_id: &str,
+    complete_parent_map: Option<&HashMap<String, Option<String>>>,
+) -> Vec<String> {
+    let mut parent_map: HashMap<String, Option<String>> = status_matches
+        .iter()
+        .map(|status_match| {
+            (
+                status_match.session_id.clone(),
+                status_match.parent_session_id.clone(),
+            )
+        })
+        .collect();
+    if let Some(complete_parent_map) = complete_parent_map {
+        for (session_id, parent_session_id) in complete_parent_map {
+            parent_map.insert(session_id.clone(), parent_session_id.clone());
+        }
+    }
+
+    let mut ids = status_matches
+        .iter()
+        .filter(|status_match| status_match.session_id != root_session_id)
+        .filter(|status_match| status_match.status.state == SessionState::Running)
+        .filter(|status_match| {
+            is_descendant_of_session(
+                status_match.session_id.as_str(),
+                root_session_id,
+                &parent_map,
+            )
+        })
+        .map(|status_match| status_match.session_id.clone())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn is_descendant_of_session(
+    session_id: &str,
+    ancestor_session_id: &str,
+    parent_map: &HashMap<String, Option<String>>,
+) -> bool {
+    let mut current = session_id.to_string();
+    let mut visited = HashSet::from([current.clone()]);
+
+    loop {
+        let Some(parent_id) = parent_map
+            .get(current.as_str())
+            .and_then(|parent| parent.as_ref())
+        else {
+            return false;
+        };
+
+        if parent_id == ancestor_session_id {
+            return true;
+        }
+        if !visited.insert(parent_id.clone()) {
+            return false;
+        }
+
+        current = parent_id.clone();
+    }
+}
+
+async fn build_subagent_todo_summaries(
+    server_provider: &ServerStatusProvider,
+    task_id: Uuid,
+    session_ids: &[String],
+    session_titles: &HashMap<String, String>,
+) -> Vec<SubagentTodoSummary> {
+    let mut summaries = Vec::new();
+    for session_id in session_ids {
+        let title = session_titles
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(|| "Untitled subagent".to_string());
+        let todo_summary = fetch_task_todos(server_provider, task_id, Some(session_id.as_str()))
+            .await
+            .and_then(|todos| {
+                if todos.is_empty() {
+                    None
+                } else {
+                    Some((
+                        todos.iter().filter(|todo| todo.completed).count(),
+                        todos.len(),
+                    ))
+                }
+            });
+
+        summaries.push(SubagentTodoSummary {
+            title,
+            todo_summary,
+        });
+    }
+
+    summaries
 }
 
 async fn fetch_task_todos(
@@ -419,73 +584,63 @@ fn select_status_match(
         .map(|m| (m.session_id.clone(), m))
         .collect();
 
-    let mut parent_map: HashMap<String, Option<String>> = status_matches
-        .iter()
-        .map(|m| (m.session_id.clone(), m.parent_session_id.clone()))
-        .collect();
+    let parent_map: HashMap<String, Option<String>> =
+        complete_parent_map.cloned().unwrap_or_else(|| {
+            status_matches
+                .iter()
+                .map(|m| (m.session_id.clone(), m.parent_session_id.clone()))
+                .collect()
+        });
 
-    if let Some(complete_parent_map) = complete_parent_map {
-        for (session_id, parent_session_id) in complete_parent_map {
-            match parent_map.get_mut(session_id) {
-                Some(existing_parent) => {
-                    if existing_parent.is_none()
-                        || (parent_session_id.is_some()
-                            && existing_parent.as_ref() != parent_session_id.as_ref())
-                    {
-                        *existing_parent = parent_session_id.clone();
-                    }
-                }
-                None => {
-                    parent_map.insert(session_id.clone(), parent_session_id.clone());
-                }
-            }
-        }
-    }
-
-    let mut selected_match = first;
-    let mut selected_eldest = find_eldest_ancestor(first, &parent_map);
-    for status_match in status_matches.iter().skip(1) {
-        let candidate_eldest = find_eldest_ancestor(status_match, &parent_map);
-        if candidate_eldest.1 > selected_eldest.1 {
-            selected_match = status_match;
-            selected_eldest = candidate_eldest;
-        }
-    }
-
-    let eldest_id = selected_eldest.0;
+    let eldest_id = find_eldest_ancestor(first.session_id.as_str(), &parent_map);
     if let Some(eldest) = status_map.get(eldest_id.as_str()) {
         return Some((*eldest).clone());
     }
 
+    tracing::error!(
+        first_session_id = first.session_id.as_str(),
+        resolved_parent_id = eldest_id.as_str(),
+        "resolved ancestor session not present in status matches; returning synthetic ancestor match"
+    );
+
     Some(SessionStatusMatch {
         session_id: eldest_id,
         parent_session_id: None,
-        status: selected_match.status.clone(),
+        status: first.status.clone(),
     })
 }
 
-fn find_eldest_ancestor<'a>(
-    session: &'a SessionStatusMatch,
-    parent_map: &'a HashMap<String, Option<String>>,
-) -> (String, usize) {
-    let mut current = session.session_id.clone();
-    let mut visited = HashSet::from([current.clone()]);
-    let mut depth = 0;
+fn find_eldest_ancestor(session_id: &str, parent_map: &HashMap<String, Option<String>>) -> String {
+    let mut visited = HashSet::new();
+    find_eldest_ancestor_recursive(session_id, parent_map, &mut visited)
+}
 
-    loop {
-        let Some(parent_id) = parent_map
-            .get(current.as_str())
-            .and_then(|parent| parent.as_ref())
-        else {
-            return (current, depth);
-        };
+fn find_eldest_ancestor_recursive(
+    session_id: &str,
+    parent_map: &HashMap<String, Option<String>>,
+    visited: &mut HashSet<String>,
+) -> String {
+    if !visited.insert(session_id.to_string()) {
+        return session_id.to_string();
+    }
 
-        if !visited.insert(parent_id.clone()) {
-            return (current, depth);
+    match parent_map
+        .get(session_id)
+        .and_then(|parent| parent.as_deref())
+    {
+        Some(parent_id) => {
+            if !parent_map.contains_key(parent_id) {
+                tracing::error!(
+                    session_id,
+                    parent_id,
+                    "parent session id not found in parent map; returning unresolved parent id"
+                );
+                return parent_id.to_string();
+            }
+
+            find_eldest_ancestor_recursive(parent_id, parent_map, visited)
         }
-
-        current = parent_id.clone();
-        depth += 1;
+        None => session_id.to_string(),
     }
 }
 
@@ -495,11 +650,19 @@ mod tests {
     use crate::types::{SessionState, SessionStatus};
 
     fn status_match(session_id: &str, parent_session_id: Option<&str>) -> SessionStatusMatch {
+        status_match_with_state(session_id, parent_session_id, SessionState::Running)
+    }
+
+    fn status_match_with_state(
+        session_id: &str,
+        parent_session_id: Option<&str>,
+        state: SessionState,
+    ) -> SessionStatusMatch {
         SessionStatusMatch {
             session_id: session_id.to_string(),
             parent_session_id: parent_session_id.map(str::to_string),
             status: SessionStatus {
-                state: SessionState::Running,
+                state,
                 source: SessionStatusSource::Server,
                 fetched_at: SystemTime::UNIX_EPOCH,
                 error: None,
@@ -577,6 +740,7 @@ mod tests {
     #[test]
     fn select_status_match_complete_map_overrides_missing_parent_links() {
         let mut parent_map = HashMap::new();
+        parent_map.insert("subagent-1".to_string(), Some("middle-1".to_string()));
         parent_map.insert("middle-1".to_string(), Some("root-1".to_string()));
         parent_map.insert("root-1".to_string(), None);
 
@@ -594,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn select_status_match_prefers_longest_ancestor_chain() {
+    fn select_status_match_resolves_from_first_match() {
         let selected = select_status_match(
             vec![
                 status_match("orphan-1", None),
@@ -605,7 +769,7 @@ mod tests {
         )
         .expect("expected a selected match");
 
-        assert_eq!(selected.session_id, "root-1");
+        assert_eq!(selected.session_id, "orphan-1");
         assert!(selected.parent_session_id.is_none());
     }
 
@@ -624,5 +788,33 @@ mod tests {
 
         assert_eq!(selected.session_id, "root-1");
         assert!(selected.parent_session_id.is_none());
+    }
+
+    #[test]
+    fn live_subagent_session_ids_only_include_running_descendants() {
+        let statuses = vec![
+            status_match("root-1", None),
+            status_match("subagent-1", Some("root-1")),
+            status_match_with_state("subagent-2", Some("root-1"), SessionState::Idle),
+            status_match("other-root", None),
+            status_match("other-child", Some("other-root")),
+        ];
+
+        let ids = live_subagent_session_ids(&statuses, "root-1", None);
+        assert_eq!(ids, vec!["subagent-1".to_string()]);
+    }
+
+    #[test]
+    fn live_subagent_session_ids_ignores_stale_sessions_missing_from_statuses() {
+        let statuses = vec![
+            status_match("root-1", None),
+            status_match("subagent-1", Some("root-1")),
+        ];
+        let mut complete_parent_map = HashMap::new();
+        complete_parent_map.insert("subagent-1".to_string(), Some("root-1".to_string()));
+        complete_parent_map.insert("stale-subagent".to_string(), Some("root-1".to_string()));
+
+        let ids = live_subagent_session_ids(&statuses, "root-1", Some(&complete_parent_map));
+        assert_eq!(ids, vec!["subagent-1".to_string()]);
     }
 }
