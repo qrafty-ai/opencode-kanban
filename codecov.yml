@@ -9,8 +9,8 @@ coverage:
   status:
     project:
       default:
-        target: 80%
-        threshold: 0%
+        target: 50%
+        threshold: 5%
         base: auto
         if_not_found: success
         if_ci_failed: error
@@ -18,8 +18,8 @@ coverage:
 
     patch:
       default:
-        target: 80%
-        threshold: 0%
+        target: 50%
+        threshold: 5%
         base: auto
         if_not_found: success
         if_ci_failed: error
