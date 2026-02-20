@@ -93,6 +93,9 @@ pub struct TaskCreateArgs {
     #[arg(long, value_name = "BRANCH")]
     pub branch: String,
 
+    #[arg(long = "existing-dir", value_name = "PATH")]
+    pub existing_dir: Option<String>,
+
     #[arg(long, value_name = "REPO")]
     pub repo: Option<String>,
 
@@ -526,31 +529,83 @@ fn task_create(db: &Database, project: &str, args: TaskCreateArgs) -> CliResult<
         .context("branch validation failed")
         .map_err(classify_db_error)?;
 
-    let base_ref = repo
-        .default_base
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| CreateTaskRuntime::git_detect_default_branch(&runtime, &repo_path));
+    let (worktree_path, remove_worktree_on_failure) = if let Some(existing_dir_raw) =
+        args.existing_dir.as_deref()
+    {
+        let existing_dir = PathBuf::from(existing_dir_raw.trim());
+        if existing_dir_raw.trim().is_empty() {
+            return Err(usage_error(
+                "EXISTING_DIR_REQUIRED",
+                "existing directory cannot be empty",
+            ));
+        }
+        if !existing_dir.exists() {
+            return Err(not_found_error(
+                "EXISTING_DIR_NOT_FOUND",
+                format!(
+                    "existing directory '{}' does not exist",
+                    existing_dir.display()
+                ),
+            ));
+        }
+        if !existing_dir.is_dir() {
+            return Err(usage_error(
+                "EXISTING_DIR_INVALID",
+                format!(
+                    "existing directory '{}' is not a folder",
+                    existing_dir.display()
+                ),
+            ));
+        }
+        if !CreateTaskRuntime::git_is_valid_repo(&runtime, &existing_dir) {
+            return Err(usage_error(
+                "EXISTING_DIR_NOT_GIT_REPO",
+                format!(
+                    "existing directory '{}' is not a git repository",
+                    existing_dir.display()
+                ),
+            ));
+        }
 
-    if let Err(err) = CreateTaskRuntime::git_fetch(&runtime, &repo_path) {
-        warn!(
-            repo = %repo.path,
-            error = %err,
-            "fetch from origin failed, continuing offline"
-        );
-    }
+        let canonical = fs::canonicalize(&existing_dir)
+            .context("failed to canonicalize existing directory")
+            .map_err(classify_db_error)?;
+        (canonical, false)
+    } else {
+        let base_ref = repo
+            .default_base
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| CreateTaskRuntime::git_detect_default_branch(&runtime, &repo_path));
 
-    CreateTaskRuntime::git_check_branch_up_to_date(&runtime, &repo_path, &base_ref)
-        .context("base branch check failed")
-        .map_err(classify_db_error)?;
+        if let Err(err) = CreateTaskRuntime::git_fetch(&runtime, &repo_path) {
+            warn!(
+                repo = %repo.path,
+                error = %err,
+                "fetch from origin failed, continuing offline"
+            );
+        }
 
-    let worktrees_root = worktrees_root_for_repo(&repo_path);
-    fs::create_dir_all(&worktrees_root).map_err(runtime_error)?;
-    let worktree_path = derive_worktree_path(&worktrees_root, &repo_path, branch);
+        CreateTaskRuntime::git_check_branch_up_to_date(&runtime, &repo_path, &base_ref)
+            .context("base branch check failed")
+            .map_err(classify_db_error)?;
 
-    CreateTaskRuntime::git_create_worktree(&runtime, &repo_path, &worktree_path, branch, &base_ref)
+        let worktrees_root = worktrees_root_for_repo(&repo_path);
+        fs::create_dir_all(&worktrees_root).map_err(runtime_error)?;
+        let derived_worktree_path = derive_worktree_path(&worktrees_root, &repo_path, branch);
+
+        CreateTaskRuntime::git_create_worktree(
+            &runtime,
+            &repo_path,
+            &derived_worktree_path,
+            branch,
+            &base_ref,
+        )
         .context("worktree creation failed")
         .map_err(classify_db_error)?;
+
+        (derived_worktree_path, true)
+    };
 
     let project_slug = if project == projects::DEFAULT_PROJECT {
         None
@@ -603,7 +658,10 @@ fn task_create(db: &Database, project: &str, args: TaskCreateArgs) -> CliResult<
             if tmux_created {
                 let _ = CreateTaskRuntime::tmux_kill_session(&runtime, &session_name);
             }
-            let _ = CreateTaskRuntime::git_remove_worktree(&runtime, &repo_path, &worktree_path);
+            if remove_worktree_on_failure {
+                let _ =
+                    CreateTaskRuntime::git_remove_worktree(&runtime, &repo_path, &worktree_path);
+            }
             return Err(classify_db_error(err));
         }
     };
