@@ -22,7 +22,7 @@ A Rust terminal kanban board for managing Git worktrees and OpenCode tmux sessio
 1. Install:
 
    ```bash
-   npm install -g opencode-kanban
+   npm install -g @qrafty-ai/opencode-kanban
    ```
 
 2. Verify runtime tools:
@@ -52,7 +52,7 @@ If you start outside tmux, `opencode-kanban` auto-creates or auto-attaches to a 
 ### npm
 
 ```bash
-npm install -g opencode-kanban
+npm install -g @qrafty-ai/opencode-kanban
 ```
 
 ### AUR (Arch Linux)
