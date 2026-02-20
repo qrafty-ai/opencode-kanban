@@ -39,6 +39,8 @@ pub struct Task {
     pub status_fetched_at: Option<String>,
     pub status_error: Option<String>,
     pub opencode_session_id: Option<String>,
+    #[serde(default)]
+    pub attach_overlay_shown: bool,
     pub archived: bool,
     pub archived_at: Option<String>,
     pub created_at: String,
@@ -219,6 +221,7 @@ mod tests {
             status_fetched_at: Some("2024-01-01".to_string()),
             status_error: None,
             opencode_session_id: Some("sess-123".to_string()),
+            attach_overlay_shown: false,
             archived: false,
             archived_at: None,
             created_at: "2024-01-01".to_string(),

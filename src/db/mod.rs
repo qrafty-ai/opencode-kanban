@@ -198,8 +198,8 @@ impl Database {
                 id, title, repo_id, branch, category_id, position, tmux_session_name,
                 worktree_path, tmux_status, status_source,
                 status_fetched_at, status_error, opencode_session_id,
-                archived, archived_at, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                attach_overlay_shown, archived, archived_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(resolved_title)
@@ -214,6 +214,7 @@ impl Database {
         .bind(Option::<String>::None)
         .bind(Option::<String>::None)
         .bind(Option::<String>::None)
+        .bind(0)
         .bind(0)
         .bind(Option::<String>::None)
         .bind(now.clone())
@@ -245,7 +246,7 @@ impl Database {
             "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
                     worktree_path, tmux_status, status_source,
                     status_fetched_at, status_error, opencode_session_id,
-                    archived, archived_at,
+                    attach_overlay_shown, archived, archived_at,
                     created_at, updated_at
              FROM tasks WHERE id = ?",
         )
@@ -266,7 +267,7 @@ impl Database {
             "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
                     worktree_path, tmux_status, status_source,
                     status_fetched_at, status_error, opencode_session_id,
-                    archived, archived_at,
+                    attach_overlay_shown, archived, archived_at,
                     created_at, updated_at
              FROM tasks WHERE archived = 0
              ORDER BY category_id ASC, position ASC, created_at ASC",
@@ -287,7 +288,7 @@ impl Database {
             "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
                     worktree_path, tmux_status, status_source,
                     status_fetched_at, status_error, opencode_session_id,
-                    archived, archived_at,
+                    attach_overlay_shown, archived, archived_at,
                     created_at, updated_at
              FROM tasks WHERE archived = 1
              ORDER BY archived_at DESC, updated_at DESC",
@@ -495,6 +496,34 @@ impl Database {
         opencode_session_id: Option<String>,
     ) -> Result<()> {
         block_on_db(self.update_task_session_binding_async(id, opencode_session_id))
+    }
+
+    pub async fn update_task_attach_overlay_shown_async(
+        &self,
+        id: Uuid,
+        attach_overlay_shown: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks
+             SET attach_overlay_shown = ?,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(if attach_overlay_shown { 1 } else { 0 })
+        .bind(now_iso())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to update task attach overlay state")?;
+        Ok(())
+    }
+
+    pub fn update_task_attach_overlay_shown(
+        &self,
+        id: Uuid,
+        attach_overlay_shown: bool,
+    ) -> Result<()> {
+        block_on_db(self.update_task_attach_overlay_shown_async(id, attach_overlay_shown))
     }
 
     pub async fn delete_task_async(&self, id: Uuid) -> Result<()> {
@@ -760,6 +789,7 @@ impl Database {
                 status_fetched_at TEXT,
                 status_error TEXT,
                 opencode_session_id TEXT,
+                attach_overlay_shown INTEGER NOT NULL DEFAULT 0,
                 archived INTEGER NOT NULL DEFAULT 0,
                 archived_at TEXT,
                 created_at TEXT NOT NULL,
@@ -808,6 +838,12 @@ impl Database {
         .await?;
         execute_add_column_if_missing(
             &self.pool,
+            "ALTER TABLE tasks ADD COLUMN attach_overlay_shown INTEGER NOT NULL DEFAULT 0",
+            "failed to migrate tasks.attach_overlay_shown",
+        )
+        .await?;
+        execute_add_column_if_missing(
+            &self.pool,
             "ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "failed to migrate tasks.archived",
         )
@@ -823,6 +859,10 @@ impl Database {
             .execute(&self.pool)
             .await
             .context("failed to backfill tasks.status_source")?;
+        sqlx::query("UPDATE tasks SET attach_overlay_shown = 0 WHERE attach_overlay_shown IS NULL")
+            .execute(&self.pool)
+            .await
+            .context("failed to backfill tasks.attach_overlay_shown")?;
         sqlx::query("UPDATE tasks SET archived = 0 WHERE archived IS NULL")
             .execute(&self.pool)
             .await
@@ -1034,6 +1074,7 @@ fn map_task_row(row: &SqliteRow) -> Result<Task> {
         status_fetched_at: row.try_get("status_fetched_at")?,
         status_error: row.try_get("status_error")?,
         opencode_session_id: row.try_get("opencode_session_id")?,
+        attach_overlay_shown: row.try_get::<i64, _>("attach_overlay_shown")? != 0,
         archived: row.try_get::<i64, _>("archived")? != 0,
         archived_at: row.try_get("archived_at")?,
         created_at: row.try_get("created_at")?,
@@ -1189,6 +1230,7 @@ mod tests {
         let task = db.add_task(repo.id, "feature/db-layer", "", todo_category)?;
         assert_eq!(task.tmux_status, "unknown");
         assert_eq!(task.status_source, "none");
+        assert!(!task.attach_overlay_shown);
         assert!(!task.archived);
         assert_eq!(task.archived_at, None);
 
@@ -1208,6 +1250,10 @@ mod tests {
             updated.opencode_session_id.as_deref(),
             Some("sid-task-crud")
         );
+
+        db.update_task_attach_overlay_shown(task.id, true)?;
+        let updated = db.get_task(task.id)?;
+        assert!(updated.attach_overlay_shown);
 
         db.delete_task(task.id)?;
         assert!(db.get_task(task.id).is_err());
