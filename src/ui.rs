@@ -363,11 +363,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
         .split(area);
 
-    let title = if app.category_edit_mode {
-        "opencode-kanban [CATEGORY EDIT]"
-    } else {
-        "opencode-kanban"
-    };
+    let project_name =
+        resolve_header_project_name(app.current_project_path.as_deref(), &app.project_list);
+    let title = header_title(&project_name, app.category_edit_mode);
 
     let mut left = Label::default()
         .text(title)
@@ -386,6 +384,34 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .foreground(theme.base.text_muted)
         .background(theme.base.surface);
     right.view(frame, sections[1]);
+}
+
+fn header_title(project_name: &str, category_edit_mode: bool) -> String {
+    if category_edit_mode {
+        format!("opencode-kanban [{project_name}] [CATEGORY EDIT]")
+    } else {
+        format!("opencode-kanban [{project_name}]")
+    }
+}
+
+fn resolve_header_project_name(
+    current_project_path: Option<&std::path::Path>,
+    project_list: &[crate::projects::ProjectInfo],
+) -> String {
+    if let Some(path) = current_project_path {
+        if let Some(project) = project_list
+            .iter()
+            .find(|project| project.path.as_path() == path)
+        {
+            return project.name.clone();
+        }
+
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            return stem.to_string();
+        }
+    }
+
+    crate::projects::DEFAULT_PROJECT.to_string()
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -4356,6 +4382,7 @@ fn render_settings_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projects::ProjectInfo;
     use crate::types::SessionTodoItem;
     use uuid::Uuid;
 
@@ -4383,6 +4410,43 @@ mod tests {
     fn test_command_palette_hides_results_on_short_terminal() {
         assert!(!should_render_command_palette_results((120, 9)));
         assert!(should_render_command_palette_results((120, 10)));
+    }
+
+    #[test]
+    fn test_header_title_includes_project_name() {
+        assert_eq!(
+            header_title("client-api", false),
+            "opencode-kanban [client-api]"
+        );
+        assert_eq!(
+            header_title("client-api", true),
+            "opencode-kanban [client-api] [CATEGORY EDIT]"
+        );
+    }
+
+    #[test]
+    fn test_resolve_header_project_name_prefers_project_list_name() {
+        let path = std::path::PathBuf::from("/tmp/dbs/opencode-kanban.sqlite");
+        let projects = vec![ProjectInfo {
+            name: "workspace-main".to_string(),
+            path: path.clone(),
+        }];
+
+        assert_eq!(
+            resolve_header_project_name(Some(path.as_path()), &projects),
+            "workspace-main"
+        );
+    }
+
+    #[test]
+    fn test_resolve_header_project_name_falls_back_to_path_stem() {
+        let path = std::path::PathBuf::from("/tmp/dbs/solo.sqlite");
+        let projects = Vec::new();
+
+        assert_eq!(
+            resolve_header_project_name(Some(path.as_path()), &projects),
+            "solo"
+        );
     }
 
     #[test]

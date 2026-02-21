@@ -486,6 +486,42 @@ impl App {
                 self.archived_tasks.clear();
                 self.archive_selected_index = 0;
             }
+            Message::SwitchToNextProject => {
+                if self.current_view == View::Board {
+                    let len = self.project_list.len();
+                    if len > 0 {
+                        let idx = (self.selected_project_index + 1) % len;
+                        if let Some(project) = self.project_list.get(idx) {
+                            self.selected_project_index = idx;
+                            self.project_list_state.select(Some(idx));
+                            self.project_detail_cache = load_project_detail(project);
+                            self.switch_project(project.path.clone())?;
+                            self.archived_tasks.clear();
+                            self.archive_selected_index = 0;
+                        }
+                    }
+                }
+            }
+            Message::SwitchToPrevProject => {
+                if self.current_view == View::Board {
+                    let len = self.project_list.len();
+                    if len > 0 {
+                        let idx = if self.selected_project_index == 0 {
+                            len - 1
+                        } else {
+                            self.selected_project_index - 1
+                        };
+                        if let Some(project) = self.project_list.get(idx) {
+                            self.selected_project_index = idx;
+                            self.project_list_state.select(Some(idx));
+                            self.project_detail_cache = load_project_detail(project);
+                            self.switch_project(project.path.clone())?;
+                            self.archived_tasks.clear();
+                            self.archive_selected_index = 0;
+                        }
+                    }
+                }
+            }
             Message::ProjectListSelectUp => {
                 if self.selected_project_index > 0 {
                     self.selected_project_index -= 1;
