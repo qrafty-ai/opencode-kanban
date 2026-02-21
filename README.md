@@ -8,12 +8,18 @@
 A Rust terminal kanban board for managing Git worktrees and OpenCode tmux sessions.
 
 ## Why this exists
+Before creating this tool, I used [Agent of Empires](https://www.agent-of-empires.com/) — which is also a cool project with a similar purpose. However, I found its session management quite barebone as projects grew more complex. I was also inspired by [VibeKanban](https://www.vibekanban.com/). So you can think of this tool as a combination of both - managing your tasks in a kanban without leaving your favorate terminal environment.
 
-`opencode-kanban` gives you a single TUI board to track task state while creating and attaching to per-task tmux sessions and Git worktrees.
+What makes this different: I'm building this exclusively for opencode users. This lets me integrate deeply with opencode's API and offer unique features:
+
+1. Stable session running state detection
+2. Session TODO list with progress tracking
+3. Running subagents and their TODO summaries (when applicable)
+4. And more to come 🚀
 
 ## Prerequisites
 
-- Linux or macOS
+- Unix shell
 - `tmux` installed and available on `PATH` (required)
 - `opencode` installed and available on `PATH` (recommended for attach/resume workflows)
 
