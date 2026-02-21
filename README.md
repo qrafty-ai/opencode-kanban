@@ -106,18 +106,16 @@ Each project uses its own SQLite file and board state.
 3. Press `Enter` to create.
 4. Press `Enter` on the task card to attach to its tmux/OpenCode session.
 
-### Resume previous work
-
-1. Open the project (`Ctrl-p` to switch projects if needed).
-2. Select the task.
-3. Press `Enter` to attach to the existing session.
-
 ### Organize work on the board
 
 - Move focus with `h`/`l` and select with `j`/`k`.
 - Reorder/move task with `H`/`J`/`K`/`L`.
 - Archive selected task with `a`.
 - Open archive view with `A`.
+
+### Track Task Progress
+- Press `v` to toggle between detail/kanban view
+- Check detail view for session running state in depth
 
 ## Keybindings cheat sheet
 
