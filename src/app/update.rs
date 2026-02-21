@@ -429,6 +429,7 @@ impl App {
                 match command_id.as_str() {
                     "help" => self.active_dialog = ActiveDialog::Help,
                     "quit" => self.should_quit = true,
+                    "toggle_view" => self.toggle_view_mode(),
                     "settings" => {
                         self.update(Message::OpenSettings)?;
                     }

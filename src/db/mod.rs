@@ -182,11 +182,7 @@ impl Database {
         .await?;
 
         let resolved_title = if title.trim().is_empty() {
-            let repo_name: String = sqlx::query_scalar("SELECT name FROM repos WHERE id = ?")
-                .bind(repo_id.to_string())
-                .fetch_one(&self.pool)
-                .await?;
-            format!("{repo_name}:{branch}")
+            branch.clone()
         } else {
             title
         };
@@ -1228,6 +1224,7 @@ mod tests {
         let todo_category = categories[0].id;
 
         let task = db.add_task(repo.id, "feature/db-layer", "", todo_category)?;
+        assert_eq!(task.title, "feature/db-layer");
         assert_eq!(task.tmux_status, "unknown");
         assert_eq!(task.status_source, "none");
         assert!(!task.attach_overlay_shown);

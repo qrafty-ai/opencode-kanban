@@ -1484,8 +1484,8 @@ fn render_new_task_dialog(
             "Title",
             &state.title_input,
             state.focused_field == NewTaskField::Title,
-            surface,
             theme,
+            Some("defaults to branch"),
         );
         app.interaction_map.register_click(
             InteractionLayer::Dialog,
@@ -1516,18 +1516,6 @@ fn render_new_task_dialog(
             app,
             Some(Message::DismissDialog),
         );
-
-        let hint_text = if state.existing_dir_input.trim().is_empty() {
-            "Directory is picker input: press Enter to browse folders/repos"
-        } else {
-            "Directory is picker input: press Enter to change selection"
-        };
-        let mut hint = Label::default()
-            .text(hint_text)
-            .alignment(Alignment::Center)
-            .foreground(theme.base.text_muted)
-            .background(surface);
-        hint.view(frame, layout[4]);
 
         match state.focused_field {
             NewTaskField::ExistingDirectory => {
@@ -1572,8 +1560,8 @@ fn render_new_task_dialog(
             "Branch",
             &state.branch_input,
             state.focused_field == NewTaskField::Branch,
-            surface,
             theme,
+            Some("auto-generated if empty"),
         );
         app.interaction_map.register_click(
             InteractionLayer::Dialog,
@@ -1586,8 +1574,8 @@ fn render_new_task_dialog(
             "Base",
             &state.base_input,
             state.focused_field == NewTaskField::Base,
-            surface,
             theme,
+            None,
         );
         app.interaction_map.register_click(
             InteractionLayer::Dialog,
@@ -1600,8 +1588,8 @@ fn render_new_task_dialog(
             "Title",
             &state.title_input,
             state.focused_field == NewTaskField::Title,
-            surface,
             theme,
+            Some("defaults to branch"),
         );
         app.interaction_map.register_click(
             InteractionLayer::Dialog,
@@ -1656,19 +1644,6 @@ fn render_new_task_dialog(
             app,
             Some(Message::DismissDialog),
         );
-
-        let hint_text = if state.repo_input.trim().is_empty() {
-            "Repo is picker input: press Enter to browse folders/repos".to_string()
-        } else {
-            "Repo is picker input: press Enter to change selection".to_string()
-        };
-
-        let mut hint = Label::default()
-            .text(&hint_text)
-            .alignment(Alignment::Center)
-            .foreground(theme.base.text_muted)
-            .background(surface);
-        hint.view(frame, layout[7]);
 
         match state.focused_field {
             NewTaskField::Branch => set_text_input_cursor(frame, layout[2], &state.branch_input),
@@ -1867,8 +1842,8 @@ fn render_category_dialog(
         "Name",
         &state.name_input,
         matches!(state.focused_field, CategoryInputField::Name),
-        surface,
         theme,
+        None,
     );
     app.interaction_map.register_click(
         InteractionLayer::Dialog,
@@ -2078,8 +2053,8 @@ fn render_new_project_dialog(
         "Name",
         &state.name_input,
         matches!(state.focused_field, NewProjectField::Name),
-        surface,
         theme,
+        None,
     );
     app.interaction_map.register_click(
         InteractionLayer::Dialog,
@@ -2154,8 +2129,8 @@ fn render_rename_project_dialog(
         "New Name",
         &state.name_input,
         matches!(state.focused_field, RenameProjectField::Name),
-        surface,
         theme,
+        None,
     );
     app.interaction_map.register_click(
         InteractionLayer::Dialog,
@@ -2297,8 +2272,8 @@ fn render_rename_repo_dialog(
         "Display Name",
         &state.name_input,
         matches!(state.focused_field, RenameRepoField::Name),
-        surface,
         theme,
+        None,
     );
     app.interaction_map.register_click(
         InteractionLayer::Dialog,
@@ -2590,8 +2565,8 @@ fn render_command_palette_dialog(
         "Command Palette",
         &state.query,
         true,
-        dialog_surface(theme),
         theme,
+        None,
     );
     set_text_input_cursor(frame, chunks[0], &state.query);
 
@@ -2765,19 +2740,38 @@ fn render_input_component(
     title: &str,
     value: &str,
     focused: bool,
-    background: Color,
     theme: Theme,
+    placeholder: Option<&str>,
 ) {
+    let (display_value, using_placeholder) = resolve_input_display_value(value, placeholder);
+    let text_color = if using_placeholder {
+        theme.base.text_muted
+    } else {
+        theme.base.text
+    };
+
     let mut input = Input::default()
         .title(title, Alignment::Left)
         .borders(rounded_borders(dialog_input_border(theme, focused)))
-        .foreground(theme.base.text)
-        .background(background)
+        .foreground(text_color)
+        .background(dialog_surface(theme))
         .inactive(Style::default().fg(theme.base.text_muted))
         .input_type(InputType::Text)
-        .value(value.to_string());
+        .value(display_value.to_string());
     input.attr(Attribute::Focus, AttrValue::Flag(focused));
     input.view(frame, area);
+}
+
+fn resolve_input_display_value<'a>(
+    value: &'a str,
+    placeholder: Option<&'a str>,
+) -> (&'a str, bool) {
+    if value.is_empty()
+        && let Some(placeholder_text) = placeholder
+    {
+        return (placeholder_text, true);
+    }
+    (value, false)
 }
 
 fn set_text_input_cursor(frame: &mut Frame<'_>, area: Rect, value: &str) {
@@ -2870,8 +2864,8 @@ fn render_repo_picker_dialog(
         picker_title,
         &picker.query,
         true,
-        dialog_surface(theme),
         theme,
+        None,
     );
     set_text_input_cursor(frame, chunks[0], &picker.query);
 
@@ -4449,6 +4443,22 @@ mod tests {
             text_input_cursor_position(Rect::new(0, 0, 2, 2), "abc"),
             None
         );
+    }
+
+    #[test]
+    fn test_resolve_input_display_value_uses_placeholder_when_empty() {
+        let (display, using_placeholder) =
+            resolve_input_display_value("", Some("auto-generated if empty"));
+        assert_eq!(display, "auto-generated if empty");
+        assert!(using_placeholder);
+    }
+
+    #[test]
+    fn test_resolve_input_display_value_prefers_user_value() {
+        let (display, using_placeholder) =
+            resolve_input_display_value("feature/manual", Some("auto-generated if empty"));
+        assert_eq!(display, "feature/manual");
+        assert!(!using_placeholder);
     }
 
     #[test]

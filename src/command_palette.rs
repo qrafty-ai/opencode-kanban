@@ -154,6 +154,12 @@ pub fn all_commands() -> Vec<CommandDef> {
             message: Some(Message::ExecuteCommand("settings".to_string())),
         },
         CommandDef {
+            id: "toggle_view",
+            display_name: "Toggle Detail/Kanban View",
+            keybinding: "v",
+            message: None,
+        },
+        CommandDef {
             id: "new_task",
             display_name: "New Task",
             keybinding: "n",
@@ -323,8 +329,8 @@ mod tests {
         let commands = all_commands();
         assert_eq!(
             commands.len(),
-            22,
-            "Expected 22 commands, found {}",
+            23,
+            "Expected 23 commands, found {}",
             commands.len()
         );
     }

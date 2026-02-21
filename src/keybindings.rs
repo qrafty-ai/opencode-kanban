@@ -174,7 +174,7 @@ const GLOBAL_DEFS: &[ActionDef] = &[
     ActionDef {
         id: "toggle_view",
         action: KeyAction::ToggleView,
-        description: "toggle side panel",
+        description: "toggle detail/kanban view",
         defaults: &["v"],
     },
     ActionDef {
@@ -403,6 +403,7 @@ impl Keybindings {
     pub fn command_palette_keybinding(&self, command_id: &str) -> Option<String> {
         match command_id {
             "switch_project" => self.display_for(KeyContext::Global, KeyAction::OpenPalette),
+            "toggle_view" => self.display_for(KeyContext::Global, KeyAction::ToggleView),
             "new_task" => self.display_for(KeyContext::Board, KeyAction::NewTask),
             "open_archive_view" => self.display_for(KeyContext::Global, KeyAction::OpenArchiveView),
             "archive_task" => self.display_for(KeyContext::Board, KeyAction::ArchiveTask),
@@ -461,6 +462,11 @@ impl Keybindings {
             format!(
                 "  {}: open archive view",
                 self.display_for(KeyContext::Global, KeyAction::OpenArchiveView)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {}: toggle detail/kanban view",
+                self.display_for(KeyContext::Global, KeyAction::ToggleView)
                     .unwrap_or_else(|| "-".to_string())
             ),
             String::new(),
