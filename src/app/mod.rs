@@ -217,11 +217,16 @@ impl App {
         };
         let target_column = self.focused_column - 1;
         let target_category = &self.categories[target_column];
+        let target_position = self
+            .tasks
+            .iter()
+            .filter(|candidate| candidate.category_id == target_category.id)
+            .count() as i64;
         self.db
-            .update_task_category(task.id, target_category.id, 0)?;
-        self.focused_column = target_column;
-        self.selected_task_per_column.insert(target_column, 0);
-        self.refresh_data()
+            .update_task_category(task.id, target_category.id, target_position)?;
+        self.refresh_data()?;
+        self.focus_task_by_id(task.id);
+        Ok(())
     }
 
     fn move_task_right(&mut self) -> Result<()> {
@@ -233,11 +238,16 @@ impl App {
         };
         let target_column = self.focused_column + 1;
         let target_category = &self.categories[target_column];
+        let target_position = self
+            .tasks
+            .iter()
+            .filter(|candidate| candidate.category_id == target_category.id)
+            .count() as i64;
         self.db
-            .update_task_category(task.id, target_category.id, 0)?;
-        self.focused_column = target_column;
-        self.selected_task_per_column.insert(target_column, 0);
-        self.refresh_data()
+            .update_task_category(task.id, target_category.id, target_position)?;
+        self.refresh_data()?;
+        self.focus_task_by_id(task.id);
+        Ok(())
     }
 
     fn move_task_up(&mut self) -> Result<()> {
@@ -1365,6 +1375,84 @@ mod tests {
         assert_eq!(
             after_right,
             vec![(todo_id, 0), (in_progress_id, 1), (done_id, 2)]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn moving_task_right_keeps_focus_on_moved_task_in_kanban() -> Result<()> {
+        let (mut app, _repo_dir, task_id, [_todo_id, _in_progress_id, done_id]) =
+            test_app_with_middle_task()?;
+        let repo_id = app.repos[0].id;
+        app.db
+            .add_task(repo_id, "feature/existing-done", "Existing Done", done_id)?;
+        app.refresh_data()?;
+        app.focused_column = 1;
+        app.selected_task_per_column.insert(1, 0);
+
+        app.handle_key(key_char('L'))?;
+
+        assert_eq!(app.focused_column, 2);
+        assert_eq!(app.selected_task_per_column.get(&2).copied(), Some(1));
+
+        let selected = app.selected_task().expect("expected selected task");
+        assert_eq!(selected.id, task_id);
+        assert_eq!(selected.category_id, done_id);
+
+        Ok(())
+    }
+
+    #[test]
+    fn moving_task_right_keeps_side_panel_selection_on_moved_task() -> Result<()> {
+        let (mut app, _repo_dir, task_id, [_todo_id, _in_progress_id, done_id]) =
+            test_app_with_middle_task()?;
+        let repo_id = app.repos[0].id;
+        app.db.add_task(
+            repo_id,
+            "feature/existing-done-side-panel",
+            "Existing Done Side Panel",
+            done_id,
+        )?;
+        app.refresh_data()?;
+
+        app.view_mode = ViewMode::SidePanel;
+        app.detail_focus = DetailFocus::List;
+        let rows = app.side_panel_rows();
+        let selected_row = rows
+            .iter()
+            .position(|row| matches!(row, SidePanelRow::Task { task, .. } if task.id == task_id))
+            .expect("expected task row in side panel");
+        app.sync_side_panel_selection_at(&rows, selected_row, false);
+
+        app.handle_key(key_char('L'))?;
+
+        let selected = app.selected_task().expect("expected selected task");
+        assert_eq!(selected.id, task_id);
+        assert_eq!(selected.category_id, done_id);
+        assert_eq!(app.focused_column, 2);
+
+        let rows_after = app.side_panel_rows();
+        let moved_row = rows_after
+            .iter()
+            .position(|row| matches!(row, SidePanelRow::Task { task, .. } if task.id == task_id))
+            .expect("expected moved task row in side panel");
+        assert_eq!(app.side_panel_selected_row, moved_row);
+
+        let expected_index = rows_after
+            .iter()
+            .find_map(|row| match row {
+                SidePanelRow::Task {
+                    task,
+                    index_in_column,
+                    ..
+                } if task.id == task_id => Some(*index_in_column),
+                _ => None,
+            })
+            .expect("expected moved task index");
+        assert_eq!(
+            app.selected_task_per_column.get(&2).copied(),
+            Some(expected_index)
         );
 
         Ok(())
