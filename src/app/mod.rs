@@ -672,8 +672,8 @@ mod tests {
     };
     use super::workflows::{
         build_attach_popup_lines, parse_existing_branch_name, popup_style_from_theme,
-        repo_match_candidates, repo_selection_command_id, resolve_repo_for_creation,
-        tmux_hex_color,
+        reconcile_startup_tasks, repo_match_candidates, repo_selection_command_id,
+        repo_selection_usage_map, resolve_repo_for_creation, tmux_hex_color,
     };
     use super::*;
 
@@ -689,7 +689,7 @@ mod tests {
     use tempfile::TempDir;
     use tuirealm::ratatui::widgets::ListState;
 
-    use crate::keybindings::Keybindings;
+    use crate::keybindings::{KeyAction, KeyContext, Keybindings};
     use crate::opencode::OpenCodeServerManager;
     use crate::tmux::PopupThemeStyle;
     use crate::types::CommandFrequency;
@@ -1811,6 +1811,503 @@ mod tests {
         assert!(!candidates.is_empty());
         assert!(candidates.iter().any(|(s, _)| s == "my-project"));
         assert!(candidates.iter().any(|(s, _)| s.contains("company")));
+    }
+
+    fn find_toggle_help_key(app: &App) -> KeyEvent {
+        let candidates = [
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::F(1), KeyModifiers::empty()),
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+        ];
+
+        candidates
+            .into_iter()
+            .find(|key| {
+                app.keybindings.action_for_key(KeyContext::Global, *key)
+                    == Some(KeyAction::ToggleHelp)
+            })
+            .expect("toggle-help keybinding should exist")
+    }
+
+    #[test]
+    fn test_log_kind_label_additional_variants_and_empty_string() {
+        assert_eq!(log_kind_label(Some("step-finish")), "STEP-");
+        assert_eq!(log_kind_label(Some("subtask")), "SUBTASK");
+        assert_eq!(log_kind_label(Some("agent")), "AGENT");
+        assert_eq!(log_kind_label(Some("snapshot")), "SNAP");
+        assert_eq!(log_kind_label(Some("retry")), "RETRY");
+        assert_eq!(log_kind_label(Some("compaction")), "COMPACT");
+        assert_eq!(log_kind_label(Some("   ")), "TEXT");
+    }
+
+    #[test]
+    fn test_format_numeric_timestamp_supports_millis_micros_and_nanos() {
+        assert!(format_numeric_timestamp("1705315800123").is_some());
+        assert!(format_numeric_timestamp("1705315800123456").is_some());
+        assert!(format_numeric_timestamp("1705315800123456789").is_some());
+    }
+
+    #[test]
+    fn create_task_error_dialog_state_uses_contextual_titles() {
+        let worktree = anyhow::anyhow!("worktree creation failed: cannot create");
+        let tmux = anyhow::anyhow!("tmux session creation failed: cannot start");
+        let generic = anyhow::anyhow!("unexpected failure");
+
+        assert_eq!(
+            create_task_error_dialog_state(&worktree).title,
+            "Worktree creation failed"
+        );
+        assert_eq!(
+            create_task_error_dialog_state(&tmux).title,
+            "Tmux session failed"
+        );
+        assert_eq!(
+            create_task_error_dialog_state(&generic).title,
+            "Task creation failed"
+        );
+    }
+
+    #[test]
+    fn repo_selection_usage_map_ignores_invalid_command_ids() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let valid_repo_id = Uuid::new_v4();
+        db.increment_command_usage(&repo_selection_command_id(valid_repo_id))?;
+        db.increment_command_usage("repo-selection:not-a-uuid")?;
+        db.increment_command_usage("not-repo-selection")?;
+
+        let usage = repo_selection_usage_map(&db);
+        assert_eq!(usage.len(), 1);
+        assert!(usage.contains_key(&valid_repo_id));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_repo_for_creation_rejects_missing_or_non_git_paths() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let mut repos = Vec::new();
+        let runtime = RealCreateTaskRuntime;
+
+        let missing =
+            std::env::temp_dir().join(format!("opencode-kanban-missing-{}", Uuid::new_v4()));
+        let missing_state = NewTaskDialogState {
+            repo_idx: 0,
+            repo_input: missing.display().to_string(),
+            repo_picker: None,
+            use_existing_directory: false,
+            existing_dir_input: String::new(),
+            branch_input: String::new(),
+            base_input: String::new(),
+            title_input: String::new(),
+            ensure_base_up_to_date: true,
+            loading_message: None,
+            focused_field: NewTaskField::Repo,
+        };
+        let err = resolve_repo_for_creation(&db, &mut repos, &missing_state, &runtime)
+            .expect_err("missing path should fail");
+        assert!(err.to_string().contains("repo path does not exist"));
+
+        let temp = TempDir::new()?;
+        let non_git_state = NewTaskDialogState {
+            repo_idx: 0,
+            repo_input: temp.path().display().to_string(),
+            repo_picker: None,
+            use_existing_directory: false,
+            existing_dir_input: String::new(),
+            branch_input: String::new(),
+            base_input: String::new(),
+            title_input: String::new(),
+            ensure_base_up_to_date: true,
+            loading_message: None,
+            focused_field: NewTaskField::Repo,
+        };
+        let err = resolve_repo_for_creation(&db, &mut repos, &non_git_state, &runtime)
+            .expect_err("non-git path should fail");
+        assert!(err.to_string().contains("not a git repository"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_project_detail_summarizes_running_counts() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("project.sqlite");
+        let repo_dir = temp.path().join("repo");
+        fs::create_dir_all(&repo_dir)?;
+
+        let db = Database::open(&db_path)?;
+        let repo = db.add_repo(&repo_dir)?;
+        let categories = db.list_categories()?;
+        let task = db.add_task(repo.id, "feature/running", "Running", categories[0].id)?;
+        db.update_task_status(task.id, Status::Running.as_str())?;
+
+        let info = ProjectInfo {
+            name: "demo".to_string(),
+            path: db_path,
+        };
+        let detail = load_project_detail(&info).expect("project detail should be available");
+        assert_eq!(detail.project_name, "demo");
+        assert_eq!(detail.task_count, 1);
+        assert_eq!(detail.running_count, 1);
+        assert_eq!(detail.repo_count, 1);
+        assert_eq!(detail.category_count, categories.len());
+        Ok(())
+    }
+
+    #[test]
+    fn session_cache_helpers_and_project_slug_behavior() -> Result<()> {
+        let (mut app, _repo_dir, task_id, _category_ids) = test_app_with_middle_task()?;
+
+        {
+            let mut todos = app.session_todo_cache.lock().expect("todo cache lock");
+            todos.insert(
+                task_id,
+                vec![
+                    SessionTodoItem {
+                        content: "done".to_string(),
+                        completed: true,
+                    },
+                    SessionTodoItem {
+                        content: "next".to_string(),
+                        completed: false,
+                    },
+                ],
+            );
+        }
+        {
+            let mut subagents = app
+                .session_subagent_cache
+                .lock()
+                .expect("subagent cache lock");
+            subagents.insert(
+                task_id,
+                vec![SubagentTodoSummary {
+                    title: "agent-a".to_string(),
+                    todo_summary: Some((1, 2)),
+                }],
+            );
+        }
+        {
+            let mut titles = app.session_title_cache.lock().expect("title cache lock");
+            titles.insert("session-1".to_string(), "Session One".to_string());
+        }
+        {
+            let mut messages = app
+                .session_message_cache
+                .lock()
+                .expect("message cache lock");
+            messages.insert(
+                task_id,
+                vec![SessionMessageItem {
+                    role: Some("assistant".to_string()),
+                    content: "hello".to_string(),
+                    timestamp: Some("2024-01-01T10:00:00Z".to_string()),
+                    message_type: Some("text".to_string()),
+                }],
+            );
+        }
+
+        assert_eq!(app.session_todo_summary(task_id), Some((1, 2)));
+        assert_eq!(app.session_subagent_summaries(task_id).len(), 1);
+        assert_eq!(
+            app.opencode_session_title("session-1"),
+            Some("Session One".to_string())
+        );
+        assert_eq!(app.session_messages(task_id).len(), 1);
+
+        app.current_project_path = None;
+        assert_eq!(
+            app.poller_db_path(),
+            projects::get_project_path(projects::DEFAULT_PROJECT)
+        );
+        assert_eq!(app.current_project_slug_for_tmux(), None);
+
+        app.current_project_path = Some(PathBuf::from("/tmp/custom-project.sqlite"));
+        assert_eq!(
+            app.current_project_slug_for_tmux(),
+            Some("custom-project".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn attach_task_with_runtime_handles_repo_unavailable_and_missing_worktree() -> Result<()> {
+        let (app, _repo_dir, task_id, _category_ids) = test_app_with_middle_task()?;
+        let repo = app.repos[0].clone();
+        let task = app.db.get_task(task_id)?;
+
+        let mut repo_missing_runtime = RecordingRecoveryRuntime::with_session_exists(false);
+        repo_missing_runtime.repo_exists = false;
+        let result = attach_task_with_runtime(
+            &app.db,
+            None,
+            &task,
+            &repo,
+            &[],
+            &Theme::default(),
+            &repo_missing_runtime,
+        )?;
+        assert_eq!(result, AttachTaskResult::RepoUnavailable);
+
+        app.db
+            .update_task_tmux(task_id, None, Some("/tmp/missing-worktree".to_string()))?;
+        let task = app.db.get_task(task_id)?;
+        let mut missing_worktree_runtime = RecordingRecoveryRuntime::with_session_exists(false);
+        missing_worktree_runtime.worktree_exists = false;
+        let result = attach_task_with_runtime(
+            &app.db,
+            None,
+            &task,
+            &repo,
+            &[],
+            &Theme::default(),
+            &missing_worktree_runtime,
+        )?;
+        assert_eq!(result, AttachTaskResult::WorktreeNotFound);
+
+        Ok(())
+    }
+
+    #[test]
+    fn attach_task_with_runtime_creates_new_session_when_needed() -> Result<()> {
+        let (app, _repo_dir, task_id, _category_ids) = test_app_with_middle_task()?;
+        let repo = app.repos[0].clone();
+        let worktree = TempDir::new()?;
+
+        app.db.update_task_tmux(
+            task_id,
+            Some("ok-session".to_string()),
+            Some(worktree.path().display().to_string()),
+        )?;
+        let task = app.db.get_task(task_id)?;
+
+        let runtime = RecordingRecoveryRuntime::with_session_exists(false);
+        let result = attach_task_with_runtime(
+            &app.db,
+            None,
+            &task,
+            &repo,
+            &[],
+            &Theme::default(),
+            &runtime,
+        )?;
+
+        assert_eq!(result, AttachTaskResult::Attached);
+        assert_eq!(runtime.create_session_calls.get(), 1);
+        assert_eq!(runtime.switch_client_calls.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_startup_tasks_recovers_running_statuses() -> Result<()> {
+        let (mut app, _repo_dir, task_id, _category_ids) = test_app_with_middle_task()?;
+        app.db
+            .update_task_tmux(task_id, Some("ok-recovery-session".to_string()), None)?;
+        app.db
+            .update_task_status(task_id, Status::Running.as_str())?;
+        app.refresh_data()?;
+
+        let missing_session = RecordingRecoveryRuntime::with_session_exists(false);
+        reconcile_startup_tasks(&app.db, &app.tasks, &app.repos, &missing_session)?;
+        assert_eq!(app.db.get_task(task_id)?.tmux_status, Status::Idle.as_str());
+
+        app.db
+            .update_task_status(task_id, Status::Running.as_str())?;
+        app.refresh_data()?;
+        let existing_session = RecordingRecoveryRuntime::with_session_exists(true);
+        reconcile_startup_tasks(&app.db, &app.tasks, &app.repos, &existing_session)?;
+        assert_eq!(
+            app.db.get_task(task_id)?.tmux_status,
+            Status::Running.as_str()
+        );
+
+        app.db
+            .update_task_status(task_id, Status::Running.as_str())?;
+        app.refresh_data()?;
+        let mut repo_missing = RecordingRecoveryRuntime::with_session_exists(true);
+        repo_missing.repo_exists = false;
+        reconcile_startup_tasks(&app.db, &app.tasks, &app.repos, &repo_missing)?;
+        assert_eq!(app.db.get_task(task_id)?.tmux_status, Status::Idle.as_str());
+
+        Ok(())
+    }
+
+    #[test]
+    fn update_messages_adjust_settings_and_dialog_focus_state() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        app.update(Message::OpenSettings)?;
+        app.update(Message::SettingsSelectSection(SettingsSection::Repos))?;
+        app.update(Message::SettingsSelectRepo(999))?;
+        app.update(Message::SettingsSelectGeneralField(999))?;
+        app.update(Message::SettingsSelectCategoryColor(999))?;
+
+        let settings_state = app
+            .settings_view_state
+            .as_ref()
+            .expect("settings state should exist");
+        assert_eq!(
+            settings_state.active_section,
+            SettingsSection::CategoryColors
+        );
+        assert_eq!(settings_state.general_selected_field, 3);
+        assert_eq!(
+            settings_state.category_color_selected,
+            app.categories.len().saturating_sub(1)
+        );
+
+        app.update(Message::OpenNewTaskDialog)?;
+        app.update(Message::ToggleNewTaskExistingDirectory)?;
+        app.update(Message::SetNewTaskUseExistingDirectory(false))?;
+        match &app.active_dialog {
+            ActiveDialog::NewTask(state) => {
+                assert!(!state.use_existing_directory);
+                assert_eq!(state.focused_field, NewTaskField::UseExistingDirectory);
+            }
+            other => panic!("expected NewTask dialog, got {other:?}"),
+        }
+
+        app.update(Message::OpenDeleteTaskDialog)?;
+        if let ActiveDialog::DeleteTask(state) = &mut app.active_dialog {
+            state.confirm_destructive = true;
+        }
+        app.update(Message::FocusDeleteTaskField(DeleteTaskField::KillTmux))?;
+        match &app.active_dialog {
+            ActiveDialog::DeleteTask(state) => {
+                assert_eq!(state.focused_field, DeleteTaskField::KillTmux);
+                assert!(!state.confirm_destructive);
+            }
+            other => panic!("expected DeleteTask dialog, got {other:?}"),
+        }
+
+        app.update(Message::OpenCommandPalette)?;
+        app.update(Message::SelectCommandPaletteItem(0))?;
+        assert_eq!(app.current_view, View::ProjectList);
+
+        Ok(())
+    }
+
+    #[test]
+    fn key_shortcuts_cover_help_side_panel_and_expanded_log_paths() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        let toggle_help_key = find_toggle_help_key(&app);
+        app.active_dialog = ActiveDialog::Help;
+        app.handle_key(toggle_help_key)?;
+        assert_eq!(app.active_dialog, ActiveDialog::None);
+
+        app.view_mode = ViewMode::SidePanel;
+        app.current_view = View::Board;
+        app.detail_focus = DetailFocus::Log;
+        app.current_log_buffer = Some(
+            "> [SAY] ASSISTANT 10:00:00\n  first\n\n> [SAY] ASSISTANT 10:01:00\n  second"
+                .to_string(),
+        );
+        app.handle_key(key_char('f'))?;
+        assert!(app.log_expanded);
+
+        app.log_expanded_scroll_offset = 1;
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))?;
+        assert!(!app.log_expanded);
+        assert_eq!(app.log_scroll_offset, 1);
+
+        app.detail_focus = DetailFocus::Log;
+        app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::empty()))?;
+        assert_eq!(app.log_split_ratio, 60);
+        app.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::empty()))?;
+        assert_eq!(app.log_split_ratio, 65);
+
+        assert!(app.collapsed_categories.is_empty());
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()))?;
+        assert!(!app.collapsed_categories.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_scroll_routes_for_archive_and_settings_views() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, category_ids) = test_app_with_middle_task()?;
+
+        app.current_view = View::Archive;
+        app.archived_tasks = vec![
+            test_task(category_ids[0], 0, "archived-1"),
+            test_task(category_ids[0], 1, "archived-2"),
+        ];
+        app.archive_selected_index = 0;
+        app.handle_scroll(0, 0, 1)?;
+        assert_eq!(app.archive_selected_index, 1);
+        app.handle_scroll(0, 0, -1)?;
+        assert_eq!(app.archive_selected_index, 0);
+
+        app.current_view = View::Settings;
+        app.settings_view_state = Some(SettingsViewState {
+            active_section: SettingsSection::General,
+            general_selected_field: 0,
+            category_color_selected: 0,
+            repos_selected_field: 0,
+            previous_view: View::Board,
+        });
+        app.handle_scroll(0, 0, 1)?;
+        assert_eq!(
+            app.settings_view_state
+                .as_ref()
+                .map(|state| state.general_selected_field),
+            Some(1)
+        );
+        app.handle_scroll(0, 0, -1)?;
+        assert_eq!(
+            app.settings_view_state
+                .as_ref()
+                .map(|state| state.general_selected_field),
+            Some(0)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn navigation_helpers_manage_log_entries_and_empty_selection_reset() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        app.current_log_buffer = Some(
+            "> [SAY] ASSISTANT 10:00:00\n  one\n\n> [TOOL] ASSISTANT 10:01:00\n  two".to_string(),
+        );
+        assert_eq!(app.log_entry_count(), 2);
+
+        app.log_scroll_offset = 1;
+        app.toggle_selected_log_entry(false);
+        assert!(app.log_expanded_entries.contains(&1));
+        app.toggle_selected_log_entry(false);
+        assert!(!app.log_expanded_entries.contains(&1));
+
+        app.current_log_buffer = Some("alpha\n\n beta".to_string());
+        assert_eq!(app.log_entry_count(), 2);
+
+        app.current_log_buffer = Some("present".to_string());
+        app.current_change_summary = Some(GitChangeSummary {
+            base_ref: "main".to_string(),
+            commits_ahead: 1,
+            files_changed: 1,
+            insertions: 2,
+            deletions: 0,
+            top_files: vec!["src/app/mod.rs".to_string()],
+        });
+        app.detail_scroll_offset = 5;
+        app.log_scroll_offset = 4;
+        app.log_expanded_scroll_offset = 3;
+        app.log_expanded_entries.insert(0);
+
+        app.sync_side_panel_selection_at(&[], 99, true);
+        assert_eq!(app.side_panel_selected_row, 0);
+        assert!(app.current_log_buffer.is_none());
+        assert!(app.current_change_summary.is_none());
+        assert_eq!(app.detail_scroll_offset, 0);
+        assert_eq!(app.log_scroll_offset, 0);
+        assert_eq!(app.log_expanded_scroll_offset, 0);
+        assert!(app.log_expanded_entries.is_empty());
+
+        Ok(())
     }
 }
 
