@@ -5,9 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::super::GG_SEQUENCE_TIMEOUT;
 use super::super::dialogs;
-use crate::app::{
-    ActiveDialog, App, DetailFocus, Message, SettingsSection, SidePanelRow, View, ViewMode,
-};
+use crate::app::{ActiveDialog, App, DetailFocus, Message, SettingsSection, View, ViewMode};
 use crate::keybindings::{KeyAction, KeyContext};
 
 impl App {
@@ -70,43 +68,7 @@ impl App {
                     self.update(Message::OpenCommandPalette)?;
                 }
                 KeyAction::Quit => self.should_quit = true,
-                KeyAction::ToggleView => {
-                    self.current_log_buffer = None;
-                    self.log_expanded = false;
-                    self.log_expanded_scroll_offset = 0;
-                    self.log_expanded_entries.clear();
-
-                    match self.view_mode {
-                        ViewMode::Kanban => {
-                            self.view_mode = ViewMode::SidePanel;
-                            self.detail_focus = DetailFocus::List;
-                            self.detail_scroll_offset = 0;
-                            self.log_scroll_offset = 0;
-
-                            let rows = self.side_panel_rows();
-                            let current_id = self
-                                .selected_task_in_column(self.focused_column)
-                                .map(|task| task.id);
-                            let index = current_id
-                                .and_then(|id| {
-                                    rows.iter().position(|row| {
-                                        matches!(row, SidePanelRow::Task { task, .. } if task.id == id)
-                                    })
-                                })
-                                .or_else(|| {
-                                    rows.iter().position(|row| {
-                                        matches!(row, SidePanelRow::CategoryHeader { .. })
-                                    })
-                                })
-                                .unwrap_or(0);
-                            self.sync_side_panel_selection_at(&rows, index, false);
-                        }
-                        ViewMode::SidePanel => {
-                            self.view_mode = ViewMode::Kanban;
-                            self.detail_focus = DetailFocus::List;
-                        }
-                    }
-                }
+                KeyAction::ToggleView => self.toggle_view_mode(),
                 KeyAction::ShrinkPanel => {
                     self.side_panel_width = self.side_panel_width.saturating_sub(5).max(20);
                 }

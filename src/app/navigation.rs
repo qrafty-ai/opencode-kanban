@@ -4,6 +4,43 @@ use crate::types::{Repo, Task};
 use uuid::Uuid;
 
 impl App {
+    pub(crate) fn toggle_view_mode(&mut self) {
+        self.current_log_buffer = None;
+        self.log_expanded = false;
+        self.log_expanded_scroll_offset = 0;
+        self.log_expanded_entries.clear();
+
+        match self.view_mode {
+            ViewMode::Kanban => {
+                self.view_mode = ViewMode::SidePanel;
+                self.detail_focus = DetailFocus::List;
+                self.detail_scroll_offset = 0;
+                self.log_scroll_offset = 0;
+
+                let rows = self.side_panel_rows();
+                let current_id = self
+                    .selected_task_in_column(self.focused_column)
+                    .map(|task| task.id);
+                let index = current_id
+                    .and_then(|id| {
+                        rows.iter().position(
+                            |row| matches!(row, SidePanelRow::Task { task, .. } if task.id == id),
+                        )
+                    })
+                    .or_else(|| {
+                        rows.iter()
+                            .position(|row| matches!(row, SidePanelRow::CategoryHeader { .. }))
+                    })
+                    .unwrap_or(0);
+                self.sync_side_panel_selection_at(&rows, index, false);
+            }
+            ViewMode::SidePanel => {
+                self.view_mode = ViewMode::Kanban;
+                self.detail_focus = DetailFocus::List;
+            }
+        }
+    }
+
     fn task_location(&self, task_id: Uuid) -> Option<(usize, usize)> {
         self.categories
             .iter()
