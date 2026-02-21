@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crossterm::event::{KeyEvent, MouseEvent};
 
 use super::state::{
-    CategoryInputField, DeleteTaskField, DetailFocus, NewProjectField, NewTaskField,
+    CategoryInputField, DeleteTaskField, DetailFocus, EditTaskField, NewProjectField, NewTaskField,
     RenameProjectField, RenameRepoField, SettingsSection,
 };
 
@@ -48,6 +48,7 @@ pub enum Message {
     OpenRenameCategoryDialog,
     OpenDeleteCategoryDialog,
     OpenDeleteTaskDialog,
+    OpenEditTaskDialog,
     OpenArchiveTaskDialog,
     SubmitCategoryInput,
     ConfirmDeleteCategory,
@@ -60,6 +61,7 @@ pub enum Message {
     DeleteTaskToggleRemoveWorktree,
     DeleteTaskToggleDeleteBranch,
     ConfirmDeleteTask,
+    ConfirmEditTask,
     ConfirmArchiveTask,
     UnarchiveTask,
     ArchiveSelectUp,
@@ -98,9 +100,12 @@ pub enum Message {
     FocusCategoryInputField(CategoryInputField),
     FocusNewProjectField(NewProjectField),
     FocusDeleteTaskField(DeleteTaskField),
+    FocusEditTaskField(EditTaskField),
     ToggleDeleteTaskCheckbox(DeleteTaskField),
     FocusDialogButton(String),
     SelectProject(usize),
     SelectCommandPaletteItem(usize),
     ToggleCategoryEditMode,
+    ProjectListMoveUp,
+    ProjectListMoveDown,
 }

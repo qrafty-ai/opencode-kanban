@@ -42,13 +42,13 @@ pub use self::state::{
     CategoryColorField, CategoryInputDialogState, CategoryInputField, CategoryInputMode,
     ConfirmCancelField, ConfirmQuitDialogState, ContextMenuItem, ContextMenuState,
     DeleteCategoryDialogState, DeleteProjectDialogState, DeleteRepoDialogState,
-    DeleteTaskDialogState, DeleteTaskField, DetailFocus, ErrorDialogState, MoveTaskDialogState,
-    NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
-    RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
-    RepoPickerDialogState, RepoPickerTarget, RepoSuggestionItem, RepoSuggestionKind,
-    RepoUnavailableDialogState, SettingsSection, SettingsViewState, TodoVisualizationMode, View,
-    ViewMode, WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
-    normalize_category_color_key,
+    DeleteTaskDialogState, DeleteTaskField, DetailFocus, EditTaskDialogState, EditTaskField,
+    ErrorDialogState, MoveTaskDialogState, NewProjectDialogState, NewProjectField,
+    NewTaskDialogState, NewTaskField, RenameProjectDialogState, RenameProjectField,
+    RenameRepoDialogState, RenameRepoField, RepoPickerDialogState, RepoPickerTarget,
+    RepoSuggestionItem, RepoSuggestionKind, RepoUnavailableDialogState, SettingsSection,
+    SettingsViewState, TodoVisualizationMode, View, ViewMode, WorktreeNotFoundDialogState,
+    WorktreeNotFoundField, category_color_label, normalize_category_color_key,
 };
 
 use crate::command_palette::{CommandPaletteState, all_commands};
@@ -385,6 +385,30 @@ impl App {
         Ok(())
     }
 
+    fn open_edit_task_dialog(&mut self) -> Result<()> {
+        if self.current_view != View::Board {
+            return Ok(());
+        }
+
+        let Some(task) = self.selected_task() else {
+            return Ok(());
+        };
+
+        let repo_path = self
+            .repo_for_task(&task)
+            .map(|repo| repo.path)
+            .unwrap_or_else(|| "(repo unavailable)".to_string());
+
+        self.active_dialog = ActiveDialog::EditTask(EditTaskDialogState {
+            task_id: task.id,
+            repo_path,
+            branch: task.branch,
+            title_input: task.title,
+            focused_field: EditTaskField::Title,
+        });
+        Ok(())
+    }
+
     fn open_archive_task_dialog(&mut self) -> Result<()> {
         if self.current_view != View::Board {
             return Ok(());
@@ -526,6 +550,27 @@ impl App {
                 .archive_selected_index
                 .min(self.archived_tasks.len().saturating_sub(1));
         }
+        Ok(())
+    }
+
+    fn confirm_edit_task(&mut self) -> Result<()> {
+        let ActiveDialog::EditTask(state) = self.active_dialog.clone() else {
+            return Ok(());
+        };
+
+        let title = state.title_input.trim();
+        if title.is_empty() {
+            self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                title: "Invalid task".to_string(),
+                detail: "Task title cannot be empty.".to_string(),
+            });
+            return Ok(());
+        }
+
+        self.db.update_task_title(state.task_id, title)?;
+        self.active_dialog = ActiveDialog::None;
+        self.refresh_data()?;
+        self.focus_task_by_id(state.task_id);
         Ok(())
     }
 
@@ -2389,6 +2434,41 @@ mod tests {
             }
             other => panic!("expected DeleteTask dialog, got {other:?}"),
         }
+
+        app.current_view = View::Board;
+        let selected_task_id = app.selected_task().expect("selected task should exist").id;
+        app.update(Message::OpenEditTaskDialog)?;
+        if let ActiveDialog::EditTask(state) = &mut app.active_dialog {
+            state.title_input = "Edited Task Title".to_string();
+        }
+        app.update(Message::ConfirmEditTask)?;
+        assert_eq!(
+            app.db.get_task(selected_task_id)?.title,
+            "Edited Task Title"
+        );
+
+        app.current_view = View::ProjectList;
+        app.project_list = vec![
+            ProjectInfo {
+                name: "alpha".to_string(),
+                path: PathBuf::from("/tmp/alpha.sqlite"),
+            },
+            ProjectInfo {
+                name: "beta".to_string(),
+                path: PathBuf::from("/tmp/beta.sqlite"),
+            },
+            ProjectInfo {
+                name: "gamma".to_string(),
+                path: PathBuf::from("/tmp/gamma.sqlite"),
+            },
+        ];
+        app.selected_project_index = 1;
+        app.project_list_state.select(Some(1));
+        app.update(Message::ProjectListMoveUp)?;
+        assert_eq!(app.selected_project_index, 0);
+        assert_eq!(app.project_list[0].name, "beta");
+        assert_eq!(app.settings.project_order.len(), 3);
+        assert_eq!(app.settings.project_order[0], "/tmp/beta.sqlite");
 
         app.update(Message::OpenCommandPalette)?;
         app.update(Message::SelectCommandPaletteItem(0))?;

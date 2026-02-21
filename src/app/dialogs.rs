@@ -13,10 +13,11 @@ use super::messages::Message;
 use super::state::{
     ActiveDialog, ArchiveTaskDialogState, CategoryColorDialogState, CategoryColorField,
     CategoryInputDialogState, CategoryInputField, ConfirmCancelField, ConfirmQuitDialogState,
-    DeleteCategoryDialogState, DeleteTaskDialogState, DeleteTaskField, NewProjectDialogState,
-    NewProjectField, NewTaskDialogState, NewTaskField, RenameProjectDialogState,
-    RenameProjectField, RenameRepoDialogState, RenameRepoField, RepoPickerTarget,
-    RepoSuggestionItem, RepoSuggestionKind, WorktreeNotFoundDialogState, WorktreeNotFoundField,
+    DeleteCategoryDialogState, DeleteTaskDialogState, DeleteTaskField, EditTaskDialogState,
+    EditTaskField, NewProjectDialogState, NewProjectField, NewTaskDialogState, NewTaskField,
+    RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
+    RepoPickerTarget, RepoSuggestionItem, RepoSuggestionKind, WorktreeNotFoundDialogState,
+    WorktreeNotFoundField,
 };
 
 /// Handle key events when a dialog is active
@@ -70,6 +71,9 @@ pub fn handle_dialog_key(
         }
         ActiveDialog::DeleteTask(state) => {
             handle_delete_task_dialog_key(state, key, &mut follow_up);
+        }
+        ActiveDialog::EditTask(state) => {
+            handle_edit_task_dialog_key(state, key, &mut follow_up);
         }
         ActiveDialog::ArchiveTask(state) => {
             handle_archive_task_dialog_key(state, key, &mut follow_up);
@@ -871,6 +875,66 @@ fn handle_delete_task_dialog_key(
     }
 }
 
+fn handle_edit_task_dialog_key(
+    state: &mut EditTaskDialogState,
+    key: KeyEvent,
+    follow_up: &mut Option<Message>,
+) {
+    let fields = [
+        EditTaskField::Title,
+        EditTaskField::Save,
+        EditTaskField::Cancel,
+    ];
+
+    let mut focus_index = fields
+        .iter()
+        .position(|field| *field == state.focused_field)
+        .unwrap_or(0);
+
+    let move_focus = |current: usize, delta: isize| -> usize {
+        let len = fields.len() as isize;
+        let next = (current as isize + delta).rem_euclid(len);
+        next as usize
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            *follow_up = Some(Message::DismissDialog);
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            focus_index = move_focus(focus_index, 1);
+            state.focused_field = fields[focus_index];
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            focus_index = move_focus(focus_index, -1);
+            state.focused_field = fields[focus_index];
+        }
+        KeyCode::Left if state.focused_field == EditTaskField::Save => {
+            state.focused_field = EditTaskField::Cancel;
+        }
+        KeyCode::Right if state.focused_field == EditTaskField::Cancel => {
+            state.focused_field = EditTaskField::Save;
+        }
+        KeyCode::Backspace => {
+            if state.focused_field == EditTaskField::Title {
+                state.title_input.pop();
+            }
+        }
+        KeyCode::Enter => {
+            *follow_up = Some(match state.focused_field {
+                EditTaskField::Cancel => Message::DismissDialog,
+                _ => Message::ConfirmEditTask,
+            });
+        }
+        KeyCode::Char(ch) => {
+            if state.focused_field == EditTaskField::Title {
+                state.title_input.push(ch);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn handle_worktree_not_found_dialog_key(
     state: &mut WorktreeNotFoundDialogState,
     key: KeyEvent,
@@ -1435,6 +1499,16 @@ mod tests {
         }
     }
 
+    fn edit_task_state(focused_field: EditTaskField) -> EditTaskDialogState {
+        EditTaskDialogState {
+            task_id: Uuid::new_v4(),
+            repo_path: "/tmp/repo".to_string(),
+            branch: "feature/edit".to_string(),
+            title_input: "Edit me".to_string(),
+            focused_field,
+        }
+    }
+
     #[test]
     fn delete_task_enter_toggles_focused_checkbox_option() {
         let mut state = delete_task_state(DeleteTaskField::KillTmux);
@@ -1486,6 +1560,40 @@ mod tests {
             &mut follow_up,
         );
         assert_eq!(follow_up, Some(Message::DismissDialog));
+    }
+
+    #[test]
+    fn edit_task_enter_routes_to_confirm_or_cancel() {
+        let mut state = edit_task_state(EditTaskField::Save);
+        let mut follow_up = None;
+
+        handle_edit_task_dialog_key(&mut state, key_enter(), &mut follow_up);
+        assert_eq!(follow_up, Some(Message::ConfirmEditTask));
+
+        state.focused_field = EditTaskField::Cancel;
+        follow_up = None;
+        handle_edit_task_dialog_key(&mut state, key_enter(), &mut follow_up);
+        assert_eq!(follow_up, Some(Message::DismissDialog));
+    }
+
+    #[test]
+    fn edit_task_backspace_edits_title_only_when_title_focused() {
+        let mut state = edit_task_state(EditTaskField::Title);
+        let mut follow_up = None;
+        handle_edit_task_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(state.title_input, "Edit m");
+
+        state.focused_field = EditTaskField::Save;
+        handle_edit_task_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+            &mut follow_up,
+        );
+        assert_eq!(state.title_input, "Edit m");
     }
 
     #[test]

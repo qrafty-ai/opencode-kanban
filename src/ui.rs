@@ -25,8 +25,8 @@ use crate::app::interaction::InteractionLayer;
 use crate::app::{
     ActiveDialog, App, ArchiveTaskDialogState, CATEGORY_COLOR_PALETTE, CategoryColorField,
     CategoryInputField, CategoryInputMode, ChangeSummaryState, ConfirmCancelField, ContextMenuItem,
-    DeleteProjectDialogState, DeleteRepoDialogState, DeleteTaskField, DetailFocus, Message,
-    NewProjectDialogState, NewProjectField, NewTaskField, ProjectDetailCache,
+    DeleteProjectDialogState, DeleteRepoDialogState, DeleteTaskField, DetailFocus, EditTaskField,
+    Message, NewProjectDialogState, NewProjectField, NewTaskField, ProjectDetailCache,
     RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
     RepoPickerTarget, SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode,
     category_color_label,
@@ -144,7 +144,7 @@ fn render_project_list(frame: &mut Frame<'_>, app: &mut App) {
     render_project_detail_panel(frame, content[1], app);
 
     let mut footer = Label::default()
-        .text("n: new  r: rename  x: delete  Enter: open  j/k: navigate  q: quit")
+        .text("n: new  r: rename  x: delete  Enter: open  j/k: navigate  J/K: reorder  q: quit")
         .alignment(Alignment::Center)
         .foreground(theme.base.text_muted)
         .background(theme.base.canvas);
@@ -201,7 +201,8 @@ fn render_project_detail_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
         lines.push(TextSpan::new(""));
         lines.push(TextSpan::new("ACTIONS").fg(theme.base.header).bold());
         lines.push(
-            TextSpan::new("  Enter open  r rename  x delete  n new").fg(theme.base.text_muted),
+            TextSpan::new("  Enter open  r rename  x delete  n new  J/K reorder")
+                .fg(theme.base.text_muted),
         );
     } else {
         lines.push(TextSpan::new("No project selected").fg(theme.base.text_muted));
@@ -396,10 +397,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         match app.view_mode {
             ViewMode::Kanban => {
-                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  n:new  a:archive  A:archive view  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x/p:category  H/L move  J/K reorder  v:view"
+                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  n:new  e:edit  a:archive  A:archive view  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x/p:category  H/L move  J/K reorder  v:view"
             }
             ViewMode::SidePanel => {
-                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  Space:collapse  a:archive  A:archive view  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
+                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  Space:collapse  e:edit  a:archive  A:archive view  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
             }
         }
     };
@@ -1287,6 +1288,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::NewTask(_) => (80, 72),
         ActiveDialog::ArchiveTask(_) => (55, 35),
         ActiveDialog::DeleteTask(_) => (60, 60),
+        ActiveDialog::EditTask(_) => (70, 45),
         ActiveDialog::CategoryInput(_) => (60, 40),
         ActiveDialog::CategoryColor(_) => (60, 58),
         ActiveDialog::DeleteCategory(_) => (60, 40),
@@ -1316,6 +1318,7 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::DeleteTask(state) => {
             render_delete_task_dialog(frame, dialog_area, app, &state)
         }
+        ActiveDialog::EditTask(state) => render_edit_task_dialog(frame, dialog_area, app, &state),
         ActiveDialog::ArchiveTask(state) => {
             render_archive_task_dialog(frame, dialog_area, app, &state)
         }
@@ -1781,6 +1784,109 @@ fn render_delete_task_dialog(
         app,
         Some(Message::DismissDialog),
     );
+}
+
+fn render_edit_task_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &mut App,
+    state: &crate::app::EditTaskDialogState,
+) {
+    let theme = app.theme;
+    let surface = dialog_surface(theme);
+
+    let mut panel =
+        dialog_panel("Edit Task", Alignment::Center, theme, surface).text([TextSpan::from("")]);
+    panel.view(frame, area);
+
+    let panel_inner = inset_rect(area, 1, 1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(panel_inner);
+
+    render_input_component(
+        frame,
+        layout[0],
+        "Repo",
+        &state.repo_path,
+        false,
+        theme,
+        None,
+    );
+    render_input_component(
+        frame,
+        layout[1],
+        "Branch",
+        &state.branch,
+        false,
+        theme,
+        None,
+    );
+    render_input_component(
+        frame,
+        layout[2],
+        "Title",
+        &state.title_input,
+        matches!(state.focused_field, EditTaskField::Title),
+        theme,
+        None,
+    );
+    app.interaction_map.register_click(
+        InteractionLayer::Dialog,
+        layout[2],
+        Message::FocusEditTaskField(EditTaskField::Title),
+    );
+
+    let mut read_only_hint = Label::default()
+        .text("Repo and branch are read-only in this dialog")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    read_only_hint.view(frame, layout[3]);
+
+    let buttons = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[4]);
+
+    render_action_button(
+        frame,
+        buttons[0],
+        "Save",
+        matches!(state.focused_field, EditTaskField::Save),
+        false,
+        app,
+        Some(Message::ConfirmEditTask),
+    );
+    render_action_button(
+        frame,
+        buttons[1],
+        "Cancel",
+        matches!(state.focused_field, EditTaskField::Cancel),
+        false,
+        app,
+        Some(Message::DismissDialog),
+    );
+
+    let mut hint = Label::default()
+        .text("Tab: next field  Enter: confirm  Esc: cancel")
+        .alignment(Alignment::Center)
+        .foreground(theme.base.text_muted)
+        .background(surface);
+    hint.view(frame, layout[5]);
+
+    if matches!(state.focused_field, EditTaskField::Title) {
+        set_text_input_cursor(frame, layout[2], &state.title_input);
+    }
 }
 
 fn render_archive_task_dialog(
@@ -3613,6 +3719,7 @@ fn render_context_menu(frame: &mut Frame<'_>, app: &mut App) {
         .iter()
         .map(|item| match item {
             ContextMenuItem::Attach => " Attach ",
+            ContextMenuItem::Edit => " Edit   ",
             ContextMenuItem::Delete => " Delete ",
             ContextMenuItem::Move => " Move   ",
         })
@@ -3662,6 +3769,7 @@ fn render_context_menu(frame: &mut Frame<'_>, app: &mut App) {
         let item_rect = Rect::new(x + 1, item_y, width.saturating_sub(2), 1);
         let msg = match item {
             ContextMenuItem::Attach => Message::AttachSelectedTask,
+            ContextMenuItem::Edit => Message::OpenEditTaskDialog,
             ContextMenuItem::Delete => Message::OpenDeleteTaskDialog,
             ContextMenuItem::Move => Message::DismissDialog,
         };

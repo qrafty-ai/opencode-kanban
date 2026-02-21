@@ -32,6 +32,7 @@ pub struct Settings {
     pub poll_interval_ms: u64,
     pub side_panel_width: u16,
     pub scroll_column_width_chars: u16,
+    pub project_order: Vec<String>,
     pub keybindings: KeybindingsConfig,
 }
 
@@ -53,6 +54,7 @@ impl Default for Settings {
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             side_panel_width: DEFAULT_SIDE_PANEL_WIDTH,
             scroll_column_width_chars: DEFAULT_SCROLL_COLUMN_WIDTH_CHARS,
+            project_order: Vec::new(),
             keybindings: KeybindingsConfig::default(),
         }
     }
@@ -312,6 +314,7 @@ mod tests {
             settings.scroll_column_width_chars,
             DEFAULT_SCROLL_COLUMN_WIDTH_CHARS
         );
+        assert!(settings.project_order.is_empty());
         assert_eq!(settings.keybindings, KeybindingsConfig::default());
         assert_eq!(settings.custom_theme, CustomThemeConfig::default());
     }
@@ -328,6 +331,7 @@ mod tests {
             poll_interval_ms: 2_500,
             side_panel_width: 55,
             scroll_column_width_chars: 48,
+            project_order: vec!["/tmp/demo.sqlite".to_string()],
             keybindings: KeybindingsConfig::default(),
         };
         expected.validate();
@@ -350,6 +354,7 @@ mod tests {
             poll_interval_ms: 1,
             side_panel_width: 999,
             scroll_column_width_chars: 999,
+            project_order: Vec::new(),
             keybindings: KeybindingsConfig::default(),
         };
 

@@ -410,6 +410,7 @@ impl App {
             }
             Message::OpenDeleteCategoryDialog => self.open_delete_category_dialog()?,
             Message::OpenDeleteTaskDialog => self.open_delete_task_dialog()?,
+            Message::OpenEditTaskDialog => self.open_edit_task_dialog()?,
             Message::OpenArchiveTaskDialog => self.open_archive_task_dialog()?,
             Message::SubmitCategoryInput => self.confirm_category_input()?,
             Message::ConfirmDeleteCategory => self.confirm_delete_category()?,
@@ -464,6 +465,7 @@ impl App {
             | Message::DeleteTaskToggleRemoveWorktree
             | Message::DeleteTaskToggleDeleteBranch => {}
             Message::ConfirmDeleteTask => self.confirm_delete_task()?,
+            Message::ConfirmEditTask => self.confirm_edit_task()?,
             Message::ConfirmArchiveTask => self.confirm_archive_task()?,
             Message::UnarchiveTask => self.unarchive_selected_task()?,
             Message::ArchiveSelectUp => {
@@ -502,6 +504,36 @@ impl App {
                     if let Some(project) = self.project_list.get(self.selected_project_index) {
                         self.project_detail_cache = load_project_detail(project);
                     }
+                }
+            }
+            Message::ProjectListMoveUp => {
+                if self.selected_project_index > 0
+                    && self.selected_project_index < self.project_list.len()
+                {
+                    let from = self.selected_project_index;
+                    let to = from - 1;
+                    self.project_list.swap(from, to);
+                    self.selected_project_index = to;
+                    self.project_list_state
+                        .select(Some(self.selected_project_index));
+                    if let Some(project) = self.project_list.get(self.selected_project_index) {
+                        self.project_detail_cache = load_project_detail(project);
+                    }
+                    self.persist_project_order_with_notice();
+                }
+            }
+            Message::ProjectListMoveDown => {
+                if self.selected_project_index + 1 < self.project_list.len() {
+                    let from = self.selected_project_index;
+                    let to = from + 1;
+                    self.project_list.swap(from, to);
+                    self.selected_project_index = to;
+                    self.project_list_state
+                        .select(Some(self.selected_project_index));
+                    if let Some(project) = self.project_list.get(self.selected_project_index) {
+                        self.project_detail_cache = load_project_detail(project);
+                    }
+                    self.persist_project_order_with_notice();
                 }
             }
             Message::ProjectListConfirm => {
@@ -734,6 +766,11 @@ impl App {
                     if field != DeleteTaskField::Delete {
                         state.confirm_destructive = false;
                     }
+                }
+            }
+            Message::FocusEditTaskField(field) => {
+                if let ActiveDialog::EditTask(state) = &mut self.active_dialog {
+                    state.focused_field = field;
                 }
             }
             Message::ToggleDeleteTaskCheckbox(field) => {

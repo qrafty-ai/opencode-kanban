@@ -61,6 +61,7 @@ impl App {
                                 task_column: col,
                                 items: vec![
                                     ContextMenuItem::Attach,
+                                    ContextMenuItem::Edit,
                                     ContextMenuItem::Delete,
                                     ContextMenuItem::Move,
                                 ],
