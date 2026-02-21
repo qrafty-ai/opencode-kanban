@@ -1,15 +1,21 @@
 use std::{
-    io, panic,
+    io::{self, Write},
+    panic,
     process::Command,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use crossterm::{
+    cursor::Show,
     event::DisableMouseCapture,
     execute,
+    style::ResetColor,
     terminal::{LeaveAlternateScreen, disable_raw_mode},
 };
 use tuirealm::{
@@ -59,6 +65,8 @@ enum RunOutcome {
     Exit(i32),
 }
 
+static TERMINAL_RESTORED: AtomicBool = AtomicBool::new(false);
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let log_path = init_logging().expect("Failed to initialize logging");
@@ -100,8 +108,8 @@ fn run_app() -> Result<RunOutcome> {
 
     validate_runtime_environment()?;
 
-    let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
+    let mut terminal = setup_terminal()?;
 
     let project_name = cli.project.as_deref();
     let cli_theme_override = cli
@@ -135,6 +143,11 @@ fn run_app() -> Result<RunOutcome> {
             apply_message(&app, message)?;
         }
     }
+
+    let _ = terminal.disable_raw_mode();
+    let _ = terminal.leave_alternate_screen();
+    let _ = terminal.clear_screen();
+    TERMINAL_RESTORED.store(true, Ordering::SeqCst);
 
     Ok(RunOutcome::Continue)
 }
@@ -182,11 +195,17 @@ fn validate_runtime_environment() -> Result<()> {
 }
 
 fn setup_terminal() -> Result<TerminalBridge<CrosstermTerminalAdapter>> {
+    TERMINAL_RESTORED.store(false, Ordering::SeqCst);
+
     let mut terminal =
-        TerminalBridge::init_crossterm().context("failed to initialize terminal bridge")?;
+        TerminalBridge::new_crossterm().context("failed to initialize terminal bridge")?;
+
     terminal
-        .enable_mouse_capture()
-        .context("failed to enable mouse capture")?;
+        .enable_raw_mode()
+        .context("failed to enable raw mode")?;
+    terminal
+        .enter_alternate_screen()
+        .context("failed to enter alternate screen")?;
 
     Ok(terminal)
 }
@@ -205,10 +224,25 @@ fn install_panic_hook_with_log(log_path: std::path::PathBuf) {
 }
 
 fn restore_terminal() -> Result<()> {
-    disable_raw_mode().context("failed to disable raw mode")?;
-    let mut stdout = io::stdout();
-    execute!(stdout, LeaveAlternateScreen, DisableMouseCapture)
-        .context("failed to leave alternate screen")?;
+    if TERMINAL_RESTORED.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let _ = disable_raw_mode();
+
+    let mut stderr = io::stderr();
+    let _ = execute!(
+        stderr,
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        Show,
+        ResetColor
+    );
+    let _ = stderr.write_all(
+        b"\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[0m\x1b[2J\x1b[H",
+    );
+    let _ = stderr.flush();
+
     Ok(())
 }
 
