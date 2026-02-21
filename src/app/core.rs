@@ -54,6 +54,15 @@ pub struct App {
     pub collapsed_categories: HashSet<Uuid>,
     pub current_log_buffer: Option<String>,
     pub current_change_summary: Option<GitChangeSummary>,
+    pub current_change_summary_state: ChangeSummaryState,
+    pub(crate) current_change_summary_key: Option<ChangeSummaryRequestKey>,
+    pub(crate) change_summary_cache:
+        HashMap<ChangeSummaryRequestKey, Result<GitChangeSummary, String>>,
+    pub(crate) change_summary_in_flight: HashSet<ChangeSummaryRequestKey>,
+    pub(crate) change_summary_generation: u64,
+    pub(crate) change_summary_request_tx: Option<Sender<ChangeSummaryRequest>>,
+    pub(crate) change_summary_result_rx: Receiver<ChangeSummaryResult>,
+    pub(crate) change_summary_worker: Option<std::thread::JoinHandle<()>>,
     pub detail_focus: DetailFocus,
     pub detail_scroll_offset: usize,
     pub log_scroll_offset: usize,
@@ -122,6 +131,8 @@ impl App {
         let session_title_cache = Arc::new(Mutex::new(HashMap::new()));
         let session_message_cache = Arc::new(Mutex::new(HashMap::new()));
         let settings = crate::settings::Settings::load();
+        let (change_summary_request_tx, change_summary_result_rx, change_summary_worker) =
+            spawn_change_summary_worker();
         let env_theme = std::env::var("OPENCODE_KANBAN_THEME")
             .ok()
             .and_then(|value| ThemePreset::from_str(&value).ok());
@@ -176,6 +187,14 @@ impl App {
             collapsed_categories: HashSet::new(),
             current_log_buffer: None,
             current_change_summary: None,
+            current_change_summary_state: ChangeSummaryState::Unavailable,
+            current_change_summary_key: None,
+            change_summary_cache: HashMap::new(),
+            change_summary_in_flight: HashSet::new(),
+            change_summary_generation: 0,
+            change_summary_request_tx: Some(change_summary_request_tx),
+            change_summary_result_rx,
+            change_summary_worker: Some(change_summary_worker),
             detail_focus: DetailFocus::List,
             detail_scroll_offset: 0,
             log_scroll_offset: 0,
@@ -366,6 +385,10 @@ impl App {
         if let Ok(mut cache) = self.session_message_cache.lock() {
             cache.retain(|task_id, _| self.tasks.iter().any(|task| task.id == *task_id));
         }
+        self.change_summary_cache
+            .retain(|key, _| self.tasks.iter().any(|task| task.id == key.task_id));
+        self.change_summary_in_flight
+            .retain(|key| self.tasks.iter().any(|task| task.id == key.task_id));
 
         self.collapsed_categories.retain(|category_id| {
             self.categories
@@ -436,6 +459,7 @@ impl App {
         if let Some(handle) = self.poller_thread.take() {
             handle.abort();
         }
+        self.reset_change_summary_tracking();
 
         let db = Database::open(&path)?;
         self.db = db;
@@ -478,6 +502,127 @@ impl App {
             Some(stem.to_string())
         }
     }
+
+    pub(crate) fn clear_current_change_summary(&mut self) {
+        self.current_change_summary = None;
+        self.current_change_summary_state = ChangeSummaryState::Unavailable;
+        self.current_change_summary_key = None;
+    }
+
+    pub(crate) fn task_change_summary_key(&self, task: &Task) -> Option<ChangeSummaryRequestKey> {
+        let repo = self.repo_for_task(task)?;
+        let source_path = task
+            .worktree_path
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&repo.path));
+        Some(ChangeSummaryRequestKey {
+            task_id: task.id,
+            source_path,
+        })
+    }
+
+    pub(crate) fn queue_change_summary_request_if_needed(
+        &mut self,
+        key: &ChangeSummaryRequestKey,
+    ) -> bool {
+        if self.change_summary_in_flight.contains(key) {
+            return true;
+        }
+
+        let Some(request_tx) = self.change_summary_request_tx.as_ref() else {
+            return false;
+        };
+
+        let request = ChangeSummaryRequest {
+            generation: self.change_summary_generation,
+            key: key.clone(),
+        };
+
+        if request_tx.send(request).is_ok() {
+            self.change_summary_in_flight.insert(key.clone());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn apply_cached_change_summary(&mut self) {
+        let Some(key) = self.current_change_summary_key.as_ref() else {
+            return;
+        };
+
+        let Some(cached) = self.change_summary_cache.get(key) else {
+            return;
+        };
+
+        match cached {
+            Ok(summary) => {
+                self.current_change_summary = Some(summary.clone());
+                self.current_change_summary_state = ChangeSummaryState::Ready;
+            }
+            Err(err) => {
+                self.current_change_summary = None;
+                self.current_change_summary_state = ChangeSummaryState::Error(err.clone());
+            }
+        }
+    }
+
+    pub(crate) fn drain_change_summary_results(&mut self) {
+        while let Ok(result) = self.change_summary_result_rx.try_recv() {
+            if result.generation != self.change_summary_generation {
+                continue;
+            }
+            self.change_summary_in_flight.remove(&result.key);
+            self.change_summary_cache.insert(result.key, result.summary);
+        }
+        self.apply_cached_change_summary();
+    }
+
+    pub(crate) fn update_current_change_summary_for_task(&mut self, task: Option<&Task>) {
+        let Some(task) = task else {
+            self.clear_current_change_summary();
+            return;
+        };
+
+        let Some(key) = self.task_change_summary_key(task) else {
+            self.current_change_summary = None;
+            self.current_change_summary_state = ChangeSummaryState::Unavailable;
+            self.current_change_summary_key = None;
+            return;
+        };
+
+        self.current_change_summary_key = Some(key.clone());
+
+        if let Some(cached) = self.change_summary_cache.get(&key) {
+            match cached {
+                Ok(summary) => {
+                    self.current_change_summary = Some(summary.clone());
+                    self.current_change_summary_state = ChangeSummaryState::Ready;
+                }
+                Err(err) => {
+                    self.current_change_summary = None;
+                    self.current_change_summary_state = ChangeSummaryState::Error(err.clone());
+                }
+            }
+            return;
+        }
+
+        self.current_change_summary = None;
+        if self.queue_change_summary_request_if_needed(&key) {
+            self.current_change_summary_state = ChangeSummaryState::Loading;
+        } else {
+            self.current_change_summary_state = ChangeSummaryState::Unavailable;
+        }
+    }
+
+    pub(crate) fn reset_change_summary_tracking(&mut self) {
+        self.change_summary_generation = self.change_summary_generation.saturating_add(1);
+        self.change_summary_cache.clear();
+        self.change_summary_in_flight.clear();
+        self.clear_current_change_summary();
+        while self.change_summary_result_rx.try_recv().is_ok() {}
+    }
 }
 
 impl Drop for App {
@@ -485,6 +630,10 @@ impl Drop for App {
         self.poller_stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.poller_thread.take() {
             handle.abort();
+        }
+        self.change_summary_request_tx.take();
+        if let Some(worker) = self.change_summary_worker.take() {
+            let _ = worker.join();
         }
     }
 }

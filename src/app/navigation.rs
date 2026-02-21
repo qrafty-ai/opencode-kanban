@@ -1,8 +1,5 @@
-use std::path::Path;
-
 use super::side_panel::{selected_task_from_side_panel_rows, side_panel_rows_from};
 use super::{App, DetailFocus, SidePanelRow, View, ViewMode};
-use crate::git::{GitChangeSummary, git_change_summary_against_nearest_ancestor};
 use crate::types::{Repo, Task};
 
 impl App {
@@ -158,6 +155,7 @@ impl App {
                     if rows.is_empty() {
                         self.side_panel_selected_row = 0;
                         self.current_log_buffer = None;
+                        self.clear_current_change_summary();
                     } else {
                         let current = self.side_panel_selected_row.min(rows.len() - 1);
                         let next = (current + self.side_panel_half_page_step()).min(rows.len() - 1);
@@ -186,6 +184,7 @@ impl App {
                     if rows.is_empty() {
                         self.side_panel_selected_row = 0;
                         self.current_log_buffer = None;
+                        self.clear_current_change_summary();
                     } else {
                         let current = self.side_panel_selected_row.min(rows.len() - 1);
                         let prev = current.saturating_sub(self.side_panel_half_page_step());
@@ -208,6 +207,7 @@ impl App {
                     if rows.is_empty() {
                         self.side_panel_selected_row = 0;
                         self.current_log_buffer = None;
+                        self.clear_current_change_summary();
                     } else {
                         self.sync_side_panel_selection_at(&rows, rows.len() - 1, true);
                     }
@@ -238,6 +238,7 @@ impl App {
                     if rows.is_empty() {
                         self.side_panel_selected_row = 0;
                         self.current_log_buffer = None;
+                        self.clear_current_change_summary();
                     } else {
                         self.sync_side_panel_selection_at(&rows, 0, true);
                     }
@@ -290,7 +291,7 @@ impl App {
             self.side_panel_selected_row = 0;
             if clear_log {
                 self.current_log_buffer = None;
-                self.current_change_summary = None;
+                self.clear_current_change_summary();
                 self.detail_scroll_offset = 0;
                 self.log_scroll_offset = 0;
                 self.log_expanded_scroll_offset = 0;
@@ -301,6 +302,7 @@ impl App {
 
         let index = index.min(rows.len() - 1);
         self.side_panel_selected_row = index;
+        let mut selected_task: Option<Task> = None;
 
         match &rows[index] {
             SidePanelRow::CategoryHeader { column_index, .. } => {
@@ -312,22 +314,24 @@ impl App {
             SidePanelRow::Task {
                 column_index,
                 index_in_column,
+                task,
                 ..
             } => {
                 self.focused_column = (*column_index).min(self.categories.len().saturating_sub(1));
                 self.selected_task_per_column
                     .insert(*column_index, *index_in_column);
+                selected_task = Some((**task).clone());
             }
         }
 
         if clear_log {
             self.current_log_buffer = None;
-            self.current_change_summary = None;
             self.detail_scroll_offset = 0;
             self.log_scroll_offset = 0;
             self.log_expanded_scroll_offset = 0;
             self.log_expanded_entries.clear();
         }
+        self.update_current_change_summary_for_task(selected_task.as_ref());
     }
 
     pub(crate) fn toggle_side_panel_category_collapse(&mut self) {
@@ -335,6 +339,7 @@ impl App {
         if rows.is_empty() {
             self.side_panel_selected_row = 0;
             self.current_log_buffer = None;
+            self.clear_current_change_summary();
             self.detail_scroll_offset = 0;
             self.log_scroll_offset = 0;
             self.log_expanded_scroll_offset = 0;
@@ -370,15 +375,5 @@ impl App {
             .iter()
             .find(|repo| repo.id == task.repo_id)
             .cloned()
-    }
-
-    pub(crate) fn task_change_summary(&self, task: &Task) -> Option<GitChangeSummary> {
-        let repo = self.repo_for_task(task)?;
-        let path = task
-            .worktree_path
-            .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new(&repo.path));
-        git_change_summary_against_nearest_ancestor(path).ok()
     }
 }

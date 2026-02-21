@@ -8,11 +8,12 @@ impl App {
             Message::Tick => {
                 self.pulse_phase = (self.pulse_phase + 1) % 4;
                 self.refresh_data()?;
+                self.drain_change_summary_results();
 
                 if self.view_mode == ViewMode::SidePanel {
                     let Some(task) = self.selected_task() else {
                         self.current_log_buffer = None;
-                        self.current_change_summary = None;
+                        self.clear_current_change_summary();
                         self.maybe_show_tmux_mouse_hint();
                         return Ok(());
                     };
@@ -24,7 +25,7 @@ impl App {
                         self.current_log_buffer = Self::build_log_buffer_from_messages(&messages);
                     }
 
-                    self.current_change_summary = self.task_change_summary(&task);
+                    self.update_current_change_summary_for_task(Some(&task));
                 }
             }
             Message::Resize(w, h) => {

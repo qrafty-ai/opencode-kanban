@@ -21,7 +21,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -51,7 +53,10 @@ pub use self::state::{
 
 use crate::command_palette::{CommandPaletteState, all_commands};
 use crate::db::Database;
-use crate::git::{GitChangeSummary, git_delete_branch, git_remove_worktree};
+use crate::git::{
+    GitChangeSummary, git_change_summary_against_nearest_ancestor, git_delete_branch,
+    git_remove_worktree,
+};
 use crate::keybindings::Keybindings;
 use crate::opencode::{OpenCodeServerManager, Status, ensure_server_ready};
 use crate::projects::{self, ProjectInfo};
@@ -85,6 +90,59 @@ pub enum SidePanelRow {
         category_id: Uuid,
         task: Box<Task>,
     },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ChangeSummaryState {
+    Loading,
+    Ready,
+    Unavailable,
+    Error(String),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub(crate) struct ChangeSummaryRequestKey {
+    pub(crate) task_id: Uuid,
+    pub(crate) source_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct ChangeSummaryRequest {
+    pub(crate) generation: u64,
+    pub(crate) key: ChangeSummaryRequestKey,
+}
+
+#[derive(Debug)]
+pub(crate) struct ChangeSummaryResult {
+    pub(crate) generation: u64,
+    pub(crate) key: ChangeSummaryRequestKey,
+    pub(crate) summary: Result<GitChangeSummary, String>,
+}
+
+pub(crate) fn spawn_change_summary_worker() -> (
+    Sender<ChangeSummaryRequest>,
+    Receiver<ChangeSummaryResult>,
+    thread::JoinHandle<()>,
+) {
+    let (request_tx, request_rx) = mpsc::channel::<ChangeSummaryRequest>();
+    let (result_tx, result_rx) = mpsc::channel::<ChangeSummaryResult>();
+    let worker = thread::spawn(move || {
+        while let Ok(request) = request_rx.recv() {
+            let summary = git_change_summary_against_nearest_ancestor(&request.key.source_path)
+                .map_err(|err| err.to_string());
+            if result_tx
+                .send(ChangeSummaryResult {
+                    generation: request.generation,
+                    key: request.key,
+                    summary,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    (request_tx, result_rx, worker)
 }
 
 impl App {
@@ -680,7 +738,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use chrono::Utc;
     use crossterm::event::{
@@ -1041,6 +1099,8 @@ mod tests {
         let categories = db.list_categories()?;
         let ids = [categories[0].id, categories[1].id, categories[2].id];
         let task = db.add_task(repo.id, "feature/category-edit-tests", "Task", ids[1])?;
+        let (change_summary_request_tx, change_summary_result_rx, change_summary_worker) =
+            spawn_change_summary_worker();
 
         let mut app = App {
             should_quit: false,
@@ -1081,6 +1141,14 @@ mod tests {
             collapsed_categories: HashSet::new(),
             current_log_buffer: None,
             current_change_summary: None,
+            current_change_summary_state: ChangeSummaryState::Unavailable,
+            current_change_summary_key: None,
+            change_summary_cache: HashMap::new(),
+            change_summary_in_flight: HashSet::new(),
+            change_summary_generation: 0,
+            change_summary_request_tx: Some(change_summary_request_tx),
+            change_summary_result_rx,
+            change_summary_worker: Some(change_summary_worker),
             detail_focus: DetailFocus::List,
             detail_scroll_offset: 0,
             log_scroll_offset: 0,
@@ -1107,6 +1175,58 @@ mod tests {
         app.selected_task_per_column.insert(1, 0);
 
         Ok((app, repo_dir, task.id, ids))
+    }
+
+    #[test]
+    fn change_summary_request_sets_loading_and_tracks_in_flight() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        let task = app.selected_task().context("expected selected task")?;
+
+        app.update_current_change_summary_for_task(Some(&task));
+
+        let key = app
+            .task_change_summary_key(&task)
+            .context("expected change summary key")?;
+        assert_eq!(app.current_change_summary, None);
+        assert_eq!(
+            app.current_change_summary_state,
+            ChangeSummaryState::Loading
+        );
+        assert_eq!(app.current_change_summary_key, Some(key.clone()));
+        assert!(app.change_summary_in_flight.contains(&key));
+        Ok(())
+    }
+
+    #[test]
+    fn change_summary_drain_transitions_out_of_loading() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        let task = app.selected_task().context("expected selected task")?;
+
+        app.update_current_change_summary_for_task(Some(&task));
+        assert_eq!(
+            app.current_change_summary_state,
+            ChangeSummaryState::Loading
+        );
+
+        for _ in 0..100 {
+            app.drain_change_summary_results();
+            if app.current_change_summary_state != ChangeSummaryState::Loading {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_ne!(
+            app.current_change_summary_state,
+            ChangeSummaryState::Loading
+        );
+        assert!(matches!(
+            app.current_change_summary_state,
+            ChangeSummaryState::Ready
+                | ChangeSummaryState::Error(_)
+                | ChangeSummaryState::Unavailable
+        ));
+        Ok(())
     }
 
     #[test]

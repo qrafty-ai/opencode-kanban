@@ -24,7 +24,7 @@ use tuirealm::{
 use crate::app::interaction::InteractionLayer;
 use crate::app::{
     ActiveDialog, App, ArchiveTaskDialogState, CATEGORY_COLOR_PALETTE, CategoryColorField,
-    CategoryInputField, CategoryInputMode, ConfirmCancelField, ContextMenuItem,
+    CategoryInputField, CategoryInputMode, ChangeSummaryState, ConfirmCancelField, ContextMenuItem,
     DeleteProjectDialogState, DeleteRepoDialogState, DeleteTaskField, DetailFocus, Message,
     NewProjectDialogState, NewProjectField, NewTaskField, ProjectDetailCache,
     RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
@@ -882,10 +882,34 @@ fn render_side_panel_task_details(frame: &mut Frame<'_>, area: Rect, app: &mut A
             }
         }
     } else {
-        lines.push(vec![
-            TextSpan::new(format!("{:>width$}: ", "Base", width = 11)).fg(theme.base.text_muted),
-            TextSpan::new("n/a").fg(theme.base.text_muted),
-        ]);
+        match &app.current_change_summary_state {
+            ChangeSummaryState::Loading => {
+                lines.push(vec![
+                    TextSpan::new(format!("{:>width$}: ", "Base", width = 11))
+                        .fg(theme.base.text_muted),
+                    TextSpan::new("loading...").fg(theme.base.text_muted),
+                ]);
+            }
+            ChangeSummaryState::Error(err) => {
+                lines.push(vec![
+                    TextSpan::new(format!("{:>width$}: ", "Base", width = 11))
+                        .fg(theme.base.text_muted),
+                    TextSpan::new("error").fg(theme.status.dead),
+                ]);
+                lines.push(vec![
+                    TextSpan::new(format!("{:>width$}  ", "", width = 11))
+                        .fg(theme.base.text_muted),
+                    TextSpan::new(clamp_text(err, 56)).fg(theme.base.text_muted),
+                ]);
+            }
+            ChangeSummaryState::Ready | ChangeSummaryState::Unavailable => {
+                lines.push(vec![
+                    TextSpan::new(format!("{:>width$}: ", "Base", width = 11))
+                        .fg(theme.base.text_muted),
+                    TextSpan::new("n/a").fg(theme.base.text_muted),
+                ]);
+            }
+        }
     }
 
     lines.push(vec![TextSpan::new("")]);
