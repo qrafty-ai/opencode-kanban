@@ -23,6 +23,8 @@ pub enum KeyAction {
     OpenArchiveView,
     ShrinkPanel,
     ExpandPanel,
+    ProjectNext,
+    ProjectPrev,
     ProjectUp,
     ProjectDown,
     ProjectConfirm,
@@ -194,6 +196,18 @@ const GLOBAL_DEFS: &[ActionDef] = &[
         action: KeyAction::ExpandPanel,
         description: "widen side panel",
         defaults: &[">"],
+    },
+    ActionDef {
+        id: "project_next",
+        action: KeyAction::ProjectNext,
+        description: "switch to next project",
+        defaults: &["N"],
+    },
+    ActionDef {
+        id: "project_prev",
+        action: KeyAction::ProjectPrev,
+        description: "switch to previous project",
+        defaults: &["P"],
     },
 ];
 
@@ -467,6 +481,13 @@ impl Keybindings {
             format!(
                 "  {}: toggle detail/kanban view",
                 self.display_for(KeyContext::Global, KeyAction::ToggleView)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {} / {}: switch next/previous project",
+                self.display_for(KeyContext::Global, KeyAction::ProjectNext)
+                    .unwrap_or_else(|| "-".to_string()),
+                self.display_for(KeyContext::Global, KeyAction::ProjectPrev)
                     .unwrap_or_else(|| "-".to_string())
             ),
             String::new(),

@@ -1188,6 +1188,85 @@ mod tests {
         Ok((app, repo_dir, task.id, ids))
     }
 
+    fn test_app_with_two_projects() -> Result<(App, TempDir)> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        let projects_dir = TempDir::new()?;
+        let project_a = projects_dir.path().join("alpha.sqlite");
+        let project_b = projects_dir.path().join("beta.sqlite");
+
+        Database::open(&project_a)?;
+        Database::open(&project_b)?;
+
+        app.project_list = vec![
+            ProjectInfo {
+                name: "alpha".to_string(),
+                path: project_a.clone(),
+            },
+            ProjectInfo {
+                name: "beta".to_string(),
+                path: project_b.clone(),
+            },
+        ];
+        app.selected_project_index = 0;
+        app.project_list_state = ListState::default();
+        app.project_list_state.select(Some(0));
+        app.project_detail_cache = app.project_list.first().and_then(load_project_detail);
+        app.current_view = View::Board;
+        app.db = Database::open(&project_a)?;
+        app.current_project_path = Some(project_a);
+        app.refresh_data()?;
+
+        Ok((app, projects_dir))
+    }
+
+    #[test]
+    fn shift_n_switches_to_next_project_and_wraps_in_board_view() -> Result<()> {
+        let (mut app, _projects_dir) = test_app_with_two_projects()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let _guard = runtime.enter();
+
+        app.view_mode = ViewMode::Kanban;
+        app.handle_key(key_char('N'))?;
+
+        assert_eq!(app.selected_project_index, 1);
+        assert_eq!(
+            app.current_project_path.as_deref(),
+            Some(app.project_list[1].path.as_path())
+        );
+
+        app.handle_key(key_char('N'))?;
+
+        assert_eq!(app.selected_project_index, 0);
+        assert_eq!(
+            app.current_project_path.as_deref(),
+            Some(app.project_list[0].path.as_path())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shift_p_switches_to_previous_project_in_detail_view() -> Result<()> {
+        let (mut app, _projects_dir) = test_app_with_two_projects()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let _guard = runtime.enter();
+
+        app.view_mode = ViewMode::SidePanel;
+        app.detail_focus = DetailFocus::Log;
+
+        app.handle_key(key_char('P'))?;
+
+        assert_eq!(app.selected_project_index, 1);
+        assert_eq!(
+            app.current_project_path.as_deref(),
+            Some(app.project_list[1].path.as_path())
+        );
+        Ok(())
+    }
+
     #[test]
     fn change_summary_request_sets_loading_and_tracks_in_flight() -> Result<()> {
         let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;

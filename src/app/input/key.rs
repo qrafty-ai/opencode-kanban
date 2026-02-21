@@ -78,6 +78,16 @@ impl App {
                 KeyAction::OpenArchiveView => {
                     self.update(Message::OpenArchiveView)?;
                 }
+                KeyAction::ProjectNext => {
+                    if self.current_view == View::Board {
+                        self.update(Message::SwitchToNextProject)?;
+                    }
+                }
+                KeyAction::ProjectPrev => {
+                    if self.current_view == View::Board {
+                        self.update(Message::SwitchToPrevProject)?;
+                    }
+                }
                 _ => {}
             }
             return Ok(());

@@ -76,6 +76,8 @@ pub enum Message {
     CycleTodoVisualization,
     SwitchToProjectList,
     SwitchToBoard(PathBuf),
+    SwitchToNextProject,
+    SwitchToPrevProject,
     ProjectListSelectUp,
     ProjectListSelectDown,
     ProjectListConfirm,
