@@ -19,6 +19,19 @@ use crate::opencode::{Status, opencode_attach_command};
 use crate::types::{CommandFrequency, Repo};
 
 const REPO_SELECTION_USAGE_PREFIX: &str = "repo-selection:";
+const GENERATED_BRANCH_PREFIX: &str = "feature";
+
+const BRANCH_ADJECTIVES: &[&str] = &[
+    "amber", "brisk", "calm", "daring", "eager", "frost", "golden", "honest", "ivory", "jolly",
+    "kind", "lunar", "mellow", "nimble", "opal", "proud", "quiet", "rapid", "solar", "tidy",
+    "urban", "vivid", "wise", "young", "zesty",
+];
+
+const BRANCH_NOUNS: &[&str] = &[
+    "badger", "beacon", "cedar", "drift", "ember", "falcon", "garden", "harbor", "island",
+    "jungle", "kernel", "lagoon", "meadow", "nebula", "otter", "prairie", "quartz", "rocket",
+    "summit", "thunder", "uplink", "voyage", "willow", "yonder", "zephyr",
+];
 
 pub(crate) fn create_task_pipeline_with_runtime(
     db: &Database,
@@ -93,12 +106,10 @@ pub(crate) fn create_task_pipeline_with_runtime(
         let repo = resolve_repo_for_creation(db, repos, state, runtime)?;
         let repo_path = PathBuf::from(&repo.path);
 
-        let branch = state.branch_input.trim();
-        if branch.is_empty() {
-            anyhow::bail!("branch cannot be empty");
-        }
+        let branch =
+            resolve_create_task_branch(state.branch_input.trim(), state.title_input.trim())?;
         runtime
-            .git_validate_branch(&repo_path, branch)
+            .git_validate_branch(&repo_path, &branch)
             .context("branch validation failed")?;
 
         let base_ref = if state.base_input.trim().is_empty() {
@@ -126,24 +137,19 @@ pub(crate) fn create_task_pipeline_with_runtime(
                 worktrees_root.display()
             )
         })?;
-        let derived_worktree_path = derive_worktree_path(&worktrees_root, &repo_path, branch);
+        let derived_worktree_path = derive_worktree_path(&worktrees_root, &repo_path, &branch);
 
         runtime
-            .git_create_worktree(&repo_path, &derived_worktree_path, branch, &base_ref)
+            .git_create_worktree(&repo_path, &derived_worktree_path, &branch, &base_ref)
             .context("worktree creation failed")?;
 
-        (
-            repo,
-            branch.to_string(),
-            repo_path,
-            derived_worktree_path,
-            true,
-        )
+        (repo, branch, repo_path, derived_worktree_path, true)
     };
 
     let mut created_session_name: Option<String> = None;
     let mut created_task_id: Option<Uuid> = None;
     let branch_name = branch.clone();
+    let resolved_title = resolve_task_title(state.title_input.trim(), &branch_name);
 
     let mut operation = || -> Result<()> {
         let session_name =
@@ -159,12 +165,7 @@ pub(crate) fn create_task_pipeline_with_runtime(
         created_session_name = Some(session_name.clone());
 
         let task = db
-            .add_task(
-                repo.id,
-                &branch_name,
-                state.title_input.trim(),
-                todo_category_id,
-            )
+            .add_task(repo.id, &branch_name, &resolved_title, todo_category_id)
             .context("failed to save task")?;
         created_task_id = Some(task.id);
 
@@ -202,6 +203,34 @@ pub(crate) fn create_task_pipeline_with_runtime(
     }
 
     Ok(CreateTaskOutcome { warning })
+}
+
+fn resolve_create_task_branch(branch_input: &str, title_input: &str) -> Result<String> {
+    let branch = branch_input.trim();
+    let title = title_input.trim();
+    if branch.is_empty() && title.is_empty() {
+        anyhow::bail!("enter branch or title");
+    }
+    if branch.is_empty() {
+        return Ok(generate_human_readable_branch_slug());
+    }
+    Ok(branch.to_string())
+}
+
+fn generate_human_readable_branch_slug() -> String {
+    let bytes = Uuid::new_v4().into_bytes();
+    let adjective = BRANCH_ADJECTIVES[bytes[0] as usize % BRANCH_ADJECTIVES.len()];
+    let noun = BRANCH_NOUNS[bytes[1] as usize % BRANCH_NOUNS.len()];
+    let suffix = u16::from_be_bytes([bytes[2], bytes[3]]) % 1000;
+    format!("{GENERATED_BRANCH_PREFIX}/{adjective}-{noun}-{suffix:03}")
+}
+
+fn resolve_task_title(title_input: &str, branch_name: &str) -> String {
+    let title = title_input.trim();
+    if title.is_empty() {
+        return branch_name.to_string();
+    }
+    title.to_string()
 }
 
 pub(crate) fn resolve_repo_for_creation(
@@ -423,4 +452,54 @@ fn repo_selection_bonus(
         48.0,
         120.0,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        generate_human_readable_branch_slug, resolve_create_task_branch, resolve_task_title,
+    };
+
+    #[test]
+    fn resolve_create_task_branch_rejects_empty_branch_and_title() {
+        let err = resolve_create_task_branch("", "").expect_err("empty branch+title must fail");
+        assert!(err.to_string().contains("enter branch or title"));
+    }
+
+    #[test]
+    fn resolve_create_task_branch_uses_input_branch_when_present() {
+        let branch = resolve_create_task_branch("feature/manual", "").expect("branch should pass");
+        assert_eq!(branch, "feature/manual");
+    }
+
+    #[test]
+    fn resolve_create_task_branch_generates_human_slug_when_branch_is_empty() {
+        let branch =
+            resolve_create_task_branch("", "Ship session flow").expect("branch should generate");
+        assert!(branch.starts_with("feature/"));
+        assert!(branch.len() > "feature/a-b-000".len());
+    }
+
+    #[test]
+    fn generated_branch_slug_has_expected_shape() {
+        let branch = generate_human_readable_branch_slug();
+        assert!(branch.starts_with("feature/"));
+        let slug = branch.trim_start_matches("feature/");
+        let parts: Vec<&str> = slug.split('-').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[2].len(), 3);
+        assert!(parts[2].chars().all(|ch| ch.is_ascii_digit()));
+    }
+
+    #[test]
+    fn resolve_task_title_uses_branch_when_empty() {
+        let title = resolve_task_title("", "feature/amber-otter-001");
+        assert_eq!(title, "feature/amber-otter-001");
+    }
+
+    #[test]
+    fn resolve_task_title_preserves_non_empty_title() {
+        let title = resolve_task_title("Ship session flow", "feature/amber-otter-001");
+        assert_eq!(title, "Ship session flow");
+    }
 }
