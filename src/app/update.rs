@@ -160,7 +160,7 @@ impl App {
                     match state.active_section {
                         SettingsSection::General => {
                             state.general_selected_field =
-                                state.general_selected_field.saturating_add(1).min(3);
+                                state.general_selected_field.saturating_add(1).min(4);
                         }
                         SettingsSection::CategoryColors => {
                             state.category_color_selected = state
@@ -229,6 +229,17 @@ impl App {
                                             "kanban".to_string()
                                         };
                                 }
+                                4 => {
+                                    self.settings.board_alignment_mode =
+                                        if self.settings.board_alignment_mode == "fit" {
+                                            "scroll".to_string()
+                                        } else {
+                                            "fit".to_string()
+                                        };
+                                    if self.settings.board_alignment_mode == "fit" {
+                                        self.kanban_viewport_x = 0;
+                                    }
+                                }
                                 _ => {}
                             }
                             self.save_settings_with_notice();
@@ -291,6 +302,17 @@ impl App {
                             self.settings.side_panel_width = if prev < 20 { 80 } else { prev };
                             self.side_panel_width = self.settings.side_panel_width;
                         }
+                        4 => {
+                            self.settings.board_alignment_mode =
+                                if self.settings.board_alignment_mode == "fit" {
+                                    "scroll".to_string()
+                                } else {
+                                    "fit".to_string()
+                                };
+                            if self.settings.board_alignment_mode == "fit" {
+                                self.kanban_viewport_x = 0;
+                            }
+                        }
                         _ => {}
                     }
                     self.save_settings_with_notice();
@@ -314,6 +336,10 @@ impl App {
                             self.settings.side_panel_width = 40;
                             self.side_panel_width = 40;
                         }
+                        4 => {
+                            self.settings.board_alignment_mode = "fit".to_string();
+                            self.kanban_viewport_x = 0;
+                        }
                         _ => {}
                     }
                     self.save_settings_with_notice();
@@ -327,7 +353,7 @@ impl App {
             Message::SettingsSelectGeneralField(index) => {
                 if let Some(state) = &mut self.settings_view_state {
                     state.active_section = SettingsSection::General;
-                    state.general_selected_field = index.min(3);
+                    state.general_selected_field = index.min(4);
                 }
             }
             Message::SettingsSelectCategoryColor(index) => {
