@@ -1125,6 +1125,7 @@ mod tests {
             repos: Vec::new(),
             archived_tasks: Vec::new(),
             focused_column: 0,
+            kanban_viewport_x: 0,
             selected_task_per_column: HashMap::new(),
             scroll_offset_per_column: HashMap::new(),
             column_scroll_states: Vec::new(),
@@ -2359,7 +2360,7 @@ mod tests {
             settings_state.active_section,
             SettingsSection::CategoryColors
         );
-        assert_eq!(settings_state.general_selected_field, 3);
+        assert_eq!(settings_state.general_selected_field, 4);
         assert_eq!(
             settings_state.category_color_selected,
             app.categories.len().saturating_sub(1)
@@ -2392,6 +2393,32 @@ mod tests {
         app.update(Message::OpenCommandPalette)?;
         app.update(Message::SelectCommandPaletteItem(0))?;
         assert_eq!(app.current_view, View::ProjectList);
+
+        Ok(())
+    }
+
+    #[test]
+    fn settings_board_alignment_toggle_and_reset_work() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+        app.settings.board_alignment_mode = "fit".to_string();
+
+        app.update(Message::OpenSettings)?;
+        app.update(Message::SettingsSelectGeneralField(4))?;
+        app.kanban_viewport_x = 33;
+
+        app.update(Message::SettingsToggle)?;
+        assert_eq!(app.settings.board_alignment_mode, "scroll");
+
+        app.kanban_viewport_x = 51;
+        app.update(Message::SettingsToggle)?;
+        assert_eq!(app.settings.board_alignment_mode, "fit");
+        assert_eq!(app.kanban_viewport_x, 0);
+
+        app.settings.board_alignment_mode = "scroll".to_string();
+        app.kanban_viewport_x = 77;
+        app.update(Message::SettingsResetItem)?;
+        assert_eq!(app.settings.board_alignment_mode, "fit");
+        assert_eq!(app.kanban_viewport_x, 0);
 
         Ok(())
     }

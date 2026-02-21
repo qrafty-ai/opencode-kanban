@@ -28,6 +28,7 @@ pub struct App {
     pub repos: Vec<Repo>,
     pub archived_tasks: Vec<Task>,
     pub focused_column: usize,
+    pub kanban_viewport_x: usize,
     pub selected_task_per_column: HashMap<usize, usize>,
     pub scroll_offset_per_column: HashMap<usize, usize>,
     pub column_scroll_states: Vec<ScrollbarState>,
@@ -161,6 +162,7 @@ impl App {
             repos: Vec::new(),
             archived_tasks: Vec::new(),
             focused_column: 0,
+            kanban_viewport_x: 0,
             selected_task_per_column: HashMap::new(),
             scroll_offset_per_column: HashMap::new(),
             column_scroll_states: Vec::new(),
@@ -419,6 +421,7 @@ impl App {
         } else {
             self.column_scroll_states.clear();
             self.focused_column = 0;
+            self.kanban_viewport_x = 0;
             self.side_panel_selected_row = 0;
             self.detail_focus = DetailFocus::List;
             self.detail_scroll_offset = 0;

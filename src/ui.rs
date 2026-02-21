@@ -423,17 +423,98 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         return;
     }
 
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(vec![
-            Constraint::Ratio(1, app.categories.len() as u32);
-            app.categories.len()
-        ])
-        .split(area);
+    let sorted = sorted_categories(app);
+    let visible_columns: Vec<(usize, Category, Rect)> = if app.settings.board_alignment_mode
+        == "scroll"
+    {
+        let viewport_width = usize::from(area.width);
+        if viewport_width == 0 {
+            return;
+        }
+
+        let gap = 1usize;
+        let configured_width = usize::from(app.settings.scroll_column_width_chars);
+        let column_width = effective_scroll_column_width(configured_width, viewport_width);
+        let stride = column_width.saturating_add(gap);
+
+        let focused_slot = sorted
+            .iter()
+            .position(|(column_idx, _)| *column_idx == app.focused_column)
+            .unwrap_or(0);
+        let viewport_x = focused_viewport_offset(
+            app.kanban_viewport_x,
+            viewport_width,
+            column_width,
+            gap,
+            sorted.len(),
+            focused_slot,
+        );
+        app.kanban_viewport_x = viewport_x;
+
+        let mut visible = Vec::new();
+        for (slot, (column_idx, category)) in sorted.iter().enumerate() {
+            let left = slot.saturating_mul(stride);
+            let right = left.saturating_add(column_width);
+            let viewport_right = viewport_x.saturating_add(viewport_width);
+            if left < viewport_right && right > viewport_x {
+                let visible_left = left.max(viewport_x);
+                let visible_right = right.min(viewport_right);
+                let visible_width = visible_right.saturating_sub(visible_left);
+                if visible_width == 0 {
+                    continue;
+                }
+                let translated_x = visible_left.saturating_sub(viewport_x);
+                let rect = Rect::new(
+                    area.x.saturating_add(translated_x as u16),
+                    area.y,
+                    visible_width as u16,
+                    area.height,
+                );
+                visible.push((*column_idx, (*category).clone(), rect));
+            }
+        }
+
+        if visible.is_empty() {
+            let focused = sorted
+                .iter()
+                .enumerate()
+                .find(|(_, (column_idx, _))| *column_idx == app.focused_column)
+                .unwrap_or((0, &sorted[0]));
+            let focused_left = focused.0.saturating_mul(stride);
+            let translated_x = focused_left.saturating_sub(viewport_x);
+            let width = column_width.min(viewport_width) as u16;
+            visible.push((
+                focused.1.0,
+                focused.1.1.clone(),
+                Rect::new(
+                    area.x.saturating_add(translated_x as u16),
+                    area.y,
+                    width,
+                    area.height,
+                ),
+            ));
+        }
+
+        visible
+    } else {
+        app.kanban_viewport_x = 0;
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![
+                Constraint::Ratio(1, sorted.len() as u32);
+                sorted.len()
+            ])
+            .split(area);
+        sorted
+            .iter()
+            .enumerate()
+            .map(|(slot, (column_idx, category))| (*column_idx, (*category).clone(), columns[slot]))
+            .collect()
+    };
 
     let mut hit_test_entries: Vec<(Rect, Message, bool)> = Vec::new();
 
-    for (slot, (column_idx, category)) in sorted_categories(app).into_iter().enumerate() {
+    for (column_idx, category, column_rect) in visible_columns {
         let mut rows = TableBuilder::default();
         let tasks = tasks_for_category(app, category.id);
         let accent = theme.category_accent(category.color.as_deref());
@@ -442,7 +523,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         } else {
             tasks.iter().map(task_tile_lines).sum()
         };
-        let viewport_lines = list_inner_height(columns[slot]);
+        let viewport_lines = list_inner_height(column_rect);
         let show_scrollbar = viewport_lines > 0 && row_count > viewport_lines;
 
         let selected_task = app
@@ -453,8 +534,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             .min(tasks.len().saturating_sub(1));
         let is_focused_column = column_idx == app.focused_column;
 
-        let tile_width =
-            list_inner_width(columns[slot]).saturating_sub(usize::from(show_scrollbar));
+        let tile_width = list_inner_width(column_rect).saturating_sub(usize::from(show_scrollbar));
         for (task_index, task) in tasks.iter().enumerate() {
             let is_hovered =
                 app.hovered_message.as_ref() == Some(&Message::SelectTask(column_idx, task_index));
@@ -490,30 +570,35 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             Attribute::Focus,
             AttrValue::Flag(column_idx == app.focused_column),
         );
-        list.view(frame, columns[slot]);
+        list.view(frame, column_rect);
 
         let scroll_offset = column_scroll_offset(selected_line, row_count, viewport_lines);
-        let col_rect = columns[slot];
+        let col_rect = column_rect;
         let content_x = col_rect.x + 1;
         let content_y = col_rect.y + 2;
         let content_width = col_rect.width.saturating_sub(2);
 
-        for (task_index, _task) in tasks.iter().enumerate() {
-            let tile_start_line = task_index * 5;
-            if tile_start_line >= scroll_offset && tile_start_line < scroll_offset + viewport_lines
-            {
-                let visible_y = content_y + (tile_start_line - scroll_offset) as u16;
-                let task_rect = Rect::new(content_x, visible_y, content_width, 5);
-                hit_test_entries.push((
-                    task_rect,
-                    Message::SelectTask(column_idx, task_index),
-                    true,
-                ));
+        if content_width > 0 {
+            for (task_index, _task) in tasks.iter().enumerate() {
+                let tile_start_line = task_index * 5;
+                if tile_start_line >= scroll_offset
+                    && tile_start_line < scroll_offset + viewport_lines
+                {
+                    let visible_y = content_y + (tile_start_line - scroll_offset) as u16;
+                    let task_rect = Rect::new(content_x, visible_y, content_width, 5);
+                    hit_test_entries.push((
+                        task_rect,
+                        Message::SelectTask(column_idx, task_index),
+                        true,
+                    ));
+                }
             }
         }
 
-        let header_rect = Rect::new(col_rect.x, col_rect.y, col_rect.width, 2);
-        hit_test_entries.push((header_rect, Message::FocusColumn(column_idx), false));
+        if col_rect.width > 0 {
+            let header_rect = Rect::new(col_rect.x, col_rect.y, col_rect.width, 2);
+            hit_test_entries.push((header_rect, Message::FocusColumn(column_idx), false));
+        }
 
         if show_scrollbar {
             let scroll_offset = column_scroll_offset(selected_line, row_count, viewport_lines);
@@ -536,7 +621,7 @@ fn render_columns(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 .track_style(RatatuiStyle::default().fg(theme.base.text_muted))
                 .thumb_style(RatatuiStyle::default().fg(thumb_color))
                 .thumb_symbol("█");
-            let scrollbar_area = inset_rect(columns[slot], 1, 1);
+            let scrollbar_area = inset_rect(column_rect, 1, 1);
             if scrollbar_area.width > 0 && scrollbar_area.height > 0 {
                 frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
             }
@@ -2841,10 +2926,82 @@ fn tasks_for_category(app: &App, category_id: uuid::Uuid) -> Vec<Task> {
     tasks
 }
 
-fn sorted_categories(app: &App) -> Vec<(usize, &Category)> {
-    let mut categories: Vec<(usize, &Category)> = app.categories.iter().enumerate().collect();
+fn sorted_categories(app: &App) -> Vec<(usize, Category)> {
+    let mut categories: Vec<(usize, Category)> =
+        app.categories.iter().cloned().enumerate().collect();
     categories.sort_by_key(|(_, category)| category.position);
     categories
+}
+
+fn effective_scroll_column_width(configured_width: usize, viewport_width: usize) -> usize {
+    if viewport_width == 0 {
+        return 0;
+    }
+
+    let fallback_min_width = 16usize;
+    let max_visible_width = viewport_width.saturating_sub(4).max(fallback_min_width);
+    configured_width.min(max_visible_width).max(1)
+}
+
+fn scroll_strip_width(column_count: usize, column_width: usize, gap: usize) -> usize {
+    column_width
+        .saturating_mul(column_count)
+        .saturating_add(gap.saturating_mul(column_count.saturating_sub(1)))
+}
+
+const FOCUS_PEEK_CHARS: usize = 6;
+
+fn focused_viewport_offset(
+    current_offset: usize,
+    viewport_width: usize,
+    column_width: usize,
+    gap: usize,
+    column_count: usize,
+    focused_slot: usize,
+) -> usize {
+    if viewport_width == 0 || column_count == 0 || column_width == 0 {
+        return 0;
+    }
+
+    let focused_slot = focused_slot.min(column_count.saturating_sub(1));
+    let stride = column_width.saturating_add(gap);
+    let strip_width = scroll_strip_width(column_count, column_width, gap);
+    let focused_left = focused_slot.saturating_mul(stride);
+    let focused_right = focused_left.saturating_add(column_width);
+
+    let available_peek = viewport_width.saturating_sub(column_width);
+    let mut left_peek = if focused_slot > 0 {
+        FOCUS_PEEK_CHARS.min(available_peek)
+    } else {
+        0
+    };
+    let mut right_peek = if focused_slot + 1 < column_count {
+        FOCUS_PEEK_CHARS.min(available_peek)
+    } else {
+        0
+    };
+    while left_peek.saturating_add(right_peek) > available_peek {
+        if right_peek >= left_peek && right_peek > 0 {
+            right_peek -= 1;
+        } else if left_peek > 0 {
+            left_peek -= 1;
+        } else {
+            break;
+        }
+    }
+
+    let desired_left = focused_left.saturating_sub(left_peek);
+    let desired_right = focused_right.saturating_add(right_peek);
+
+    let mut viewport_x = current_offset.min(strip_width.saturating_sub(viewport_width));
+
+    if desired_left < viewport_x {
+        viewport_x = desired_left;
+    } else if desired_right > viewport_x.saturating_add(viewport_width) {
+        viewport_x = desired_right.saturating_sub(viewport_width);
+    }
+
+    viewport_x.min(strip_width.saturating_sub(viewport_width))
 }
 
 fn side_panel_row_lines(row: &SidePanelRow) -> usize {
@@ -3765,10 +3922,10 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(10)])
+        .constraints([Constraint::Length(7), Constraint::Min(10)])
         .split(area);
 
-    let field_rows: [(&str, String); 4] = [
+    let field_rows: [(&str, String); 5] = [
         ("Theme", app.settings.theme.clone()),
         (
             "Poll Interval",
@@ -3779,6 +3936,7 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             format!("{}%", app.settings.side_panel_width),
         ),
         ("Default View", app.settings.default_view.clone()),
+        ("Board Alignment", app.settings.board_alignment_mode.clone()),
     ];
 
     let mut rows = TableBuilder::default();
@@ -3824,7 +3982,7 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let content_x = list_area.x.saturating_add(1);
     let content_y = list_area.y.saturating_add(1);
     let content_width = list_area.width.saturating_sub(2);
-    for index in 0..4 {
+    for index in 0..5 {
         let row = content_y.saturating_add(index as u16);
         if row
             < list_area
@@ -3920,6 +4078,39 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 lines.push(
                     TextSpan::new(format!("  {} {:<10}  {}", marker, view, desc)).fg(
                         if current == view {
+                            theme.interactive.focus
+                        } else {
+                            theme.base.text_muted
+                        },
+                    ),
+                );
+            }
+            lines.push(TextSpan::new(""));
+            lines.push(TextSpan::new("  l / →    cycle forward").fg(theme.base.text_muted));
+            lines.push(TextSpan::new("  h / ←    cycle backward").fg(theme.base.text_muted));
+            lines.push(TextSpan::new("  0         reset to default").fg(theme.base.text_muted));
+            lines
+        }
+        4 => {
+            let current = &app.settings.board_alignment_mode;
+            let mut lines =
+                vec![
+                TextSpan::new("Board Alignment").fg(theme.base.header).bold(),
+                TextSpan::new(
+                    "How columns are laid out in Kanban mode. 'fit' keeps the current behavior. \
+                     'scroll' keeps fixed-width columns and follows focus horizontally.",
+                )
+                .fg(theme.base.text),
+                TextSpan::new(""),
+            ];
+            for (mode, desc) in [
+                ("fit", "fit all columns into viewport"),
+                ("scroll", "fixed-width strip with auto-scroll"),
+            ] {
+                let marker = if current == mode { "●" } else { "○" };
+                lines.push(
+                    TextSpan::new(format!("  {} {:<10}  {}", marker, mode, desc)).fg(
+                        if current == mode {
                             theme.interactive.focus
                         } else {
                             theme.base.text_muted
@@ -4268,6 +4459,30 @@ mod tests {
             resolve_input_display_value("feature/manual", Some("auto-generated if empty"));
         assert_eq!(display, "feature/manual");
         assert!(!using_placeholder);
+    }
+
+    #[test]
+    fn test_effective_scroll_column_width_respects_viewport_guard() {
+        assert_eq!(effective_scroll_column_width(42, 120), 42);
+        assert_eq!(effective_scroll_column_width(42, 20), 16);
+    }
+
+    #[test]
+    fn test_focused_viewport_offset_moves_right_with_peek_when_neighbor_exists() {
+        let offset = focused_viewport_offset(0, 80, 40, 1, 6, 3);
+        assert_eq!(offset, 89);
+    }
+
+    #[test]
+    fn test_focused_viewport_offset_keeps_last_column_stable_without_right_peek() {
+        let offset = focused_viewport_offset(84, 80, 40, 1, 4, 3);
+        assert_eq!(offset, 83);
+    }
+
+    #[test]
+    fn test_focused_viewport_offset_uses_left_peek_when_not_on_first_column() {
+        let offset = focused_viewport_offset(40, 80, 40, 1, 4, 1);
+        assert_eq!(offset, 35);
     }
 
     fn test_task(category_id: Uuid, position: i64) -> Task {

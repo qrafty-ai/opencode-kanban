@@ -11,12 +11,16 @@ use crate::theme::{CustomThemeConfig, ThemePreset};
 
 const DEFAULT_THEME: &str = "default";
 const DEFAULT_DEFAULT_VIEW: &str = "kanban";
+const DEFAULT_BOARD_ALIGNMENT_MODE: &str = "fit";
 const MIN_POLL_INTERVAL_MS: u64 = 500;
 const MAX_POLL_INTERVAL_MS: u64 = 30_000;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
 const MIN_SIDE_PANEL_WIDTH: u16 = 20;
 const MAX_SIDE_PANEL_WIDTH: u16 = 80;
 const DEFAULT_SIDE_PANEL_WIDTH: u16 = 40;
+const MIN_SCROLL_COLUMN_WIDTH_CHARS: u16 = 24;
+const MAX_SCROLL_COLUMN_WIDTH_CHARS: u16 = 80;
+const DEFAULT_SCROLL_COLUMN_WIDTH_CHARS: u16 = 42;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -24,8 +28,10 @@ pub struct Settings {
     pub theme: String,
     pub custom_theme: CustomThemeConfig,
     pub default_view: String,
+    pub board_alignment_mode: String,
     pub poll_interval_ms: u64,
     pub side_panel_width: u16,
+    pub scroll_column_width_chars: u16,
     pub keybindings: KeybindingsConfig,
 }
 
@@ -43,8 +49,10 @@ impl Default for Settings {
             theme: DEFAULT_THEME.to_string(),
             custom_theme: CustomThemeConfig::default(),
             default_view: DEFAULT_DEFAULT_VIEW.to_string(),
+            board_alignment_mode: DEFAULT_BOARD_ALIGNMENT_MODE.to_string(),
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             side_panel_width: DEFAULT_SIDE_PANEL_WIDTH,
+            scroll_column_width_chars: DEFAULT_SCROLL_COLUMN_WIDTH_CHARS,
             keybindings: KeybindingsConfig::default(),
         }
     }
@@ -145,6 +153,9 @@ impl Settings {
         self.side_panel_width = self
             .side_panel_width
             .clamp(MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH);
+        self.scroll_column_width_chars = self
+            .scroll_column_width_chars
+            .clamp(MIN_SCROLL_COLUMN_WIDTH_CHARS, MAX_SCROLL_COLUMN_WIDTH_CHARS);
 
         self.theme = match ThemePreset::from_str(&self.theme) {
             Ok(preset) => preset.as_str().to_string(),
@@ -185,6 +196,23 @@ impl Settings {
                     self.default_view, DEFAULT_DEFAULT_VIEW
                 );
                 DEFAULT_DEFAULT_VIEW.to_string()
+            }
+        };
+
+        self.board_alignment_mode = match self
+            .board_alignment_mode
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "fit" => "fit".to_string(),
+            "scroll" => "scroll".to_string(),
+            _ => {
+                warn!(
+                    "invalid board_alignment_mode '{}' in settings config; falling back to {}",
+                    self.board_alignment_mode, DEFAULT_BOARD_ALIGNMENT_MODE
+                );
+                DEFAULT_BOARD_ALIGNMENT_MODE.to_string()
             }
         };
     }
@@ -238,8 +266,10 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.theme, "default");
         assert_eq!(settings.default_view, "kanban");
+        assert_eq!(settings.board_alignment_mode, "fit");
         assert_eq!(settings.poll_interval_ms, 1_000);
         assert_eq!(settings.side_panel_width, 40);
+        assert_eq!(settings.scroll_column_width_chars, 42);
         assert_eq!(settings.keybindings, KeybindingsConfig::default());
     }
 
@@ -275,8 +305,13 @@ mod tests {
         let settings = Settings::load_from_path(&path);
         assert_eq!(settings.theme, "mono");
         assert_eq!(settings.default_view, DEFAULT_DEFAULT_VIEW);
+        assert_eq!(settings.board_alignment_mode, DEFAULT_BOARD_ALIGNMENT_MODE);
         assert_eq!(settings.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS);
         assert_eq!(settings.side_panel_width, DEFAULT_SIDE_PANEL_WIDTH);
+        assert_eq!(
+            settings.scroll_column_width_chars,
+            DEFAULT_SCROLL_COLUMN_WIDTH_CHARS
+        );
         assert_eq!(settings.keybindings, KeybindingsConfig::default());
         assert_eq!(settings.custom_theme, CustomThemeConfig::default());
     }
@@ -289,8 +324,10 @@ mod tests {
             theme: "high-contrast".to_string(),
             custom_theme: CustomThemeConfig::default(),
             default_view: "detail".to_string(),
+            board_alignment_mode: "scroll".to_string(),
             poll_interval_ms: 2_500,
             side_panel_width: 55,
+            scroll_column_width_chars: 48,
             keybindings: KeybindingsConfig::default(),
         };
         expected.validate();
@@ -309,8 +346,10 @@ mod tests {
             theme: "default".to_string(),
             custom_theme: CustomThemeConfig::default(),
             default_view: "kanban".to_string(),
+            board_alignment_mode: "fit".to_string(),
             poll_interval_ms: 1,
             side_panel_width: 999,
+            scroll_column_width_chars: 999,
             keybindings: KeybindingsConfig::default(),
         };
 
@@ -318,13 +357,22 @@ mod tests {
 
         assert_eq!(settings.poll_interval_ms, MIN_POLL_INTERVAL_MS);
         assert_eq!(settings.side_panel_width, MAX_SIDE_PANEL_WIDTH);
+        assert_eq!(
+            settings.scroll_column_width_chars,
+            MAX_SCROLL_COLUMN_WIDTH_CHARS
+        );
 
         settings.poll_interval_ms = u64::MAX;
         settings.side_panel_width = 0;
+        settings.scroll_column_width_chars = 0;
         settings.validate();
 
         assert_eq!(settings.poll_interval_ms, MAX_POLL_INTERVAL_MS);
         assert_eq!(settings.side_panel_width, MIN_SIDE_PANEL_WIDTH);
+        assert_eq!(
+            settings.scroll_column_width_chars,
+            MIN_SCROLL_COLUMN_WIDTH_CHARS
+        );
     }
 
     #[test]
@@ -362,6 +410,18 @@ mod tests {
         settings.validate();
 
         assert_eq!(settings.default_view, "kanban");
+    }
+
+    #[test]
+    fn test_validate_invalid_board_alignment_mode() {
+        let mut settings = Settings {
+            board_alignment_mode: "wide".to_string(),
+            ..Settings::default()
+        };
+
+        settings.validate();
+
+        assert_eq!(settings.board_alignment_mode, "fit");
     }
 
     #[test]
