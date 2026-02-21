@@ -15,7 +15,7 @@ Publishing is handled by `.github/workflows/publish-npm.yaml` and uses npm trust
 
 2. For prereleases, use tags like `vX.Y.Z-alpha.N`.
 
-The workflow derives the package version from the tag (or manual dispatch input) and updates `Cargo.toml` during CI before building.
+The workflow derives the build version from the tag and injects it via `OPENCODE_KANBAN_VERSION` during `cargo build`.
 
 The workflow builds platform binaries, packages npm tarballs, and publishes:
 
