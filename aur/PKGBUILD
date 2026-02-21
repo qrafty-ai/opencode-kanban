@@ -21,6 +21,7 @@ build() {
     cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
+    export OPENCODE_KANBAN_VERSION="$pkgver"
     unset CFLAGS CXXFLAGS LDFLAGS
     cargo build --frozen --release
 }
@@ -28,6 +29,7 @@ build() {
 check() {
     cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
+    export OPENCODE_KANBAN_VERSION="$pkgver"
     unset CFLAGS CXXFLAGS LDFLAGS
     cargo test --frozen --lib 2>/dev/null || true
 }

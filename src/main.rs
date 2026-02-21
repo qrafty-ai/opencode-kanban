@@ -31,7 +31,7 @@ use opencode_kanban::{
     name = "opencode-kanban",
     about = "Terminal kanban board for managing OpenCode tmux sessions",
     long_about = "A TUI kanban board for managing git worktrees and OpenCode sessions, orchestrated via tmux.",
-    version,
+    version = env!("OPENCODE_KANBAN_BUILD_VERSION"),
     author
 )]
 struct Cli {
