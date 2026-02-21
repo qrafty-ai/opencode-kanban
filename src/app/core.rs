@@ -370,6 +370,19 @@ impl App {
         }
     }
 
+    pub(crate) fn sync_project_order_from_list(&mut self) {
+        self.settings.project_order = self
+            .project_list
+            .iter()
+            .map(|project| project.path.to_string_lossy().to_string())
+            .collect();
+    }
+
+    pub(crate) fn persist_project_order_with_notice(&mut self) {
+        self.sync_project_order_from_list();
+        self.save_settings_with_notice();
+    }
+
     pub fn refresh_data(&mut self) -> Result<()> {
         self.tasks = self.db.list_tasks().context("failed to load tasks")?;
         self.categories = self
@@ -441,6 +454,32 @@ impl App {
 
     pub fn refresh_projects(&mut self) -> Result<()> {
         self.project_list = projects::list_projects().context("failed to list projects")?;
+
+        if !self.settings.project_order.is_empty() {
+            let rank_by_path = self
+                .settings
+                .project_order
+                .iter()
+                .enumerate()
+                .map(|(idx, path)| (path.as_str(), idx))
+                .collect::<std::collections::HashMap<_, _>>();
+
+            self.project_list.sort_by(|left, right| {
+                let left_key = left.path.to_string_lossy();
+                let right_key = right.path.to_string_lossy();
+                let left_rank = rank_by_path.get(left_key.as_ref()).copied();
+                let right_rank = rank_by_path.get(right_key.as_ref()).copied();
+                match (left_rank, right_rank) {
+                    (Some(a), Some(b)) => a.cmp(&b).then_with(|| left.name.cmp(&right.name)),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => left.name.cmp(&right.name),
+                }
+            });
+        }
+
+        self.sync_project_order_from_list();
+
         if !self.project_list.is_empty() {
             self.selected_project_index =
                 self.selected_project_index.min(self.project_list.len() - 1);

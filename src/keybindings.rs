@@ -25,6 +25,8 @@ pub enum KeyAction {
     ExpandPanel,
     ProjectUp,
     ProjectDown,
+    ProjectMoveUp,
+    ProjectMoveDown,
     ProjectConfirm,
     NewProject,
     ProjectRename,
@@ -42,6 +44,7 @@ pub enum KeyAction {
     RenameCategory,
     DeleteCategory,
     DeleteTask,
+    EditTask,
     ArchiveTask,
     MoveTaskLeft,
     MoveTaskRight,
@@ -211,6 +214,18 @@ const PROJECT_LIST_DEFS: &[ActionDef] = &[
         defaults: &["j", "Down"],
     },
     ActionDef {
+        id: "move_up",
+        action: KeyAction::ProjectMoveUp,
+        description: "move project up",
+        defaults: &["K"],
+    },
+    ActionDef {
+        id: "move_down",
+        action: KeyAction::ProjectMoveDown,
+        description: "move project down",
+        defaults: &["J"],
+    },
+    ActionDef {
         id: "confirm",
         action: KeyAction::ProjectConfirm,
         description: "open project",
@@ -322,6 +337,12 @@ const BOARD_DEFS: &[ActionDef] = &[
         defaults: &["d"],
     },
     ActionDef {
+        id: "edit_task",
+        action: KeyAction::EditTask,
+        description: "edit selected task",
+        defaults: &["e"],
+    },
+    ActionDef {
         id: "archive_task",
         action: KeyAction::ArchiveTask,
         description: "archive selected task",
@@ -405,6 +426,7 @@ impl Keybindings {
             "switch_project" => self.display_for(KeyContext::Global, KeyAction::OpenPalette),
             "toggle_view" => self.display_for(KeyContext::Global, KeyAction::ToggleView),
             "new_task" => self.display_for(KeyContext::Board, KeyAction::NewTask),
+            "edit_task" => self.display_for(KeyContext::Board, KeyAction::EditTask),
             "open_archive_view" => self.display_for(KeyContext::Global, KeyAction::OpenArchiveView),
             "archive_task" => self.display_for(KeyContext::Board, KeyAction::ArchiveTask),
             "attach_task" => self.display_for(KeyContext::Board, KeyAction::AttachTask),
@@ -479,6 +501,13 @@ impl Keybindings {
             format!(
                 "  {}: select next project",
                 self.display_for(KeyContext::ProjectList, KeyAction::ProjectDown)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {} / {}: reorder project up/down",
+                self.display_for(KeyContext::ProjectList, KeyAction::ProjectMoveUp)
+                    .unwrap_or_else(|| "-".to_string()),
+                self.display_for(KeyContext::ProjectList, KeyAction::ProjectMoveDown)
                     .unwrap_or_else(|| "-".to_string())
             ),
             format!(
@@ -571,6 +600,11 @@ impl Keybindings {
             format!(
                 "  {}: delete task",
                 self.display_for(KeyContext::Board, KeyAction::DeleteTask)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {}: edit selected task",
+                self.display_for(KeyContext::Board, KeyAction::EditTask)
                     .unwrap_or_else(|| "-".to_string())
             ),
             format!(
@@ -946,5 +980,32 @@ mod tests {
             KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
         );
         assert_eq!(action, Some(KeyAction::SelectBottom));
+    }
+
+    #[test]
+    fn defaults_include_project_reorder_j_and_k_with_shift() {
+        let keys = Keybindings::load();
+
+        let move_up = keys.action_for_key(
+            KeyContext::ProjectList,
+            KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(move_up, Some(KeyAction::ProjectMoveUp));
+
+        let move_down = keys.action_for_key(
+            KeyContext::ProjectList,
+            KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(move_down, Some(KeyAction::ProjectMoveDown));
+    }
+
+    #[test]
+    fn defaults_include_edit_task() {
+        let keys = Keybindings::load();
+        let action = keys.action_for_key(
+            KeyContext::Board,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()),
+        );
+        assert_eq!(action, Some(KeyAction::EditTask));
     }
 }

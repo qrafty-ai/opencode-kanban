@@ -142,6 +142,22 @@ pub enum DeleteTaskField {
     Cancel,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum EditTaskField {
+    Title,
+    Save,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EditTaskDialogState {
+    pub task_id: Uuid,
+    pub repo_path: String,
+    pub branch: String,
+    pub title_input: String,
+    pub focused_field: EditTaskField,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct DeleteTaskDialogState {
     pub task_id: Uuid,
@@ -299,6 +315,7 @@ pub struct RepoUnavailableDialogState {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ContextMenuItem {
     Attach,
+    Edit,
     Delete,
     Move,
 }
@@ -367,6 +384,7 @@ pub enum ActiveDialog {
     Error(ErrorDialogState),
     ArchiveTask(ArchiveTaskDialogState),
     DeleteTask(DeleteTaskDialogState),
+    EditTask(EditTaskDialogState),
     MoveTask(MoveTaskDialogState),
     WorktreeNotFound(WorktreeNotFoundDialogState),
     RepoUnavailable(RepoUnavailableDialogState),

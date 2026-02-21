@@ -135,6 +135,8 @@ impl App {
                 match action {
                     KeyAction::ProjectUp => self.update(Message::ProjectListSelectUp)?,
                     KeyAction::ProjectDown => self.update(Message::ProjectListSelectDown)?,
+                    KeyAction::ProjectMoveUp => self.update(Message::ProjectListMoveUp)?,
+                    KeyAction::ProjectMoveDown => self.update(Message::ProjectListMoveDown)?,
                     KeyAction::ProjectConfirm => self.update(Message::ProjectListConfirm)?,
                     KeyAction::NewProject => self.update(Message::OpenNewProjectDialog)?,
                     KeyAction::ProjectRename => self.update(Message::OpenRenameProjectDialog)?,
@@ -282,6 +284,9 @@ impl App {
                 }
                 KeyAction::DeleteTask => {
                     self.update(Message::OpenDeleteTaskDialog)?;
+                }
+                KeyAction::EditTask => {
+                    self.update(Message::OpenEditTaskDialog)?;
                 }
                 KeyAction::ArchiveTask => {
                     self.update(Message::OpenArchiveTaskDialog)?;

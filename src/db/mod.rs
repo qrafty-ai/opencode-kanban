@@ -378,6 +378,21 @@ impl Database {
         block_on_db(self.update_task_position_async(id, position))
     }
 
+    pub async fn update_task_title_async(&self, id: Uuid, title: impl AsRef<str>) -> Result<()> {
+        sqlx::query("UPDATE tasks SET title = ?, updated_at = ? WHERE id = ?")
+            .bind(title.as_ref())
+            .bind(now_iso())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("failed to update task title")?;
+        Ok(())
+    }
+
+    pub fn update_task_title(&self, id: Uuid, title: impl AsRef<str>) -> Result<()> {
+        block_on_db(self.update_task_title_async(id, title))
+    }
+
     pub async fn update_task_tmux_async(
         &self,
         id: Uuid,
@@ -1232,6 +1247,7 @@ mod tests {
         assert_eq!(task.archived_at, None);
 
         db.update_task_status(task.id, "running")?;
+        db.update_task_title(task.id, "Renamed DB Task")?;
         db.update_task_status_metadata(
             task.id,
             "tmux",
@@ -1241,6 +1257,7 @@ mod tests {
         db.update_task_session_binding(task.id, Some("sid-task-crud".to_string()))?;
 
         let updated = db.get_task(task.id)?;
+        assert_eq!(updated.title, "Renamed DB Task");
         assert_eq!(updated.tmux_status, "running");
         assert_eq!(updated.status_source, "tmux");
         assert_eq!(
