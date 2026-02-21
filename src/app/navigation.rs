@@ -1,8 +1,66 @@
 use super::side_panel::{selected_task_from_side_panel_rows, side_panel_rows_from};
 use super::{App, DetailFocus, SidePanelRow, View, ViewMode};
 use crate::types::{Repo, Task};
+use uuid::Uuid;
 
 impl App {
+    fn task_location(&self, task_id: Uuid) -> Option<(usize, usize)> {
+        self.categories
+            .iter()
+            .enumerate()
+            .find_map(|(column_index, category)| {
+                let mut tasks: Vec<&Task> = self
+                    .tasks
+                    .iter()
+                    .filter(|task| task.category_id == category.id)
+                    .collect();
+                tasks.sort_by_key(|task| task.position);
+                tasks
+                    .iter()
+                    .position(|task| task.id == task_id)
+                    .map(|index_in_column| (column_index, index_in_column))
+            })
+    }
+
+    pub(crate) fn focus_task_by_id(&mut self, task_id: Uuid) {
+        let Some((column_index, index_in_column)) = self.task_location(task_id) else {
+            return;
+        };
+
+        self.focused_column = column_index;
+        self.selected_task_per_column
+            .insert(column_index, index_in_column);
+
+        if self.view_mode != ViewMode::SidePanel {
+            return;
+        }
+
+        let rows = self.side_panel_rows();
+        if rows.is_empty() {
+            self.side_panel_selected_row = 0;
+            return;
+        }
+
+        let row_index = rows
+            .iter()
+            .position(|row| matches!(row, SidePanelRow::Task { task, .. } if task.id == task_id))
+            .or_else(|| {
+                rows.iter().position(|row| {
+                    matches!(
+                        row,
+                        SidePanelRow::CategoryHeader {
+                            column_index: row_column,
+                            ..
+                        } if *row_column == column_index
+                    )
+                })
+            });
+
+        if let Some(row_index) = row_index {
+            self.sync_side_panel_selection_at(&rows, row_index, false);
+        }
+    }
+
     pub(crate) fn tasks_in_column(&self, column_index: usize) -> usize {
         let Some(category) = self.categories.get(column_index) else {
             return 0;
