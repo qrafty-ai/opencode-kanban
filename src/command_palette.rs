@@ -1,5 +1,8 @@
 use crate::app::Message;
-use crate::matching::recency_frequency_bonus;
+use crate::matching::{
+    ascii_case_insensitive_subsequence, normalize_fuzzy_needle, recency_frequency_bonus,
+    safe_fuzzy_indices,
+};
 use crate::types::CommandFrequency;
 use chrono::Utc;
 use nucleo::{Config, Matcher, Utf32Str};
@@ -76,8 +79,9 @@ pub fn rank_commands(
 ) -> Vec<RankedCommand> {
     let now = Utc::now();
     let mut ranked = Vec::with_capacity(commands.len());
+    let normalized_query = normalize_fuzzy_needle(query);
 
-    if query.trim().is_empty() {
+    if normalized_query.is_empty() {
         for (idx, command) in commands.iter().enumerate() {
             ranked.push(RankedCommand {
                 command_idx: idx,
@@ -97,16 +101,22 @@ pub fn rank_commands(
 
     let mut matcher = Matcher::new(Config::DEFAULT);
     let mut query_buf = Vec::new();
-    let query_utf32 = Utf32Str::new(query, &mut query_buf);
+    let query_utf32 = Utf32Str::new(normalized_query.as_str(), &mut query_buf);
     let mut display_name_buf = Vec::new();
     let mut matched_indices = Vec::new();
 
     for (idx, command) in commands.iter().enumerate() {
         matched_indices.clear();
+        if !ascii_case_insensitive_subsequence(command.display_name, normalized_query.as_str()) {
+            continue;
+        }
         let display_name_utf32 = Utf32Str::new(command.display_name, &mut display_name_buf);
-        if let Some(fuzzy_score) =
-            matcher.fuzzy_indices(display_name_utf32, query_utf32, &mut matched_indices)
-        {
+        if let Some(fuzzy_score) = safe_fuzzy_indices(
+            &mut matcher,
+            display_name_utf32,
+            query_utf32,
+            &mut matched_indices,
+        ) {
             ranked.push(RankedCommand {
                 command_idx: idx,
                 score: f64::from(fuzzy_score) + frequency_bonus(command.id, frequencies, now),
@@ -393,6 +403,19 @@ mod tests {
 
         assert_eq!(ranked.len(), 1);
         assert_eq!(commands[ranked[0].command_idx].id, "alpha_task");
+    }
+
+    #[test]
+    fn test_fuzzy_match_normalized_query_prevents_matcher_panic() {
+        let commands = test_commands();
+
+        let ranked_upper = rank_commands("ALP", &commands, &HashMap::new());
+        assert_eq!(ranked_upper.len(), 1);
+        assert_eq!(commands[ranked_upper[0].command_idx].id, "alpha_task");
+
+        let ranked_controls = rank_commands("A\nL\tP", &commands, &HashMap::new());
+        assert_eq!(ranked_controls.len(), 1);
+        assert_eq!(commands[ranked_controls[0].command_idx].id, "alpha_task");
     }
 
     #[test]

@@ -14,7 +14,10 @@ use crate::app::runtime::{
 use crate::app::state::{CreateTaskOutcome, NewTaskDialogState};
 use crate::db::Database;
 use crate::git::derive_worktree_path;
-use crate::matching::recency_frequency_bonus;
+use crate::matching::{
+    ascii_case_insensitive_subsequence, normalize_fuzzy_needle, recency_frequency_bonus,
+    safe_fuzzy_indices,
+};
 use crate::opencode::{Status, opencode_attach_command};
 use crate::types::{CommandFrequency, Repo};
 
@@ -328,17 +331,17 @@ pub(crate) fn rank_repos_for_query(
     }
 
     let now = Utc::now();
-    let query = query.trim();
+    let normalized_query = normalize_fuzzy_needle(query);
     let mut ranked: Vec<(usize, f64)> = Vec::with_capacity(repos.len());
 
-    if query.is_empty() {
+    if normalized_query.is_empty() {
         for (repo_idx, repo) in repos.iter().enumerate() {
             ranked.push((repo_idx, repo_selection_bonus(repo.id, usage, now)));
         }
     } else {
         let mut matcher = Matcher::new(Config::DEFAULT);
         let mut query_buf = Vec::new();
-        let query_utf32 = Utf32Str::new(query, &mut query_buf);
+        let query_utf32 = Utf32Str::new(normalized_query.as_str(), &mut query_buf);
         let mut candidate_buf = Vec::new();
         let mut matched_indices = Vec::new();
 
@@ -347,10 +350,19 @@ pub(crate) fn rank_repos_for_query(
 
             for (candidate, candidate_bonus) in repo_match_candidates(repo) {
                 matched_indices.clear();
+                if !ascii_case_insensitive_subsequence(
+                    candidate.as_str(),
+                    normalized_query.as_str(),
+                ) {
+                    continue;
+                }
                 let candidate_utf32 = Utf32Str::new(candidate.as_str(), &mut candidate_buf);
-                if let Some(fuzzy_score) =
-                    matcher.fuzzy_indices(candidate_utf32, query_utf32, &mut matched_indices)
-                {
+                if let Some(fuzzy_score) = safe_fuzzy_indices(
+                    &mut matcher,
+                    candidate_utf32,
+                    query_utf32,
+                    &mut matched_indices,
+                ) {
                     let score = f64::from(fuzzy_score) + candidate_bonus;
                     best_match_score = Some(match best_match_score {
                         Some(current) => current.max(score),
@@ -457,8 +469,12 @@ fn repo_selection_bonus(
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_human_readable_branch_slug, resolve_create_task_branch, resolve_task_title,
+        generate_human_readable_branch_slug, rank_repos_for_query, resolve_create_task_branch,
+        resolve_task_title,
     };
+    use crate::types::Repo;
+    use std::collections::HashMap;
+    use uuid::Uuid;
 
     #[test]
     fn resolve_create_task_branch_rejects_empty_branch_and_title() {
@@ -501,5 +517,21 @@ mod tests {
     fn resolve_task_title_preserves_non_empty_title() {
         let title = resolve_task_title("Ship session flow", "feature/amber-otter-001");
         assert_eq!(title, "Ship session flow");
+    }
+
+    #[test]
+    fn rank_repos_for_query_normalizes_query_before_matching() {
+        let repo = Repo {
+            id: Uuid::new_v4(),
+            path: "/tmp/opencode-kanban/alpha-repo".to_string(),
+            name: "Alpha Repo".to_string(),
+            default_base: Some("main".to_string()),
+            remote_url: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let ranked = rank_repos_for_query("A\nL\tP", &[repo], &HashMap::new());
+        assert_eq!(ranked, vec![0]);
     }
 }
