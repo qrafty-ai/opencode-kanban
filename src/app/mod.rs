@@ -47,8 +47,9 @@ pub use self::state::{
     NewTaskDialogState, NewTaskField, RenameProjectDialogState, RenameProjectField,
     RenameRepoDialogState, RenameRepoField, RepoPickerDialogState, RepoPickerTarget,
     RepoSuggestionItem, RepoSuggestionKind, RepoUnavailableDialogState, SettingsSection,
-    SettingsViewState, TodoVisualizationMode, View, ViewMode, WorktreeNotFoundDialogState,
-    WorktreeNotFoundField, category_color_label, normalize_category_color_key,
+    SettingsViewState, TaskSearchMode, TaskSearchState, TodoVisualizationMode, View, ViewMode,
+    WorktreeNotFoundDialogState, WorktreeNotFoundField, category_color_label,
+    normalize_category_color_key,
 };
 
 use crate::command_palette::{CommandPaletteState, all_commands};
@@ -740,19 +741,6 @@ impl App {
 
         Ok(())
     }
-
-    fn maybe_show_tmux_mouse_hint(&mut self) {
-        if self.mouse_hint_shown || self.mouse_seen {
-            return;
-        }
-        if self.started_at.elapsed() >= Duration::from_secs(10) {
-            self.footer_notice = Some(
-                " tmux mouse hint: run `tmux set -g mouse on` for click+scroll support "
-                    .to_string(),
-            );
-            self.mouse_hint_shown = true;
-        }
-    }
 }
 
 fn default_view_mode(settings: &crate::settings::Settings) -> ViewMode {
@@ -793,7 +781,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use chrono::Utc;
     use crossterm::event::{
@@ -1184,9 +1172,6 @@ mod tests {
             project_list: Vec::new(),
             selected_project_index: 0,
             project_list_state: ListState::default(),
-            started_at: Instant::now(),
-            mouse_seen: false,
-            mouse_hint_shown: false,
             _server_manager: OpenCodeServerManager::new(),
             poller_stop: Arc::new(AtomicBool::new(false)),
             poller_thread: None,
@@ -1221,6 +1206,7 @@ mod tests {
             settings: crate::settings::Settings::load(),
             settings_view_state: None,
             category_edit_mode: false,
+            task_search: TaskSearchState::default(),
             project_detail_cache: None,
             last_click: None,
             pending_gg_at: None,
@@ -2615,6 +2601,116 @@ mod tests {
         assert!(app.collapsed_categories.is_empty());
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()))?;
         assert!(!app.collapsed_categories.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn slash_search_enters_matches_navigates_and_exits() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, category_ids) = test_app_with_middle_task()?;
+        let repo_id = app.repos.first().context("expected repo")?.id;
+        app.db.add_task(
+            repo_id,
+            "feature/search-alpha-one",
+            "Alpha One",
+            category_ids[0],
+        )?;
+        app.db.add_task(
+            repo_id,
+            "feature/search-alpha-two",
+            "Alpha Two",
+            category_ids[2],
+        )?;
+        app.refresh_data()?;
+
+        app.current_view = View::Board;
+        app.view_mode = ViewMode::Kanban;
+
+        app.handle_key(key_char('/'))?;
+        assert_eq!(app.task_search.mode, TaskSearchMode::Input);
+
+        app.handle_key(key_char('a'))?;
+        app.handle_key(key_char('l'))?;
+        app.handle_key(key_enter())?;
+
+        assert_eq!(app.task_search.mode, TaskSearchMode::Match);
+        assert_eq!(app.task_search.matches.len(), 2);
+        assert_eq!(
+            app.selected_task().map(|task| task.title),
+            Some("Alpha One".to_string())
+        );
+
+        app.handle_key(key_char('n'))?;
+        assert_eq!(
+            app.selected_task().map(|task| task.title),
+            Some("Alpha Two".to_string())
+        );
+
+        app.handle_key(key_char('N'))?;
+        assert_eq!(
+            app.selected_task().map(|task| task.title),
+            Some("Alpha One".to_string())
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))?;
+        assert_eq!(app.task_search.mode, TaskSearchMode::Inactive);
+        assert_eq!(
+            app.selected_task().map(|task| task.title),
+            Some("Alpha One".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_keys_are_scoped_to_active_search_mode() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        app.current_view = View::Board;
+        app.view_mode = ViewMode::Kanban;
+        app.handle_key(key_char('n'))?;
+        assert!(matches!(app.active_dialog, ActiveDialog::NewTask(_)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn slash_search_matches_branch_and_repo_name() -> Result<()> {
+        let (mut app, repo_dir, _task_id, category_ids) = test_app_with_middle_task()?;
+        let custom_repo_dir = repo_dir.path().join("repo-search-target");
+        std::fs::create_dir_all(&custom_repo_dir)?;
+        let custom_repo = app.db.add_repo(&custom_repo_dir)?;
+        app.db.add_task(
+            custom_repo.id,
+            "feature/zeta-branch-hit",
+            "No Title Match",
+            category_ids[2],
+        )?;
+        app.refresh_data()?;
+
+        app.current_view = View::Board;
+        app.view_mode = ViewMode::Kanban;
+
+        app.handle_key(key_char('/'))?;
+        for ch in "zeta-branch".chars() {
+            app.handle_key(key_char(ch))?;
+        }
+        app.handle_key(key_enter())?;
+        assert_eq!(
+            app.selected_task().map(|task| task.title),
+            Some("No Title Match".to_string())
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))?;
+        app.handle_key(key_char('/'))?;
+        for ch in "repo-search-target".chars() {
+            app.handle_key(key_char(ch))?;
+        }
+        app.handle_key(key_enter())?;
+        assert_eq!(
+            app.selected_task().map(|task| task.title),
+            Some("No Title Match".to_string())
+        );
 
         Ok(())
     }

@@ -336,6 +336,32 @@ pub enum ViewMode {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TaskSearchMode {
+    Inactive,
+    Input,
+    Match,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TaskSearchState {
+    pub mode: TaskSearchMode,
+    pub query: String,
+    pub matches: Vec<Uuid>,
+    pub current_match_index: usize,
+}
+
+impl Default for TaskSearchState {
+    fn default() -> Self {
+        Self {
+            mode: TaskSearchMode::Inactive,
+            query: String::new(),
+            matches: Vec::new(),
+            current_match_index: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum TodoVisualizationMode {
     Summary,
     Checklist,

@@ -10,7 +10,6 @@ use crate::app::{
 
 impl App {
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
-        self.mouse_seen = true;
         self.last_mouse_event = Some(mouse);
 
         match mouse.kind {

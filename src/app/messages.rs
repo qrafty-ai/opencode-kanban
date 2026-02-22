@@ -110,4 +110,11 @@ pub enum Message {
     ToggleCategoryEditMode,
     ProjectListMoveUp,
     ProjectListMoveDown,
+    StartTaskSearch,
+    TaskSearchAppend(char),
+    TaskSearchBackspace,
+    ConfirmTaskSearch,
+    TaskSearchNext,
+    TaskSearchPrev,
+    ExitTaskSearch,
 }
