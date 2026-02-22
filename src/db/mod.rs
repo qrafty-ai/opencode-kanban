@@ -1022,21 +1022,25 @@ where
     match Handle::try_current() {
         Ok(handle) => match handle.runtime_flavor() {
             RuntimeFlavor::MultiThread => tokio::task::block_in_place(|| handle.block_on(future)),
-            RuntimeFlavor::CurrentThread => global_db_runtime().block_on(future),
+            RuntimeFlavor::CurrentThread => global_db_runtime()?.block_on(future),
             _ => handle.block_on(future),
         },
-        Err(_) => global_db_runtime().block_on(future),
+        Err(_) => global_db_runtime()?.block_on(future),
     }
 }
 
-fn global_db_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
+fn global_db_runtime() -> Result<&'static tokio::runtime::Runtime> {
+    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    let result = RUNTIME.get_or_init(|| {
         RuntimeBuilder::new_multi_thread()
             .enable_all()
             .build()
-            .expect("failed to initialize global DB runtime")
-    })
+            .map_err(|err| err.to_string())
+    });
+
+    result
+        .as_ref()
+        .map_err(|err| anyhow::anyhow!("failed to initialize global DB runtime: {err}"))
 }
 
 async fn execute_add_column_if_missing(pool: &SqlitePool, sql: &str, context: &str) -> Result<()> {

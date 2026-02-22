@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
@@ -64,10 +64,15 @@ pub trait StatusProvider {
     }
 }
 
-static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
+static UUID_RE: LazyLock<std::result::Result<Regex, regex::Error>> = LazyLock::new(|| {
     Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-        .expect("valid uuid regex")
 });
+
+fn session_id_regex() -> Result<&'static Regex> {
+    UUID_RE
+        .as_ref()
+        .map_err(|err| anyhow!("failed to compile OpenCode session-id matcher regex: {err}"))
+}
 
 pub fn opencode_launch(working_dir: &Path, session_id: Option<String>) -> Result<String> {
     let binary = opencode_binary();
@@ -117,7 +122,8 @@ pub fn opencode_launch(working_dir: &Path, session_id: Option<String>) -> Result
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    if let Some(found) = UUID_RE.find(&combined) {
+    let uuid_re = session_id_regex().context("failed to initialize OpenCode session-id matcher")?;
+    if let Some(found) = uuid_re.find(&combined) {
         return Ok(found.as_str().to_string());
     }
 

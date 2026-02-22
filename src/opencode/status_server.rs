@@ -15,7 +15,8 @@ use crate::types::{
 #[derive(Debug, Clone)]
 pub struct ServerStatusProvider {
     config: ServerStatusConfig,
-    client: Client,
+    client: Option<Client>,
+    init_error: Option<SessionStatusError>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -68,12 +69,30 @@ impl Default for ServerStatusProvider {
 
 impl ServerStatusProvider {
     pub fn new(config: ServerStatusConfig) -> Self {
-        let client = Client::builder()
-            .timeout(config.request_timeout)
-            .build()
-            .expect("failed to build status client");
+        match Client::builder().timeout(config.request_timeout).build() {
+            Ok(client) => Self {
+                config,
+                client: Some(client),
+                init_error: None,
+            },
+            Err(err) => Self {
+                config,
+                client: None,
+                init_error: Some(SessionStatusError {
+                    code: "SERVER_CLIENT_INIT_FAILED".to_string(),
+                    message: format!("failed to build status client: {err}"),
+                }),
+            },
+        }
+    }
 
-        Self { config, client }
+    fn client(&self) -> Result<&Client, SessionStatusError> {
+        self.client.as_ref().ok_or_else(|| {
+            self.init_error.clone().unwrap_or(SessionStatusError {
+                code: "SERVER_CLIENT_INIT_FAILED".to_string(),
+                message: "status client unavailable".to_string(),
+            })
+        })
     }
 
     fn base_url(&self) -> String {
@@ -117,7 +136,7 @@ impl ServerStatusProvider {
         directory: Option<&str>,
     ) -> Result<Vec<SessionRecord>, SessionStatusError> {
         let response = self
-            .client
+            .client()?
             .get(self.session_url(directory))
             .send()
             .await
@@ -173,7 +192,7 @@ impl ServerStatusProvider {
         };
 
         let response = self
-            .client
+            .client()?
             .get(status_url)
             .send()
             .await
@@ -206,7 +225,7 @@ impl ServerStatusProvider {
         session_id: &str,
     ) -> Result<Vec<SessionTodoItem>, SessionStatusError> {
         let response = self
-            .client
+            .client()?
             .get(self.session_todo_url(session_id))
             .send()
             .await
@@ -243,7 +262,7 @@ impl ServerStatusProvider {
         session_id: &str,
     ) -> Result<Vec<SessionMessageItem>, SessionStatusError> {
         let response = self
-            .client
+            .client()?
             .get(self.session_message_url(session_id))
             .send()
             .await
