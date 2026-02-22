@@ -144,7 +144,7 @@ fn run_app() -> Result<RunOutcome> {
         }
 
         let messages = realm
-            .tick(PollStrategy::Once)
+            .tick(PollStrategy::BlockCollectUpTo(16))
             .context("failed to process tui-realm tick")?;
 
         if !messages.is_empty() {

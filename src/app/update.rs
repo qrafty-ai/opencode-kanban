@@ -8,7 +8,6 @@ impl App {
             Message::Tick => {
                 self.pulse_phase = (self.pulse_phase + 1) % 4;
                 self.refresh_data()?;
-                self.drain_change_summary_results();
 
                 if self.view_mode == ViewMode::SidePanel {
                     let Some(task) = self.selected_task() else {
@@ -26,6 +25,9 @@ impl App {
 
                     self.update_current_change_summary_for_task(Some(&task));
                 }
+            }
+            Message::ChangeSummaryResultsReady => {
+                self.drain_change_summary_results();
             }
             Message::Resize(w, h) => {
                 self.viewport = (w, h);

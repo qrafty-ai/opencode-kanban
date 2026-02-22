@@ -14,6 +14,7 @@ pub enum Message {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Tick,
+    ChangeSummaryResultsReady,
     Resize(u16, u16),
     NavigateLeft,
     NavigateRight,
