@@ -1,5 +1,5 @@
 use super::side_panel::{selected_task_from_side_panel_rows, side_panel_rows_from};
-use super::{App, DetailFocus, SidePanelRow, View, ViewMode};
+use super::{App, DetailFocus, SidePanelRow, TaskSearchMode, TaskSearchState, View, ViewMode};
 use crate::types::{Repo, Task};
 use uuid::Uuid;
 
@@ -470,5 +470,84 @@ impl App {
             .iter()
             .find(|repo| repo.id == task.repo_id)
             .cloned()
+    }
+
+    pub(crate) fn start_task_search(&mut self) {
+        self.task_search = TaskSearchState {
+            mode: TaskSearchMode::Input,
+            ..TaskSearchState::default()
+        };
+    }
+
+    pub(crate) fn append_task_search_char(&mut self, ch: char) {
+        self.task_search.query.push(ch);
+    }
+
+    pub(crate) fn pop_task_search_char(&mut self) {
+        self.task_search.query.pop();
+    }
+
+    pub(crate) fn confirm_task_search(&mut self) {
+        let query = self.task_search.query.trim().to_ascii_lowercase();
+        let mut matches: Vec<&Task> = self
+            .tasks
+            .iter()
+            .filter(|task| self.task_matches_search_query(task, &query))
+            .collect();
+        matches.sort_by_key(|task| {
+            let category_position = self
+                .categories
+                .iter()
+                .find(|category| category.id == task.category_id)
+                .map(|category| category.position)
+                .unwrap_or(i64::MAX);
+            (category_position, task.position)
+        });
+
+        self.task_search.mode = TaskSearchMode::Match;
+        self.task_search.matches = matches.iter().map(|task| task.id).collect();
+        self.task_search.current_match_index = 0;
+        self.focus_current_task_search_match();
+    }
+
+    fn task_matches_search_query(&self, task: &Task, query: &str) -> bool {
+        let title_match = task.title.to_ascii_lowercase().contains(query);
+        let branch_match = task.branch.to_ascii_lowercase().contains(query);
+        let repo_match = self
+            .repos
+            .iter()
+            .find(|repo| repo.id == task.repo_id)
+            .map(|repo| repo.name.to_ascii_lowercase().contains(query))
+            .unwrap_or(false);
+
+        title_match || branch_match || repo_match
+    }
+
+    pub(crate) fn step_task_search_match(&mut self, delta: isize) {
+        if self.task_search.matches.is_empty() {
+            self.task_search.current_match_index = 0;
+            return;
+        }
+
+        let len = self.task_search.matches.len() as isize;
+        let next = (self.task_search.current_match_index as isize + delta).rem_euclid(len);
+        self.task_search.current_match_index = next as usize;
+        self.focus_current_task_search_match();
+    }
+
+    pub(crate) fn exit_task_search(&mut self) {
+        self.task_search = TaskSearchState::default();
+    }
+
+    fn focus_current_task_search_match(&mut self) {
+        let Some(task_id) = self
+            .task_search
+            .matches
+            .get(self.task_search.current_match_index)
+            .copied()
+        else {
+            return;
+        };
+        self.focus_task_by_id(task_id);
     }
 }

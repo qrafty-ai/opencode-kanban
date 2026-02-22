@@ -28,8 +28,8 @@ use crate::app::{
     DeleteProjectDialogState, DeleteRepoDialogState, DeleteTaskField, DetailFocus, EditTaskField,
     Message, NewProjectDialogState, NewProjectField, NewTaskField, ProjectDetailCache,
     RenameProjectDialogState, RenameProjectField, RenameRepoDialogState, RenameRepoField,
-    RepoPickerTarget, SettingsSection, SidePanelRow, TodoVisualizationMode, View, ViewMode,
-    category_color_label,
+    RepoPickerTarget, SettingsSection, SidePanelRow, TaskSearchMode, TodoVisualizationMode, View,
+    ViewMode, category_color_label,
 };
 use crate::command_palette::all_commands;
 use crate::theme::{Theme, ThemePreset};
@@ -39,6 +39,7 @@ use crate::types::{Category, SessionTodoItem, Task};
 pub enum OverlayAnchor {
     Center,
     Top,
+    Bottom,
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
@@ -50,6 +51,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         View::Settings => render_settings(frame, app),
         View::Archive => render_archive(frame, app),
     }
+
+    render_task_search_overlay(frame, app);
 
     if app.active_dialog != ActiveDialog::None {
         render_dialog(frame, app);
@@ -423,23 +426,84 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         match app.view_mode {
             ViewMode::Kanban => {
-                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  n:new  e:edit  a:archive  A:archive view  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x/p:category  H/L move  J/K reorder  v:view"
+                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  /:search  n:new  e:edit  a:archive  A:archive view  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x/p:category  H/L move  J/K reorder  v:view"
             }
             ViewMode::SidePanel => {
-                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  Space:collapse  e:edit  a:archive  A:archive view  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
+                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  /:search  Space:collapse  e:edit  a:archive  A:archive view  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
             }
         }
     };
 
-    let mut footer = Label::default()
-        .text(notice)
-        .alignment(Alignment::Center)
-        .foreground(if app.category_edit_mode && app.footer_notice.is_none() {
+    render_footer_label(
+        frame,
+        area,
+        notice,
+        if app.category_edit_mode && app.footer_notice.is_none() {
             theme.base.header
         } else {
             theme.base.text_muted
-        })
-        .background(theme.base.surface);
+        },
+        theme.base.surface,
+    );
+}
+
+fn render_task_search_overlay(frame: &mut Frame<'_>, app: &App) {
+    let Some((message, accent)) = task_search_overlay_message(app) else {
+        return;
+    };
+
+    let width_percent = if app.viewport.0 < 60 { 90 } else { 68 };
+    let overlay = calculate_overlay_area(OverlayAnchor::Bottom, width_percent, 14, frame.area());
+    if overlay.width < 8 || overlay.height < 3 {
+        return;
+    }
+
+    frame.render_widget(Clear, overlay);
+    let theme = app.theme;
+    let content_width = list_inner_width(overlay);
+    let line = clamp_text(&message, content_width);
+    let mut panel = Paragraph::default()
+        .title("Search", Alignment::Left)
+        .borders(rounded_borders(theme.interactive.focus))
+        .foreground(theme.base.text)
+        .background(theme.base.surface)
+        .text([TextSpan::new(line).fg(accent)]);
+    panel.view(frame, overlay);
+}
+
+fn task_search_overlay_message(app: &App) -> Option<(String, Color)> {
+    if app.current_view != View::Board {
+        return None;
+    }
+
+    let query = app.task_search.query.as_str();
+    match app.task_search.mode {
+        TaskSearchMode::Inactive => None,
+        TaskSearchMode::Input => Some((
+            format!("/{query}  Enter: search  Esc: exit"),
+            app.theme.base.text_muted,
+        )),
+        TaskSearchMode::Match => {
+            let total = app.task_search.matches.len();
+            let current = if total == 0 {
+                0
+            } else {
+                app.task_search.current_match_index.saturating_add(1)
+            };
+            Some((
+                format!("/{query}  {current}/{total} matches  n/N: next/prev  Esc: exit"),
+                app.theme.base.header,
+            ))
+        }
+    }
+}
+
+fn render_footer_label(frame: &mut Frame<'_>, area: Rect, notice: &str, fg: Color, bg: Color) {
+    let mut footer = Label::default()
+        .text(notice)
+        .alignment(Alignment::Center)
+        .foreground(fg)
+        .background(bg);
     footer.view(frame, area);
 }
 
@@ -3263,29 +3327,163 @@ fn append_task_tile_rows(
         .add_col(TextSpan::new("│").fg(border).bg(bg))
         .add_row();
 
-    let title_line = pad_to_width(&format!(" {}", task_tile_title(task)), inner_width);
-    rows.add_col(TextSpan::new("│").fg(border).bg(bg))
-        .add_col(TextSpan::new(title_line).fg(theme.base.text).bg(bg).bold())
-        .add_col(TextSpan::new("│").fg(border).bg(bg))
-        .add_row();
+    let title = task_tile_title(task);
+    let title_line = pad_to_width(&format!(" {title}"), inner_width);
+    rows.add_col(TextSpan::new("│").fg(border).bg(bg));
+    for span in task_title_spans(app, task, &title, &title_line, bg, theme.base.text) {
+        rows.add_col(span);
+    }
+    rows.add_col(TextSpan::new("│").fg(border).bg(bg)).add_row();
 
     let repo = task_tile_repo(app, task);
     let branch = task_tile_branch(task);
     let used = 1 + count_chars(&repo) + 1 + count_chars(&branch);
     let filler = inner_width.saturating_sub(used);
+    let search_query = task_search_query_for_highlighting(app, task);
+    let repo_spans =
+        highlighted_text_spans(repo.as_str(), search_query, theme.tile.repo, bg, false);
+    let branch_spans =
+        highlighted_text_spans(branch.as_str(), search_query, theme.tile.branch, bg, false);
 
     rows.add_col(TextSpan::new("│").fg(border).bg(bg))
-        .add_col(TextSpan::new(" ").bg(bg))
-        .add_col(TextSpan::new(repo).fg(theme.tile.repo).bg(bg))
-        .add_col(TextSpan::new(":").fg(theme.base.text_muted).bg(bg))
-        .add_col(TextSpan::new(branch).fg(theme.tile.branch).bg(bg))
-        .add_col(TextSpan::new(" ".repeat(filler)).bg(bg))
+        .add_col(TextSpan::new(" ").bg(bg));
+    for span in repo_spans {
+        rows.add_col(span);
+    }
+    rows.add_col(TextSpan::new(":").fg(theme.base.text_muted).bg(bg));
+    for span in branch_spans {
+        rows.add_col(span);
+    }
+    rows.add_col(TextSpan::new(" ".repeat(filler)).bg(bg))
         .add_col(TextSpan::new("│").fg(border).bg(bg))
         .add_row();
 
     let bottom = format!("└{}┘", "─".repeat(inner_width));
     rows.add_col(TextSpan::new(bottom).fg(border).bg(bg))
         .add_row();
+}
+
+fn task_title_spans(
+    app: &App,
+    task: &Task,
+    displayed_title: &str,
+    title_line: &str,
+    bg: Color,
+    default_fg: Color,
+) -> Vec<TextSpan> {
+    let Some(query) = task_search_query_for_highlighting(app, task) else {
+        return vec![TextSpan::new(title_line).fg(default_fg).bg(bg).bold()];
+    };
+    let Some((match_start, match_end)) =
+        first_match_char_range_case_insensitive(displayed_title, query)
+    else {
+        return vec![TextSpan::new(title_line).fg(default_fg).bg(bg).bold()];
+    };
+
+    let total_chars = count_chars(title_line);
+    let start = (match_start + 1).min(total_chars);
+    let end = (match_end + 1).min(total_chars);
+    if start >= end {
+        return vec![TextSpan::new(title_line).fg(default_fg).bg(bg).bold()];
+    }
+
+    let prefix = slice_chars(title_line, 0, start);
+    let matched = slice_chars(title_line, start, end);
+    let suffix = slice_chars(title_line, end, total_chars);
+
+    let mut spans = Vec::with_capacity(3);
+    if !prefix.is_empty() {
+        spans.push(TextSpan::new(prefix).fg(default_fg).bg(bg).bold());
+    }
+    spans.push(
+        TextSpan::new(matched)
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .bold(),
+    );
+    if !suffix.is_empty() {
+        spans.push(TextSpan::new(suffix).fg(default_fg).bg(bg).bold());
+    }
+    spans
+}
+
+fn task_search_query_for_highlighting<'a>(app: &'a App, task: &Task) -> Option<&'a str> {
+    if app.task_search.mode == TaskSearchMode::Inactive {
+        return None;
+    }
+    if !app.task_search.matches.contains(&task.id) {
+        return None;
+    }
+
+    let query = app.task_search.query.trim();
+    if query.is_empty() {
+        return None;
+    }
+
+    Some(query)
+}
+
+fn highlighted_text_spans(
+    text: &str,
+    query: Option<&str>,
+    default_fg: Color,
+    bg: Color,
+    bold: bool,
+) -> Vec<TextSpan> {
+    let Some(query) = query else {
+        return vec![styled_span(text.to_string(), default_fg, bg, bold)];
+    };
+    let Some((start, end)) = first_match_char_range_case_insensitive(text, query) else {
+        return vec![styled_span(text.to_string(), default_fg, bg, bold)];
+    };
+
+    let total_chars = count_chars(text);
+    let start = start.min(total_chars);
+    let end = end.min(total_chars);
+    if start >= end {
+        return vec![styled_span(text.to_string(), default_fg, bg, bold)];
+    }
+
+    let prefix = slice_chars(text, 0, start);
+    let matched = slice_chars(text, start, end);
+    let suffix = slice_chars(text, end, total_chars);
+
+    let mut spans = Vec::with_capacity(3);
+    if !prefix.is_empty() {
+        spans.push(styled_span(prefix, default_fg, bg, bold));
+    }
+    spans.push(styled_span(matched, Color::Black, Color::Yellow, bold));
+    if !suffix.is_empty() {
+        spans.push(styled_span(suffix, default_fg, bg, bold));
+    }
+    spans
+}
+
+fn styled_span(text: String, fg: Color, bg: Color, bold: bool) -> TextSpan {
+    let span = TextSpan::new(text).fg(fg).bg(bg);
+    if bold { span.bold() } else { span }
+}
+
+fn first_match_char_range_case_insensitive(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+    if needle.is_empty() {
+        return None;
+    }
+
+    let haystack_lower = haystack.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let start_byte = haystack_lower.find(&needle_lower)?;
+    let start = haystack[..start_byte].chars().count();
+    let length = needle.chars().count();
+    let end = (start + length).min(haystack.chars().count());
+    Some((start, end))
+}
+
+fn slice_chars(value: &str, start: usize, end: usize) -> String {
+    value
+        .chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 fn task_tile_status_line(app: &App, task: &Task) -> String {
@@ -3719,6 +3917,25 @@ fn calculate_overlay_area(
                     Constraint::Length(2),
                     Constraint::Percentage(height_percent),
                     Constraint::Min(0),
+                ])
+                .split(area);
+
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage((100 - width_percent) / 2),
+                    Constraint::Percentage(width_percent),
+                    Constraint::Percentage((100 - width_percent) / 2),
+                ])
+                .split(popup_layout[1])[1]
+        }
+        OverlayAnchor::Bottom => {
+            let popup_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Percentage(height_percent),
+                    Constraint::Length(2),
                 ])
                 .split(area);
 
@@ -4401,6 +4618,13 @@ mod tests {
     }
 
     #[test]
+    fn test_calculate_overlay_area_bottom() {
+        let area = Rect::new(0, 0, 100, 100);
+        let result = calculate_overlay_area(OverlayAnchor::Bottom, 50, 50, area);
+        assert_eq!(result, Rect::new(25, 48, 50, 50));
+    }
+
+    #[test]
     fn test_command_palette_overlay_uses_90_percent_width_on_narrow_terminal() {
         assert_eq!(command_palette_overlay_size((29, 40)), (90, 50));
         assert_eq!(command_palette_overlay_size((30, 40)), (60, 50));
@@ -4637,6 +4861,29 @@ mod tests {
     fn test_effective_scroll_column_width_respects_viewport_guard() {
         assert_eq!(effective_scroll_column_width(42, 120), 42);
         assert_eq!(effective_scroll_column_width(42, 20), 16);
+    }
+
+    #[test]
+    fn test_first_match_char_range_case_insensitive_matches_expected_slice() {
+        let range = first_match_char_range_case_insensitive("Alpha Task", "phA");
+        assert_eq!(range, Some((2, 5)));
+    }
+
+    #[test]
+    fn test_first_match_char_range_case_insensitive_none_on_empty_or_missing() {
+        assert_eq!(
+            first_match_char_range_case_insensitive("Alpha Task", ""),
+            None
+        );
+        assert_eq!(
+            first_match_char_range_case_insensitive("Alpha Task", "zzz"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_slice_chars_extracts_requested_range() {
+        assert_eq!(slice_chars("search-title", 1, 7), "earch-".to_string());
     }
 
     #[test]

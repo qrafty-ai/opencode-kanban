@@ -14,7 +14,6 @@ impl App {
                     let Some(task) = self.selected_task() else {
                         self.current_log_buffer = None;
                         self.clear_current_change_summary();
-                        self.maybe_show_tmux_mouse_hint();
                         return Ok(());
                     };
 
@@ -847,10 +846,43 @@ impl App {
                     }
                 }
             }
+            Message::StartTaskSearch => {
+                if self.current_view == View::Board {
+                    self.start_task_search();
+                }
+            }
+            Message::TaskSearchAppend(ch) => {
+                if self.task_search.mode == TaskSearchMode::Input {
+                    self.append_task_search_char(ch);
+                }
+            }
+            Message::TaskSearchBackspace => {
+                if self.task_search.mode == TaskSearchMode::Input {
+                    self.pop_task_search_char();
+                }
+            }
+            Message::ConfirmTaskSearch => {
+                if self.task_search.mode == TaskSearchMode::Input {
+                    self.confirm_task_search();
+                }
+            }
+            Message::TaskSearchNext => {
+                if self.task_search.mode == TaskSearchMode::Match {
+                    self.step_task_search_match(1);
+                }
+            }
+            Message::TaskSearchPrev => {
+                if self.task_search.mode == TaskSearchMode::Match {
+                    self.step_task_search_match(-1);
+                }
+            }
+            Message::ExitTaskSearch => {
+                if self.task_search.mode != TaskSearchMode::Inactive {
+                    self.exit_task_search();
+                }
+            }
             Message::ToggleCategoryEditMode => {}
         }
-
-        self.maybe_show_tmux_mouse_hint();
 
         Ok(())
     }

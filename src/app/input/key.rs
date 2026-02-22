@@ -5,7 +5,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::super::GG_SEQUENCE_TIMEOUT;
 use super::super::dialogs;
-use crate::app::{ActiveDialog, App, DetailFocus, Message, SettingsSection, View, ViewMode};
+use crate::app::{
+    ActiveDialog, App, DetailFocus, Message, SettingsSection, TaskSearchMode, View, ViewMode,
+};
 use crate::keybindings::{KeyAction, KeyContext};
 
 impl App {
@@ -59,6 +61,45 @@ impl App {
                 _ => {}
             }
             return Ok(());
+        }
+
+        if self.current_view == View::Board {
+            if self.task_search.mode != TaskSearchMode::Inactive {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.update(Message::ExitTaskSearch)?;
+                    }
+                    KeyCode::Char('/') if key.modifiers == KeyModifiers::empty() => {
+                        self.update(Message::StartTaskSearch)?;
+                    }
+                    KeyCode::Enter if self.task_search.mode == TaskSearchMode::Input => {
+                        self.update(Message::ConfirmTaskSearch)?;
+                    }
+                    KeyCode::Backspace if self.task_search.mode == TaskSearchMode::Input => {
+                        self.update(Message::TaskSearchBackspace)?;
+                    }
+                    KeyCode::Char(ch)
+                        if self.task_search.mode == TaskSearchMode::Input
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        self.update(Message::TaskSearchAppend(ch))?;
+                    }
+                    KeyCode::Char('n') if self.task_search.mode == TaskSearchMode::Match => {
+                        self.update(Message::TaskSearchNext)?;
+                    }
+                    KeyCode::Char('N') if self.task_search.mode == TaskSearchMode::Match => {
+                        self.update(Message::TaskSearchPrev)?;
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+
+            if key.code == KeyCode::Char('/') && key.modifiers == KeyModifiers::empty() {
+                self.update(Message::StartTaskSearch)?;
+                return Ok(());
+            }
         }
 
         if let Some(action) = self.keybindings.action_for_key(KeyContext::Global, key) {
