@@ -9,13 +9,14 @@ use crossterm::event::{
 };
 use tuirealm::{
     Application, AttrValue, Attribute, Component, Event, EventListenerCfg, Frame, MockComponent,
-    NoUserEvent, Props, State,
+    Props, State,
     command::{Cmd, CmdResult},
     event::{
         Key as RealmKey, KeyEvent as RealmKeyEvent, KeyModifiers as RealmKeyModifiers,
         MouseButton as RealmMouseButton, MouseEvent as RealmMouseEvent,
         MouseEventKind as RealmMouseEventKind,
     },
+    listener::{ListenerError, ListenerResult, Poll},
     ratatui::layout::Rect,
 };
 
@@ -31,10 +32,20 @@ pub enum RootId {
     Root,
 }
 
-pub fn init_application(app: SharedApp) -> Result<Application<RootId, Message, NoUserEvent>> {
-    let mut application: Application<RootId, Message, NoUserEvent> = Application::init(
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum RealmUserEvent {
+    ChangeSummaryResultsReady,
+}
+
+pub fn init_application(app: SharedApp) -> Result<Application<RootId, Message, RealmUserEvent>> {
+    let mut application: Application<RootId, Message, RealmUserEvent> = Application::init(
         EventListenerCfg::default()
             .crossterm_input_listener(Duration::from_millis(20), 3)
+            .add_port(
+                Box::new(ChangeSummaryResultsPort::new(Arc::clone(&app))),
+                Duration::from_millis(40),
+                16,
+            )
             .poll_timeout(Duration::from_millis(10))
             .tick_interval(Duration::from_millis(500)),
     );
@@ -104,14 +115,39 @@ impl MockComponent for RootComponent {
     }
 }
 
-impl Component<Message, NoUserEvent> for RootComponent {
-    fn on(&mut self, ev: Event<NoUserEvent>) -> Option<Message> {
+impl Component<Message, RealmUserEvent> for RootComponent {
+    fn on(&mut self, ev: Event<RealmUserEvent>) -> Option<Message> {
         match ev {
             Event::Keyboard(key) => Some(Message::Key(convert_key_event(key))),
             Event::Mouse(mouse) => Some(Message::Mouse(convert_mouse_event(mouse))),
             Event::WindowResize(width, height) => Some(Message::Resize(width, height)),
             Event::Tick => Some(Message::Tick),
+            Event::User(RealmUserEvent::ChangeSummaryResultsReady) => {
+                Some(Message::ChangeSummaryResultsReady)
+            }
             _ => None,
+        }
+    }
+}
+
+struct ChangeSummaryResultsPort {
+    app: SharedApp,
+}
+
+impl ChangeSummaryResultsPort {
+    fn new(app: SharedApp) -> Self {
+        Self { app }
+    }
+}
+
+impl Poll<RealmUserEvent> for ChangeSummaryResultsPort {
+    fn poll(&mut self) -> ListenerResult<Option<Event<RealmUserEvent>>> {
+        let mut app = self.app.lock().map_err(|_| ListenerError::PollFailed)?;
+
+        if app.collect_change_summary_result_for_port() {
+            Ok(Some(Event::User(RealmUserEvent::ChangeSummaryResultsReady)))
+        } else {
+            Ok(None)
         }
     }
 }

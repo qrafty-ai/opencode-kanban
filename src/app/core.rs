@@ -60,6 +60,7 @@ pub struct App {
     pub(crate) change_summary_generation: u64,
     pub(crate) change_summary_request_tx: Option<Sender<ChangeSummaryRequest>>,
     pub(crate) change_summary_result_rx: Receiver<ChangeSummaryResult>,
+    pub(crate) pending_change_summary_results: Vec<ChangeSummaryResult>,
     pub(crate) change_summary_worker: Option<std::thread::JoinHandle<()>>,
     pub detail_focus: DetailFocus,
     pub detail_scroll_offset: usize,
@@ -191,6 +192,7 @@ impl App {
             change_summary_generation: 0,
             change_summary_request_tx: Some(change_summary_request_tx),
             change_summary_result_rx,
+            pending_change_summary_results: Vec::new(),
             change_summary_worker: Some(change_summary_worker),
             detail_focus: DetailFocus::List,
             detail_scroll_offset: 0,
@@ -607,6 +609,14 @@ impl App {
     }
 
     pub(crate) fn drain_change_summary_results(&mut self) {
+        for result in self.pending_change_summary_results.drain(..) {
+            if result.generation != self.change_summary_generation {
+                continue;
+            }
+            self.change_summary_in_flight.remove(&result.key);
+            self.change_summary_cache.insert(result.key, result.summary);
+        }
+
         while let Ok(result) = self.change_summary_result_rx.try_recv() {
             if result.generation != self.change_summary_generation {
                 continue;
@@ -654,10 +664,22 @@ impl App {
         }
     }
 
+    pub(crate) fn collect_change_summary_result_for_port(&mut self) -> bool {
+        match self.change_summary_result_rx.try_recv() {
+            Ok(result) => {
+                self.pending_change_summary_results.push(result);
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty)
+            | Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        }
+    }
+
     pub(crate) fn reset_change_summary_tracking(&mut self) {
         self.change_summary_generation = self.change_summary_generation.saturating_add(1);
         self.change_summary_cache.clear();
         self.change_summary_in_flight.clear();
+        self.pending_change_summary_results.clear();
         self.clear_current_change_summary();
         while self.change_summary_result_rx.try_recv().is_ok() {}
     }

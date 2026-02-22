@@ -1189,6 +1189,7 @@ mod tests {
             change_summary_generation: 0,
             change_summary_request_tx: Some(change_summary_request_tx),
             change_summary_result_rx,
+            pending_change_summary_results: Vec::new(),
             change_summary_worker: Some(change_summary_worker),
             detail_focus: DetailFocus::List,
             detail_scroll_offset: 0,
