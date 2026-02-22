@@ -272,24 +272,21 @@ impl Drop for TerminalGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::ensure_command_succeeded;
-    use std::process::Command;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
 
     #[test]
     fn ensure_command_succeeded_accepts_success_status() {
-        let status = Command::new("true")
-            .status()
-            .expect("true command should be available");
+        let status = ExitStatus::from_raw(0);
         assert!(ensure_command_succeeded("true", status).is_ok());
     }
 
     #[test]
     fn ensure_command_succeeded_rejects_failure_status() {
-        let status = Command::new("false")
-            .status()
-            .expect("false command should be available");
+        let status = ExitStatus::from_raw(1 << 8);
         assert!(ensure_command_succeeded("false", status).is_err());
     }
 }
