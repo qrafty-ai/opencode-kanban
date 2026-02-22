@@ -69,19 +69,31 @@ static TERMINAL_RESTORED: AtomicBool = AtomicBool::new(false);
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let log_path = init_logging().expect("Failed to initialize logging");
-    install_panic_hook_with_log(log_path.clone());
+    let log_path = match init_logging() {
+        Ok(path) => Some(path),
+        Err(err) => {
+            eprintln!("warning: failed to initialize logging: {err}");
+            None
+        }
+    };
+    if let Some(path) = log_path.as_ref() {
+        install_panic_hook_with_log(path.clone());
+    }
 
     match run_app() {
         Ok(RunOutcome::Continue) => {
-            print_log_location(&log_path);
+            if let Some(path) = log_path.as_ref() {
+                print_log_location(path);
+            }
             Ok(())
         }
         Ok(RunOutcome::Exit(code)) => {
             std::process::exit(code);
         }
         Err(err) => {
-            print_log_location(&log_path);
+            if let Some(path) = log_path.as_ref() {
+                print_log_location(path);
+            }
             Err(err)
         }
     }
@@ -165,16 +177,15 @@ fn validate_runtime_environment() -> Result<()> {
         let exe_path = current_exe.to_string_lossy();
 
         if tmux_session_exists(session_name) {
-            let mut child = Command::new("tmux")
+            let status = Command::new("tmux")
                 .args(["attach-session", "-t", session_name])
-                .spawn()
+                .status()
                 .context("failed to attach to tmux session")?;
-
-            child.wait().context("tmux attach-session failed")?;
+            ensure_command_succeeded("tmux attach-session", status)?;
             std::process::exit(0);
         }
 
-        let mut child = Command::new("tmux")
+        let status = Command::new("tmux")
             .args([
                 "new-session",
                 "-A",
@@ -184,14 +195,21 @@ fn validate_runtime_environment() -> Result<()> {
                 ".",
                 exe_path.as_ref(),
             ])
-            .spawn()
+            .status()
             .context("failed to create tmux session")?;
-
-        child.wait().context("tmux new-session failed")?;
+        ensure_command_succeeded("tmux new-session", status)?;
         std::process::exit(0);
     }
 
     Ok(())
+}
+
+fn ensure_command_succeeded(action: &str, status: std::process::ExitStatus) -> Result<()> {
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("{action} exited with status {status}");
+    }
 }
 
 fn setup_terminal() -> Result<TerminalBridge<CrosstermTerminalAdapter>> {
@@ -251,5 +269,24 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = restore_terminal();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::ensure_command_succeeded;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    #[test]
+    fn ensure_command_succeeded_accepts_success_status() {
+        let status = ExitStatus::from_raw(0);
+        assert!(ensure_command_succeeded("true", status).is_ok());
+    }
+
+    #[test]
+    fn ensure_command_succeeded_rejects_failure_status() {
+        let status = ExitStatus::from_raw(1 << 8);
+        assert!(ensure_command_succeeded("false", status).is_err());
     }
 }
