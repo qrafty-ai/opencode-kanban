@@ -1,4 +1,5 @@
 use super::*;
+use crate::task_palette::TaskPaletteCandidate;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SubagentTodoSummary {
@@ -531,6 +532,85 @@ impl App {
 
         self.current_project_path = Some(path);
         Ok(())
+    }
+
+    pub(crate) fn task_palette_candidates(&self) -> Vec<TaskPaletteCandidate> {
+        let mut candidates = Vec::new();
+
+        for project in &self.project_list {
+            if self.settings.is_archived_project_path(&project.path) {
+                continue;
+            }
+
+            let Ok(db) = Database::open(&project.path) else {
+                continue;
+            };
+            let Ok(mut tasks) = db.list_tasks() else {
+                continue;
+            };
+            let Ok(repos) = db.list_repos() else {
+                continue;
+            };
+            let Ok(categories) = db.list_categories() else {
+                continue;
+            };
+
+            let repo_name_by_id: HashMap<Uuid, String> =
+                repos.into_iter().map(|repo| (repo.id, repo.name)).collect();
+            let category_name_by_id: HashMap<Uuid, String> = categories
+                .iter()
+                .map(|category| (category.id, category.name.clone()))
+                .collect();
+            let category_position_by_id: HashMap<Uuid, i64> = categories
+                .into_iter()
+                .map(|category| (category.id, category.position))
+                .collect();
+
+            tasks.sort_by_key(|task| {
+                (
+                    category_position_by_id
+                        .get(&task.category_id)
+                        .copied()
+                        .unwrap_or(i64::MAX),
+                    task.position,
+                    task.created_at.clone(),
+                )
+            });
+
+            for task in tasks {
+                candidates.push(TaskPaletteCandidate {
+                    project_name: project.name.clone(),
+                    project_path: project.path.clone(),
+                    task_id: task.id,
+                    title: task.title,
+                    branch: task.branch,
+                    repo_name: repo_name_by_id
+                        .get(&task.repo_id)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown repo".to_string()),
+                    category_name: category_name_by_id
+                        .get(&task.category_id)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown category".to_string()),
+                });
+            }
+        }
+
+        candidates
+    }
+
+    pub(crate) fn task_palette_scope_label(&self) -> String {
+        let visible_project_count = self
+            .project_list
+            .iter()
+            .filter(|project| !self.settings.is_archived_project_path(&project.path))
+            .count();
+
+        if visible_project_count == 1 {
+            "Global (1 project)".to_string()
+        } else {
+            format!("Global ({visible_project_count} projects)")
+        }
     }
 
     pub(crate) fn current_project_slug_for_tmux(&self) -> Option<String> {

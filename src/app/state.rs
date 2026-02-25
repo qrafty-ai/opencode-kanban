@@ -6,6 +6,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::command_palette::CommandPaletteState;
+use crate::task_palette::TaskPaletteState;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum NewTaskField {
@@ -401,6 +402,7 @@ pub enum ActiveDialog {
     None,
     NewTask(NewTaskDialogState),
     CommandPalette(CommandPaletteState),
+    TaskPalette(TaskPaletteState),
     NewProject(NewProjectDialogState),
     RenameProject(RenameProjectDialogState),
     DeleteProject(DeleteProjectDialogState),

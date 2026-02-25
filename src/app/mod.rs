@@ -2707,112 +2707,249 @@ mod tests {
     }
 
     #[test]
-    fn slash_search_enters_matches_navigates_and_exits() -> Result<()> {
-        let (mut app, _repo_dir, _task_id, category_ids) = test_app_with_middle_task()?;
-        let repo_id = app.repos.first().context("expected repo")?.id;
-        app.db.add_task(
-            repo_id,
-            "feature/search-alpha-one",
-            "Alpha One",
-            category_ids[0],
-        )?;
-        app.db.add_task(
-            repo_id,
-            "feature/search-alpha-two",
-            "Alpha Two",
-            category_ids[2],
-        )?;
-        app.refresh_data()?;
-
-        app.current_view = View::Board;
-        app.view_mode = ViewMode::Kanban;
-
-        app.handle_key(key_char('/'))?;
-        assert_eq!(app.task_search.mode, TaskSearchMode::Input);
-
-        app.handle_key(key_char('a'))?;
-        app.handle_key(key_char('l'))?;
-        app.handle_key(key_enter())?;
-
-        assert_eq!(app.task_search.mode, TaskSearchMode::Match);
-        assert_eq!(app.task_search.matches.len(), 2);
-        assert_eq!(
-            app.selected_task().map(|task| task.title),
-            Some("Alpha One".to_string())
-        );
-
-        app.handle_key(key_char('n'))?;
-        assert_eq!(
-            app.selected_task().map(|task| task.title),
-            Some("Alpha Two".to_string())
-        );
-
-        app.handle_key(key_char('N'))?;
-        assert_eq!(
-            app.selected_task().map(|task| task.title),
-            Some("Alpha One".to_string())
-        );
-
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))?;
-        assert_eq!(app.task_search.mode, TaskSearchMode::Inactive);
-        assert_eq!(
-            app.selected_task().map(|task| task.title),
-            Some("Alpha One".to_string())
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn search_keys_are_scoped_to_active_search_mode() -> Result<()> {
+    fn slash_opens_task_palette_dialog() -> Result<()> {
         let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
 
         app.current_view = View::Board;
         app.view_mode = ViewMode::Kanban;
+        app.handle_key(key_char('/'))?;
+
+        assert!(matches!(app.active_dialog, ActiveDialog::TaskPalette(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn task_palette_scopes_typed_keys_to_palette_input() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        app.current_view = View::Board;
+        app.view_mode = ViewMode::Kanban;
+        app.handle_key(key_char('/'))?;
         app.handle_key(key_char('n'))?;
-        assert!(matches!(app.active_dialog, ActiveDialog::NewTask(_)));
+
+        match &app.active_dialog {
+            ActiveDialog::TaskPalette(state) => assert_eq!(state.query, "n"),
+            _ => panic!("task palette should remain open while typing"),
+        }
 
         Ok(())
     }
 
     #[test]
-    fn slash_search_matches_branch_and_repo_name() -> Result<()> {
-        let (mut app, repo_dir, _task_id, category_ids) = test_app_with_middle_task()?;
-        let custom_repo_dir = repo_dir.path().join("repo-search-target");
-        std::fs::create_dir_all(&custom_repo_dir)?;
-        let custom_repo = app.db.add_repo(&custom_repo_dir)?;
-        app.db.add_task(
-            custom_repo.id,
-            "feature/zeta-branch-hit",
-            "No Title Match",
-            category_ids[2],
-        )?;
-        app.refresh_data()?;
+    fn command_palette_ctrl_n_and_ctrl_p_move_selection() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        app.update(Message::OpenCommandPalette)?;
+        let len = match &app.active_dialog {
+            ActiveDialog::CommandPalette(state) => state.filtered.len(),
+            other => panic!("expected command palette, got {other:?}"),
+        };
+        assert!(len > 1);
+
+        app.handle_key(key_ctrl_char('n'))?;
+        match &app.active_dialog {
+            ActiveDialog::CommandPalette(state) => assert_eq!(state.selected_index, 1),
+            other => panic!("expected command palette, got {other:?}"),
+        }
+
+        app.handle_key(key_ctrl_char('p'))?;
+        match &app.active_dialog {
+            ActiveDialog::CommandPalette(state) => assert_eq!(state.selected_index, 0),
+            other => panic!("expected command palette, got {other:?}"),
+        }
+
+        app.handle_key(key_ctrl_char('p'))?;
+        match &app.active_dialog {
+            ActiveDialog::CommandPalette(state) => assert_eq!(state.selected_index, len - 1),
+            other => panic!("expected command palette, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn task_palette_ctrl_n_and_ctrl_p_move_selection() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
 
         app.current_view = View::Board;
         app.view_mode = ViewMode::Kanban;
+        app.active_dialog =
+            ActiveDialog::TaskPalette(crate::task_palette::TaskPaletteState::new(vec![
+                crate::task_palette::TaskPaletteCandidate {
+                    project_name: "alpha".to_string(),
+                    project_path: PathBuf::from("/tmp/a.sqlite"),
+                    task_id: Uuid::new_v4(),
+                    title: "first".to_string(),
+                    branch: "feature/first".to_string(),
+                    repo_name: "repo".to_string(),
+                    category_name: "TODO".to_string(),
+                },
+                crate::task_palette::TaskPaletteCandidate {
+                    project_name: "alpha".to_string(),
+                    project_path: PathBuf::from("/tmp/a.sqlite"),
+                    task_id: Uuid::new_v4(),
+                    title: "second".to_string(),
+                    branch: "feature/second".to_string(),
+                    repo_name: "repo".to_string(),
+                    category_name: "TODO".to_string(),
+                },
+            ]));
 
-        app.handle_key(key_char('/'))?;
-        for ch in "zeta-branch".chars() {
-            app.handle_key(key_char(ch))?;
+        app.handle_key(key_ctrl_char('n'))?;
+        match &app.active_dialog {
+            ActiveDialog::TaskPalette(state) => assert_eq!(state.selected_index, 1),
+            other => panic!("expected task palette, got {other:?}"),
         }
-        app.handle_key(key_enter())?;
-        assert_eq!(
-            app.selected_task().map(|task| task.title),
-            Some("No Title Match".to_string())
-        );
 
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))?;
-        app.handle_key(key_char('/'))?;
-        for ch in "repo-search-target".chars() {
-            app.handle_key(key_char(ch))?;
+        app.handle_key(key_ctrl_char('p'))?;
+        match &app.active_dialog {
+            ActiveDialog::TaskPalette(state) => assert_eq!(state.selected_index, 0),
+            other => panic!("expected task palette, got {other:?}"),
         }
-        app.handle_key(key_enter())?;
-        assert_eq!(
-            app.selected_task().map(|task| task.title),
-            Some("No Title Match".to_string())
-        );
 
+        app.handle_key(key_ctrl_char('p'))?;
+        match &app.active_dialog {
+            ActiveDialog::TaskPalette(state) => assert_eq!(state.selected_index, 1),
+            other => panic!("expected task palette, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn task_palette_enter_focuses_task_in_current_project() -> Result<()> {
+        let (mut app, _repo_dir, task_id, category_ids) = test_app_with_middle_task()?;
+        let repo_name = app
+            .repos
+            .first()
+            .map(|repo| repo.name.clone())
+            .context("expected repo")?;
+        let category_name = app
+            .categories
+            .iter()
+            .find(|category| category.id == category_ids[1])
+            .map(|category| category.name.clone())
+            .context("expected category")?;
+
+        let path = PathBuf::from(":memory:");
+        app.current_project_path = Some(path.clone());
+        app.project_list = vec![ProjectInfo {
+            name: "current".to_string(),
+            path: path.clone(),
+        }];
+        app.active_dialog =
+            ActiveDialog::TaskPalette(crate::task_palette::TaskPaletteState::new(vec![
+                crate::task_palette::TaskPaletteCandidate {
+                    project_name: "current".to_string(),
+                    project_path: path,
+                    task_id,
+                    title: "Task".to_string(),
+                    branch: "feature/category-edit-tests".to_string(),
+                    repo_name,
+                    category_name,
+                },
+            ]));
+
+        app.handle_key(key_enter())?;
+
+        assert!(matches!(app.active_dialog, ActiveDialog::None));
+        assert_eq!(app.selected_task().map(|task| task.id), Some(task_id));
+        Ok(())
+    }
+
+    #[test]
+    fn task_palette_enter_switches_project_and_focuses_task() -> Result<()> {
+        let (mut app, repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        let other_project_path = repo_dir.path().join("other-project.sqlite");
+        let other_db = Database::open(&other_project_path)?;
+        let other_repo = other_db.add_repo(repo_dir.path())?;
+        let other_categories = other_db.list_categories()?;
+        let other_task = other_db.add_task(
+            other_repo.id,
+            "feature/jump-target",
+            "Jump Target",
+            other_categories[1].id,
+        )?;
+
+        app.project_list = vec![ProjectInfo {
+            name: "other".to_string(),
+            path: other_project_path.clone(),
+        }];
+        app.current_project_path = Some(PathBuf::from(":memory:"));
+        app.active_dialog =
+            ActiveDialog::TaskPalette(crate::task_palette::TaskPaletteState::new(vec![
+                crate::task_palette::TaskPaletteCandidate {
+                    project_name: "other".to_string(),
+                    project_path: other_project_path.clone(),
+                    task_id: other_task.id,
+                    title: other_task.title.clone(),
+                    branch: other_task.branch.clone(),
+                    repo_name: other_repo.name.clone(),
+                    category_name: other_categories[1].name.clone(),
+                },
+            ]));
+
+        let runtime = tokio::runtime::Runtime::new().context("failed to create Tokio runtime")?;
+        let _guard = runtime.enter();
+        app.handle_key(key_enter())?;
+
+        assert_eq!(app.current_project_path, Some(other_project_path));
+        assert_eq!(app.selected_task().map(|task| task.id), Some(other_task.id));
+        Ok(())
+    }
+
+    #[test]
+    fn task_palette_candidates_skip_archived_project_paths() -> Result<()> {
+        let (mut app, repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        let active_project_path = repo_dir.path().join("active.sqlite");
+        let archived_project_path = repo_dir.path().join("archived.sqlite");
+
+        let active_db = Database::open(&active_project_path)?;
+        let active_repo = active_db.add_repo(repo_dir.path())?;
+        let active_category = active_db.list_categories()?[0].id;
+        active_db.add_task(
+            active_repo.id,
+            "feature/active",
+            "Active Task",
+            active_category,
+        )?;
+
+        let archived_db = Database::open(&archived_project_path)?;
+        let archived_repo = archived_db.add_repo(repo_dir.path())?;
+        let archived_category = archived_db.list_categories()?[0].id;
+        archived_db.add_task(
+            archived_repo.id,
+            "feature/archived",
+            "Archived Scope Task",
+            archived_category,
+        )?;
+
+        app.project_list = vec![
+            ProjectInfo {
+                name: "active".to_string(),
+                path: active_project_path.clone(),
+            },
+            ProjectInfo {
+                name: "archived".to_string(),
+                path: archived_project_path.clone(),
+            },
+        ];
+        app.settings.archived_project_paths =
+            vec![archived_project_path.to_string_lossy().to_string()];
+
+        let candidates = app.task_palette_candidates();
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.project_path != archived_project_path)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.project_path == active_project_path)
+        );
         Ok(())
     }
 
