@@ -371,6 +371,180 @@ jobs:
           else
             gh release create "$TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
           fi
+
+  package-npm-tarballs:
+    name: Package npm tarballs
+    needs:
+      - host
+    if: ${{ needs.host.result == 'success' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: "ubuntu-22.04"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Download release workflow artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: artifacts-build-local-*
+          path: dist/release-artifacts
+      - name: Stage vendor payloads from dist artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          declare -A archives
+          archives["x86_64-unknown-linux-gnu"]="dist/release-artifacts/artifacts-build-local-x86_64-unknown-linux-gnu/opencode-kanban-x86_64-unknown-linux-gnu.tar.xz"
+          archives["aarch64-unknown-linux-gnu"]="dist/release-artifacts/artifacts-build-local-aarch64-unknown-linux-gnu/opencode-kanban-aarch64-unknown-linux-gnu.tar.xz"
+          archives["x86_64-apple-darwin"]="dist/release-artifacts/artifacts-build-local-x86_64-apple-darwin/opencode-kanban-x86_64-apple-darwin.tar.xz"
+          archives["aarch64-apple-darwin"]="dist/release-artifacts/artifacts-build-local-aarch64-apple-darwin/opencode-kanban-aarch64-apple-darwin.tar.xz"
+
+          for target in "${!archives[@]}"; do
+            archive="${archives[$target]}"
+            if [[ ! -f "${archive}" ]]; then
+              echo "Missing dist artifact for ${target}: ${archive}"
+              exit 1
+            fi
+
+            unpack_dir="$(mktemp -d)"
+            tar -xJf "${archive}" -C "${unpack_dir}"
+
+            archive_base="$(basename "${archive}" .tar.xz)"
+            source_path="${unpack_dir}/${archive_base}/opencode-kanban"
+            if [[ ! -f "${source_path}" ]]; then
+              echo "Binary not found in archive for ${target}: ${source_path}"
+              exit 1
+            fi
+
+            destination_dir="vendor/${target}/opencode-kanban"
+            mkdir -p "${destination_dir}"
+            cp "${source_path}" "${destination_dir}/opencode-kanban"
+            chmod +x "${destination_dir}/opencode-kanban"
+            rm -rf "${unpack_dir}"
+          done
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Build npm packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$ ]]; then
+            echo "Unsupported release tag: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          python3 npm/scripts/build_npm_package.py \
+            --version "${version}" \
+            --vendor-src vendor \
+            --out-dir dist/npm
+      - name: Upload npm tarballs
+        uses: actions/upload-artifact@v6
+        with:
+          name: npm-tarballs
+          path: dist/npm/*.tgz
+          if-no-files-found: error
+
+  publish-npm:
+    name: Publish to npm
+    needs:
+      - package-npm-tarballs
+    if: ${{ needs.package-npm-tarballs.result == 'success' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: "ubuntu-22.04"
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          scope: "@qrafty-ai"
+      - name: Update npm
+        run: npm install -g npm@latest
+      - name: Download npm tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: npm-tarballs
+          path: dist/npm
+      - name: Resolve npm dist-tag
+        id: npm_tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "${version}" =~ -alpha\.[0-9]+$ ]]; then
+            echo "npm_tag=alpha" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm_tag=" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish tarballs
+        env:
+          VERSION: ${{ github.ref_name }}
+          NPM_TAG: ${{ steps.npm_tag.outputs.npm_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${VERSION#v}"
+
+          prefix=""
+          if [[ -n "${NPM_TAG}" ]]; then
+            prefix="${NPM_TAG}-"
+          fi
+
+          shopt -s nullglob
+          tarballs=(dist/npm/*.tgz)
+          if [[ ${#tarballs[@]} -eq 0 ]]; then
+            echo "No npm tarballs found"
+            exit 1
+          fi
+
+          for tarball in "${tarballs[@]}"; do
+            filename="$(basename "${tarball}")"
+            publish_tag=""
+
+            case "${filename}" in
+              qrafty-ai-opencode-kanban-npm-"${VERSION}".tgz)
+                publish_tag="${NPM_TAG}"
+                ;;
+              qrafty-ai-opencode-kanban-npm-*-"${VERSION}".tgz)
+                platform="${filename#qrafty-ai-opencode-kanban-npm-}"
+                platform="${platform%-${VERSION}.tgz}"
+                publish_tag="${prefix}${platform}"
+                ;;
+              *)
+                echo "Unexpected tarball name: ${filename}"
+                exit 1
+                ;;
+            esac
+
+            publish_cmd=(npm publish "${tarball}" --access public --provenance)
+            if [[ -n "${publish_tag}" ]]; then
+              publish_cmd+=(--tag "${publish_tag}")
+            fi
+
+            echo "+ ${publish_cmd[*]}"
+            set +e
+            publish_output="$("${publish_cmd[@]}" 2>&1)"
+            publish_status=$?
+            set -e
+
+            echo "${publish_output}"
+            if [[ ${publish_status} -eq 0 ]]; then
+              continue
+            fi
+
+            if grep -qiE "previously published|cannot publish over|version already exists" <<< "${publish_output}"; then
+              echo "Skipping already-published package version for ${filename}"
+              continue
+            fi
+
+            exit "${publish_status}"
+          done
+
   announce:
     needs:
       - plan

@@ -4,7 +4,7 @@ This document covers npm and AUR release automation for `opencode-kanban`.
 
 ## npm release process
 
-Publishing is handled by `.github/workflows/publish-npm.yaml` and uses npm trusted publishing via GitHub OIDC.
+Publishing is handled by `.github/workflows/release.yml` and uses npm trusted publishing via GitHub OIDC.
 
 1. Create and push a release tag:
 
@@ -15,7 +15,7 @@ Publishing is handled by `.github/workflows/publish-npm.yaml` and uses npm trust
 
 2. For prereleases, use tags like `vX.Y.Z-alpha.N`.
 
-The npm workflow runs after the `Release` workflow succeeds on a version tag, reuses the release workflow's dist artifacts, packages npm tarballs, and publishes:
+The release workflow reuses dist build artifacts, packages npm tarballs, and publishes:
 
 - `opencode-kanban` (main package)
 - platform-tagged variants for Linux x64, Linux arm64, macOS x64, and macOS arm64
@@ -69,6 +69,6 @@ Only stable `vX.Y.Z` tags are supported (no alpha/pre-release variants).
 In npm package settings, configure a Trusted Publisher for this repository and workflow file:
 
 - Repository: this GitHub repository
-- Workflow: `.github/workflows/publish-npm.yaml`
+- Workflow: `.github/workflows/release.yml`
 
 No `NPM_TOKEN` secret is required when trusted publishing is configured.
