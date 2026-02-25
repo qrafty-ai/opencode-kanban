@@ -1,107 +1,94 @@
 name: Publish npm
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
 
 permissions:
   contents: read
 
 concurrency:
-  group: publish-npm-${{ github.ref }}
+  group: publish-npm-${{ github.event.workflow_run.head_branch || github.run_id }}
   cancel-in-progress: true
 
 jobs:
-  build-binaries:
-    name: Build ${{ matrix.platform_tag }}
-    runs-on: ${{ matrix.runs_on }}
-    concurrency:
-      group: publish-npm-build-${{ github.ref }}-${{ matrix.platform_tag }}
-      cancel-in-progress: true
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runs_on: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            platform_tag: linux-x64
-          - runs_on: macos-14
-            target: aarch64-apple-darwin
-            platform_tag: darwin-arm64
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
-
-      - name: Build release binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$ ]]; then
-            export OPENCODE_KANBAN_VERSION="${GITHUB_REF_NAME#v}"
-          fi
-          cargo build --release --target "${{ matrix.target }}"
-
-      - name: Stage vendor payload
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_path="target/${{ matrix.target }}/release/opencode-kanban"
-          if [[ ! -f "${source_path}" ]]; then
-            echo "Binary not found: ${source_path}"
-            exit 1
-          fi
-
-          destination_dir="vendor/${{ matrix.target }}/opencode-kanban"
-          mkdir -p "${destination_dir}"
-          cp "${source_path}" "${destination_dir}/opencode-kanban"
-          chmod +x "${destination_dir}/opencode-kanban"
-
-      - name: Upload vendor payload
-        uses: actions/upload-artifact@v4
-        with:
-          name: vendor-${{ matrix.platform_tag }}
-          path: vendor
-          if-no-files-found: error
-
   package-tarballs:
     name: Package npm tarballs
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build-binaries
+    if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v') }}
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.workflow_run.head_branch }}"
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$ ]]; then
+            echo "Unsupported release tag: ${tag}"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release workflow artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "${{ steps.release.outputs.run_id }}" --pattern "artifacts-build-local-*" --dir dist/release-artifacts
+
+      - name: Stage vendor payloads from dist artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          declare -A archives
+          archives["x86_64-unknown-linux-gnu"]="dist/release-artifacts/artifacts-build-local-x86_64-unknown-linux-gnu/opencode-kanban-x86_64-unknown-linux-gnu.tar.xz"
+          archives["aarch64-unknown-linux-gnu"]="dist/release-artifacts/artifacts-build-local-aarch64-unknown-linux-gnu/opencode-kanban-aarch64-unknown-linux-gnu.tar.xz"
+          archives["x86_64-apple-darwin"]="dist/release-artifacts/artifacts-build-local-x86_64-apple-darwin/opencode-kanban-x86_64-apple-darwin.tar.xz"
+          archives["aarch64-apple-darwin"]="dist/release-artifacts/artifacts-build-local-aarch64-apple-darwin/opencode-kanban-aarch64-apple-darwin.tar.xz"
+
+          for target in "${!archives[@]}"; do
+            archive="${archives[$target]}"
+            if [[ ! -f "${archive}" ]]; then
+              echo "Missing dist artifact for ${target}: ${archive}"
+              exit 1
+            fi
+
+            unpack_dir="$(mktemp -d)"
+            tar -xJf "${archive}" -C "${unpack_dir}"
+
+            archive_base="$(basename "${archive}" .tar.xz)"
+            source_path="${unpack_dir}/${archive_base}/opencode-kanban"
+            if [[ ! -f "${source_path}" ]]; then
+              echo "Binary not found in archive for ${target}: ${source_path}"
+              exit 1
+            fi
+
+            destination_dir="vendor/${target}/opencode-kanban"
+            mkdir -p "${destination_dir}"
+            cp "${source_path}" "${destination_dir}/opencode-kanban"
+            chmod +x "${destination_dir}/opencode-kanban"
+            rm -rf "${unpack_dir}"
+          done
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 22
 
-      - name: Download vendor payloads
-        uses: actions/download-artifact@v7
-        with:
-          pattern: vendor-*
-          merge-multiple: true
-          path: vendor
-
       - name: Build npm packages
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$ ]]; then
-            echo "Unsupported tag version: ${GITHUB_REF_NAME}"
-            exit 1
-          fi
           python3 npm/scripts/build_npm_package.py \
-            --version "${version}" \
+            --version "${{ steps.release.outputs.version }}" \
             --vendor-src vendor \
             --out-dir dist/npm
 
@@ -114,7 +101,7 @@ jobs:
 
   publish:
     name: Publish to npm
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v') }}
     needs: package-tarballs
     runs-on: ubuntu-latest
     permissions:
@@ -142,7 +129,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${{ github.event.workflow_run.head_branch }}"
+          version="${version#v}"
           if [[ "${version}" =~ -alpha\.[0-9]+$ ]]; then
             echo "npm_tag=alpha" >> "$GITHUB_OUTPUT"
           else
@@ -151,7 +139,7 @@ jobs:
 
       - name: Publish tarballs
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.event.workflow_run.head_branch }}
           NPM_TAG: ${{ steps.npm_tag.outputs.npm_tag }}
         shell: bash
         run: |
@@ -179,7 +167,7 @@ jobs:
               qrafty-ai-opencode-kanban-npm-"${VERSION}".tgz)
                 publish_tag="${NPM_TAG}"
                 ;;
-              qrafty-ai-opencode-kanban-npm-linux-x64-"${VERSION}".tgz|qrafty-ai-opencode-kanban-npm-darwin-arm64-"${VERSION}".tgz)
+              qrafty-ai-opencode-kanban-npm-*-"${VERSION}".tgz)
                 platform="${filename#qrafty-ai-opencode-kanban-npm-}"
                 platform="${platform%-${VERSION}.tgz}"
                 publish_tag="${prefix}${platform}"
