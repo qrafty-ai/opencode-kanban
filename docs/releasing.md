@@ -15,12 +15,10 @@ Publishing is handled by `.github/workflows/publish-npm.yaml` and uses npm trust
 
 2. For prereleases, use tags like `vX.Y.Z-alpha.N`.
 
-The workflow derives the build version from the tag and injects it via `OPENCODE_KANBAN_VERSION` during `cargo build`.
-
-The workflow builds platform binaries, packages npm tarballs, and publishes:
+The npm workflow runs after the `Release` workflow succeeds on a version tag, reuses the release workflow's dist artifacts, packages npm tarballs, and publishes:
 
 - `opencode-kanban` (main package)
-- platform-tagged variants for Linux x64, macOS x64, and macOS arm64
+- platform-tagged variants for Linux x64, Linux arm64, macOS x64, and macOS arm64
 
 ## AUR release process
 
