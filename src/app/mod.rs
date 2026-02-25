@@ -323,7 +323,16 @@ impl App {
             return Ok(());
         };
 
-        let task_count = self.tasks_in_column(self.focused_column);
+        let task_count = match self.db.count_tasks_for_category(category.id) {
+            Ok(task_count) => task_count,
+            Err(err) => {
+                self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                    title: "Failed to open delete dialog".to_string(),
+                    detail: err.to_string(),
+                });
+                return Ok(());
+            }
+        };
         self.active_dialog = ActiveDialog::DeleteCategory(DeleteCategoryDialogState {
             category_id: category.id,
             category_name: category.name.clone(),
@@ -477,18 +486,35 @@ impl App {
             return Ok(());
         };
 
-        if state.task_count > 0 {
+        let task_count = match self.db.count_tasks_for_category(state.category_id) {
+            Ok(task_count) => task_count,
+            Err(err) => {
+                self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                    title: "Failed to delete category".to_string(),
+                    detail: err.to_string(),
+                });
+                return Ok(());
+            }
+        };
+        if task_count > 0 {
             self.active_dialog = ActiveDialog::Error(ErrorDialogState {
                 title: "Category not empty".to_string(),
                 detail: format!(
                     "Cannot delete '{}' because it still contains {} task(s).",
-                    state.category_name, state.task_count
+                    state.category_name, task_count
                 ),
             });
             return Ok(());
         }
 
-        self.db.delete_category(state.category_id)?;
+        if let Err(err) = self.db.delete_category(state.category_id) {
+            self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                title: "Failed to delete category".to_string(),
+                detail: err.to_string(),
+            });
+            return Ok(());
+        }
+
         self.active_dialog = ActiveDialog::None;
         self.refresh_data()?;
         Ok(())
@@ -1433,6 +1459,35 @@ mod tests {
 
         app.handle_key(key_ctrl_char('g'))?;
         assert!(!app.category_edit_mode);
+
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_category_with_only_archived_tasks_shows_error_dialog() -> Result<()> {
+        let (mut app, _repo_dir, task_id, [_todo_id, in_progress_id, _done_id]) =
+            test_app_with_middle_task()?;
+
+        app.db.archive_task(task_id)?;
+        app.refresh_data()?;
+        app.focused_column = app
+            .categories
+            .iter()
+            .position(|category| category.id == in_progress_id)
+            .context("expected in-progress category")?;
+
+        app.open_delete_category_dialog()?;
+        let ActiveDialog::DeleteCategory(state) = &app.active_dialog else {
+            panic!("expected delete category dialog");
+        };
+        assert_eq!(state.task_count, 1);
+
+        app.confirm_delete_category()?;
+        let ActiveDialog::Error(error_state) = &app.active_dialog else {
+            panic!("expected error dialog after blocked deletion");
+        };
+        assert_eq!(error_state.title, "Category not empty");
+        assert!(error_state.detail.contains("1 task(s)"));
 
         Ok(())
     }

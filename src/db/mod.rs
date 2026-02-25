@@ -697,6 +697,14 @@ impl Database {
     }
 
     pub async fn delete_category_async(&self, id: Uuid) -> Result<()> {
+        let task_count = self.count_tasks_for_category_async(id).await?;
+        if task_count > 0 {
+            anyhow::bail!(
+                "cannot delete category: {} task(s) still reference it",
+                task_count
+            );
+        }
+
         sqlx::query("DELETE FROM categories WHERE id = ?")
             .bind(id.to_string())
             .execute(&self.pool)
@@ -707,6 +715,20 @@ impl Database {
 
     pub fn delete_category(&self, id: Uuid) -> Result<()> {
         block_on_db(self.delete_category_async(id))
+    }
+
+    pub async fn count_tasks_for_category_async(&self, id: Uuid) -> Result<usize> {
+        let task_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE category_id = ?")
+                .bind(id.to_string())
+                .fetch_one(&self.pool)
+                .await
+                .context("failed to count tasks for category")?;
+        Ok(task_count as usize)
+    }
+
+    pub fn count_tasks_for_category(&self, id: Uuid) -> Result<usize> {
+        block_on_db(self.count_tasks_for_category_async(id))
     }
 
     pub async fn increment_command_usage_async(&self, command_id: &str) -> Result<()> {
