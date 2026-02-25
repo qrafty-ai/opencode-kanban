@@ -1747,6 +1747,7 @@ fn render_new_task_dialog(
         );
 
         match state.focused_field {
+            NewTaskField::Repo => set_text_input_cursor(frame, layout[1], &state.repo_input),
             NewTaskField::Branch => set_text_input_cursor(frame, layout[2], &state.branch_input),
             NewTaskField::Base => set_text_input_cursor(frame, layout[3], &state.base_input),
             NewTaskField::Title => set_text_input_cursor(frame, layout[4], &state.title_input),
@@ -3374,9 +3375,14 @@ fn render_repo_picker_dialog(
     }
 
     if picker.suggestions.is_empty() {
+        let empty_message = if picker.query.is_empty() {
+            "Start typing to see suggestions..."
+        } else {
+            "No matching folders or repositories"
+        };
         rows.add_col(TextSpan::from(""))
-            .add_col(TextSpan::from("No matching folders or repositories"))
             .add_col(TextSpan::from(""))
+            .add_col(TextSpan::from(empty_message.to_string()))
             .add_row();
     }
 

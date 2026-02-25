@@ -276,6 +276,9 @@ fn handle_new_task_dialog_key(
             state.use_existing_directory = !state.use_existing_directory;
         }
         KeyCode::Backspace => match state.focused_field {
+            NewTaskField::Repo => {
+                state.repo_input.pop();
+            }
             NewTaskField::ExistingDirectory => {
                 state.existing_dir_input.pop();
             }
@@ -303,6 +306,7 @@ fn handle_new_task_dialog_key(
             }
         }
         KeyCode::Char(ch) => match state.focused_field {
+            NewTaskField::Repo => state.repo_input.push(ch),
             NewTaskField::ExistingDirectory => state.existing_dir_input.push(ch),
             NewTaskField::Branch => state.branch_input.push(ch),
             NewTaskField::Base => state.base_input.push(ch),
