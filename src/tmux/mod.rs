@@ -183,29 +183,6 @@ pub fn tmux_list_sessions() -> Vec<TmuxSession> {
     sessions
 }
 
-pub fn tmux_capture_pane(session_name: &str, lines: usize) -> Result<String> {
-    let start = format!("-{lines}");
-    let output = tmux_command()
-        .args(capture_pane_window_args(session_name, &start))
-        .output()
-        .context("failed to run tmux capture-pane")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("can't find window: 0") {
-            let retry = tmux_command()
-                .args(capture_pane_session_args(session_name, &start))
-                .output()
-                .context("failed to rerun tmux capture-pane")?;
-            ensure_success(&retry, "capture-pane")?;
-            return Ok(String::from_utf8_lossy(&retry.stdout).to_string());
-        }
-    }
-
-    ensure_success(&output, "capture-pane")
-        .map(|_| String::from_utf8_lossy(&output.stdout).to_string())
-}
-
 pub fn tmux_get_pane_pid(session_name: &str) -> Option<u32> {
     let output = tmux_command()
         .args(list_panes_args(session_name))
@@ -389,28 +366,6 @@ fn list_sessions_args() -> Vec<String> {
         "list-sessions".to_string(),
         "-F".to_string(),
         "#{session_name}\t#{session_created}\t#{session_attached}".to_string(),
-    ]
-}
-
-fn capture_pane_window_args(session_name: &str, start: &str) -> Vec<String> {
-    vec![
-        "capture-pane".to_string(),
-        "-t".to_string(),
-        format!("{session_name}:0.0"),
-        "-p".to_string(),
-        "-S".to_string(),
-        start.to_string(),
-    ]
-}
-
-fn capture_pane_session_args(session_name: &str, start: &str) -> Vec<String> {
-    vec![
-        "capture-pane".to_string(),
-        "-t".to_string(),
-        session_name.to_string(),
-        "-p".to_string(),
-        "-S".to_string(),
-        start.to_string(),
     ]
 }
 
@@ -692,22 +647,6 @@ mod tests {
     }
 
     #[test]
-    fn test_capture_pane_window_args_builder() {
-        assert_eq!(
-            capture_pane_window_args("ok-test", "-50"),
-            vec!["capture-pane", "-t", "ok-test:0.0", "-p", "-S", "-50"]
-        );
-    }
-
-    #[test]
-    fn test_capture_pane_session_args_builder() {
-        assert_eq!(
-            capture_pane_session_args("ok-test", "-50"),
-            vec!["capture-pane", "-t", "ok-test", "-p", "-S", "-50"]
-        );
-    }
-
-    #[test]
     fn test_list_panes_args_builder() {
         assert_eq!(
             list_panes_args("ok-test"),
@@ -742,31 +681,6 @@ mod tests {
             let _ = tmux_kill_session(&session_name);
         }
         assert!(!tmux_session_exists(&session_name));
-    }
-
-    #[test]
-    fn test_tmux_capture_pane() {
-        if !tmux_available() {
-            return;
-        }
-        let session_name = unique_session_name("capture");
-        let _cleanup = SessionCleanup::new(session_name.clone());
-
-        tmux_create_session(
-            &session_name,
-            Path::new("."),
-            Some("printf 'line-one\\nline-two\\n'; sleep 2"),
-        )
-        .expect("create session should succeed");
-
-        assert!(wait_for_session(&session_name, Duration::from_secs(2)));
-        let captured = tmux_capture_pane(&session_name, 20).expect("capture should succeed");
-        assert!(captured.contains("line-one"));
-        assert!(captured.contains("line-two"));
-
-        if tmux_session_exists(&session_name) {
-            let _ = tmux_kill_session(&session_name);
-        }
     }
 
     fn tmux_available() -> bool {
