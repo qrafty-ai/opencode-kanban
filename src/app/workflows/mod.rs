@@ -3,7 +3,7 @@ mod create_task;
 mod errors;
 mod recovery;
 
-pub(crate) use attach::attach_task_with_runtime;
+pub(crate) use attach::{attach_task_with_runtime, open_task_in_new_terminal_with_runtime};
 #[cfg(test)]
 pub(crate) use attach::{build_attach_popup_lines, popup_style_from_theme, tmux_hex_color};
 pub(crate) use create_task::{

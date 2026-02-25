@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use tracing::warn;
@@ -22,35 +22,97 @@ pub(crate) fn attach_task_with_runtime(
     theme: &Theme,
     runtime: &impl RecoveryRuntime,
 ) -> Result<AttachTaskResult> {
+    let ensured = match ensure_task_session_with_runtime(db, project_slug, task, repo, runtime)? {
+        EnsureTaskSessionOutcome::Ready(ensured) => ensured,
+        EnsureTaskSessionOutcome::Early(result) => return Ok(result),
+    };
+    let session_name = ensured.session_name;
+
+    let popup_style = popup_style_from_theme(theme);
+    let popup_lines = build_attach_popup_lines(task, repo, &session_name, task_todos);
+    runtime.switch_client(&session_name, &popup_lines, &popup_style)?;
+    maybe_show_attach_popup(
+        db,
+        task.id,
+        &session_name,
+        task.attach_overlay_shown,
+        &popup_lines,
+        &popup_style,
+        runtime,
+    );
+    Ok(AttachTaskResult::Attached)
+}
+
+pub(crate) fn open_task_in_new_terminal_with_runtime(
+    db: &Database,
+    project_slug: Option<&str>,
+    task: &Task,
+    repo: &Repo,
+    terminal_executable: Option<&str>,
+    terminal_launch_args: &[String],
+    runtime: &impl RecoveryRuntime,
+) -> Result<AttachTaskResult> {
+    let ensured = match ensure_task_session_with_runtime(db, project_slug, task, repo, runtime)? {
+        EnsureTaskSessionOutcome::Ready(ensured) => ensured,
+        EnsureTaskSessionOutcome::Early(result) => return Ok(result),
+    };
+    runtime.open_in_new_terminal(
+        &ensured.session_name,
+        &ensured.working_dir,
+        terminal_executable,
+        terminal_launch_args,
+    )?;
+    Ok(AttachTaskResult::Attached)
+}
+
+struct EnsureTaskSessionResult {
+    session_name: String,
+    working_dir: PathBuf,
+}
+
+enum EnsureTaskSessionOutcome {
+    Ready(EnsureTaskSessionResult),
+    Early(AttachTaskResult),
+}
+
+fn ensure_task_session_with_runtime(
+    db: &Database,
+    project_slug: Option<&str>,
+    task: &Task,
+    repo: &Repo,
+    runtime: &impl RecoveryRuntime,
+) -> Result<EnsureTaskSessionOutcome> {
     if !runtime.repo_exists(Path::new(&repo.path)) {
         db.update_task_status(task.id, Status::Idle.as_str())?;
-        return Ok(AttachTaskResult::RepoUnavailable);
+        return Ok(EnsureTaskSessionOutcome::Early(
+            AttachTaskResult::RepoUnavailable,
+        ));
     }
 
     if let Some(session_name) = task.tmux_session_name.as_deref()
         && runtime.session_exists(session_name)
     {
-        let popup_style = popup_style_from_theme(theme);
-        let popup_lines = build_attach_popup_lines(task, repo, session_name, task_todos);
-        runtime.switch_client(session_name, &popup_lines, &popup_style)?;
-        maybe_show_attach_popup(
-            db,
-            task.id,
-            session_name,
-            task.attach_overlay_shown,
-            &popup_lines,
-            &popup_style,
-            runtime,
-        );
-        return Ok(AttachTaskResult::Attached);
+        let working_dir = task
+            .worktree_path
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&repo.path));
+        return Ok(EnsureTaskSessionOutcome::Ready(EnsureTaskSessionResult {
+            session_name: session_name.to_string(),
+            working_dir,
+        }));
     }
 
     let Some(worktree_path_str) = task.worktree_path.as_deref() else {
-        return Ok(AttachTaskResult::WorktreeNotFound);
+        return Ok(EnsureTaskSessionOutcome::Early(
+            AttachTaskResult::WorktreeNotFound,
+        ));
     };
     let worktree_path = Path::new(worktree_path_str);
     if !runtime.worktree_exists(worktree_path) {
-        return Ok(AttachTaskResult::WorktreeNotFound);
+        return Ok(EnsureTaskSessionOutcome::Early(
+            AttachTaskResult::WorktreeNotFound,
+        ));
     }
 
     let session_name = next_available_session_name(
@@ -74,19 +136,10 @@ pub(crate) fn attach_task_with_runtime(
     )?;
     db.update_task_status(task.id, Status::Idle.as_str())?;
 
-    let popup_style = popup_style_from_theme(theme);
-    let popup_lines = build_attach_popup_lines(task, repo, &session_name, task_todos);
-    runtime.switch_client(&session_name, &popup_lines, &popup_style)?;
-    maybe_show_attach_popup(
-        db,
-        task.id,
-        &session_name,
-        task.attach_overlay_shown,
-        &popup_lines,
-        &popup_style,
-        runtime,
-    );
-    Ok(AttachTaskResult::Attached)
+    Ok(EnsureTaskSessionOutcome::Ready(EnsureTaskSessionResult {
+        session_name,
+        working_dir: worktree_path.to_path_buf(),
+    }))
 }
 
 fn maybe_show_attach_popup(

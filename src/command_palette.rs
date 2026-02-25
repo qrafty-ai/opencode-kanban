@@ -200,6 +200,12 @@ pub fn all_commands() -> Vec<CommandDef> {
             message: Some(Message::AttachSelectedTask),
         },
         CommandDef {
+            id: "open_in_new_terminal",
+            display_name: "Open Selected Task in New Terminal",
+            keybinding: "o",
+            message: Some(Message::OpenSelectedTaskInNewTerminal),
+        },
+        CommandDef {
             id: "cycle_todo_visualization",
             display_name: "Cycle Todo Visualization",
             keybinding: "t",
@@ -345,8 +351,8 @@ mod tests {
         let commands = all_commands();
         assert_eq!(
             commands.len(),
-            24,
-            "Expected 24 commands, found {}",
+            25,
+            "Expected 25 commands, found {}",
             commands.len()
         );
     }

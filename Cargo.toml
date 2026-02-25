@@ -32,6 +32,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 reqwest = { version = "0.13", features = ["blocking", "json"] }
+termlauncher = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
 urlencoding = "2"
 

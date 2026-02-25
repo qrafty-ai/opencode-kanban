@@ -10,7 +10,7 @@ use crate::git::{
 };
 use crate::tmux::{
     PopupThemeStyle, sanitize_session_name_for_project, tmux_create_session, tmux_kill_session,
-    tmux_session_exists, tmux_show_popup, tmux_switch_client,
+    tmux_open_session_in_new_terminal, tmux_session_exists, tmux_show_popup, tmux_switch_client,
 };
 
 /// Runtime trait for task recovery operations
@@ -26,6 +26,13 @@ pub trait RecoveryRuntime {
         style: &PopupThemeStyle,
     ) -> Result<()>;
     fn show_attach_popup(&self, lines: &[String], style: &PopupThemeStyle) -> Result<()>;
+    fn open_in_new_terminal(
+        &self,
+        session_name: &str,
+        working_dir: &Path,
+        terminal_executable: Option<&str>,
+        terminal_launch_args: &[String],
+    ) -> Result<()>;
 }
 
 /// Real implementation of RecoveryRuntime using actual git/tmux commands
@@ -59,6 +66,21 @@ impl RecoveryRuntime for RealRecoveryRuntime {
 
     fn show_attach_popup(&self, lines: &[String], style: &PopupThemeStyle) -> Result<()> {
         tmux_show_popup(lines, style)
+    }
+
+    fn open_in_new_terminal(
+        &self,
+        session_name: &str,
+        working_dir: &Path,
+        terminal_executable: Option<&str>,
+        terminal_launch_args: &[String],
+    ) -> Result<()> {
+        tmux_open_session_in_new_terminal(
+            session_name,
+            working_dir,
+            terminal_executable,
+            terminal_launch_args,
+        )
     }
 }
 
@@ -383,6 +405,16 @@ mod tests {
         }
 
         fn show_attach_popup(&self, _lines: &[String], _style: &PopupThemeStyle) -> Result<()> {
+            Ok(())
+        }
+
+        fn open_in_new_terminal(
+            &self,
+            _session_name: &str,
+            _working_dir: &Path,
+            _terminal_executable: Option<&str>,
+            _terminal_launch_args: &[String],
+        ) -> Result<()> {
             Ok(())
         }
     }
