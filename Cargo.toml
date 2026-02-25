@@ -7,6 +7,12 @@ description = "Terminal kanban board for managing OpenCode tmux sessions"
 license = "MIT"
 repository = "https://github.com/example/opencode-kanban"
 
+[package.metadata.wix]
+upgrade-guid = "6F2426D8-489F-4113-8E68-66096E47726E"
+path-guid = "9AFE4EED-0C4C-4B0C-B038-9C5D7F843B14"
+license = false
+eula = false
+
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -31,3 +37,8 @@ urlencoding = "2"
 
 [dev-dependencies]
 tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
