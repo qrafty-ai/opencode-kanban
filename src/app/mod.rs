@@ -69,7 +69,8 @@ use self::runtime::{RealCreateTaskRuntime, RealRecoveryRuntime, RecoveryRuntime}
 use self::state::AttachTaskResult;
 use self::workflows::{
     attach_task_with_runtime, create_task_error_dialog_state, create_task_pipeline_with_runtime,
-    rank_repos_for_query, reconcile_startup_tasks, repo_selection_usage_map,
+    open_task_in_new_terminal_with_runtime, rank_repos_for_query, reconcile_startup_tasks,
+    repo_selection_usage_map,
 };
 
 const GG_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -655,6 +656,59 @@ impl App {
         Ok(())
     }
 
+    fn open_selected_task_in_new_terminal(&mut self) -> Result<()> {
+        if self.current_view == View::Archive {
+            return Ok(());
+        }
+
+        let Some(task) = self.selected_task() else {
+            return Ok(());
+        };
+        let Some(repo) = self.repo_for_task(&task) else {
+            return Ok(());
+        };
+
+        let project_slug = self.current_project_slug_for_tmux();
+        let result = open_task_in_new_terminal_with_runtime(
+            &self.db,
+            project_slug.as_deref(),
+            &task,
+            &repo,
+            self.settings.terminal_executable.as_deref(),
+            &self.settings.terminal_launch_args,
+            &RealRecoveryRuntime,
+        );
+
+        match result {
+            Ok(AttachTaskResult::Attached) => {
+                self.active_dialog = ActiveDialog::None;
+                self.refresh_data()?;
+            }
+            Ok(AttachTaskResult::WorktreeNotFound) => {
+                self.active_dialog = ActiveDialog::WorktreeNotFound(WorktreeNotFoundDialogState {
+                    task_id: task.id,
+                    task_title: task.title,
+                    focused_field: WorktreeNotFoundField::Recreate,
+                });
+            }
+            Ok(AttachTaskResult::RepoUnavailable) => {
+                self.active_dialog = ActiveDialog::RepoUnavailable(RepoUnavailableDialogState {
+                    task_title: task.title,
+                    repo_path: repo.path,
+                });
+                self.refresh_data()?;
+            }
+            Err(err) => {
+                self.active_dialog = ActiveDialog::Error(ErrorDialogState {
+                    title: "Failed to open task in new terminal".to_string(),
+                    detail: err.to_string(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     fn recreate_from_repo_root(&mut self) -> Result<()> {
         let task_id = match &self.active_dialog {
             ActiveDialog::WorktreeNotFound(state) => state.task_id,
@@ -871,6 +925,7 @@ mod tests {
         session_exists: bool,
         create_session_calls: Cell<usize>,
         switch_client_calls: Cell<usize>,
+        open_in_new_terminal_calls: Cell<usize>,
         show_attach_popup_calls: Cell<usize>,
         switched_session_names: RefCell<Vec<String>>,
     }
@@ -883,6 +938,7 @@ mod tests {
                 session_exists,
                 create_session_calls: Cell::new(0),
                 switch_client_calls: Cell::new(0),
+                open_in_new_terminal_calls: Cell::new(0),
                 show_attach_popup_calls: Cell::new(0),
                 switched_session_names: RefCell::new(Vec::new()),
             }
@@ -930,6 +986,18 @@ mod tests {
         fn show_attach_popup(&self, _lines: &[String], _style: &PopupThemeStyle) -> Result<()> {
             self.show_attach_popup_calls
                 .set(self.show_attach_popup_calls.get() + 1);
+            Ok(())
+        }
+
+        fn open_in_new_terminal(
+            &self,
+            _session_name: &str,
+            _working_dir: &Path,
+            _terminal_executable: Option<&str>,
+            _terminal_launch_args: &[String],
+        ) -> Result<()> {
+            self.open_in_new_terminal_calls
+                .set(self.open_in_new_terminal_calls.get() + 1);
             Ok(())
         }
     }
@@ -2416,6 +2484,38 @@ mod tests {
         assert_eq!(result, AttachTaskResult::Attached);
         assert_eq!(runtime.create_session_calls.get(), 1);
         assert_eq!(runtime.switch_client_calls.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn open_task_in_new_terminal_with_runtime_creates_session_and_launches_terminal() -> Result<()>
+    {
+        let (app, _repo_dir, task_id, _category_ids) = test_app_with_middle_task()?;
+        let repo = app.repos[0].clone();
+        let worktree = TempDir::new()?;
+
+        app.db.update_task_tmux(
+            task_id,
+            Some("ok-session".to_string()),
+            Some(worktree.path().display().to_string()),
+        )?;
+        let task = app.db.get_task(task_id)?;
+
+        let runtime = RecordingRecoveryRuntime::with_session_exists(false);
+        let result = open_task_in_new_terminal_with_runtime(
+            &app.db,
+            None,
+            &task,
+            &repo,
+            Some("wezterm"),
+            &[],
+            &runtime,
+        )?;
+
+        assert_eq!(result, AttachTaskResult::Attached);
+        assert_eq!(runtime.create_session_calls.get(), 1);
+        assert_eq!(runtime.open_in_new_terminal_calls.get(), 1);
+        assert_eq!(runtime.switch_client_calls.get(), 0);
         Ok(())
     }
 

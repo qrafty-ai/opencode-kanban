@@ -365,6 +365,9 @@ impl App {
                 KeyAction::AttachTask => {
                     self.update(Message::AttachSelectedTask)?;
                 }
+                KeyAction::OpenInNewTerminal => {
+                    self.update(Message::OpenSelectedTaskInNewTerminal)?;
+                }
                 KeyAction::CycleTodoVisualization => {
                     self.update(Message::CycleTodoVisualization)?;
                 }

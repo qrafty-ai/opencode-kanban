@@ -61,6 +61,7 @@ impl App {
                 *selected = (*selected + 1).min(max_index);
             }
             Message::AttachSelectedTask => self.attach_selected_task()?,
+            Message::OpenSelectedTaskInNewTerminal => self.open_selected_task_in_new_terminal()?,
             Message::OpenNewTaskDialog => {
                 let usage = repo_selection_usage_map(&self.db);
                 let ranked_repo_indexes = rank_repos_for_query("", &self.repos, &usage);

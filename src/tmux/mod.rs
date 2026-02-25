@@ -4,7 +4,8 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use termlauncher::{Application, CustomTerminal, Error as TermlauncherError, Terminal};
 
 const TMUX_SOCKET: &str = "";
 
@@ -94,6 +95,38 @@ pub fn tmux_switch_client(
         .output()
         .context("failed to run tmux switch-client")?;
     ensure_success_with_output(&output, "switch-client")
+}
+
+pub fn tmux_open_session_in_new_terminal(
+    session_name: &str,
+    working_dir: &Path,
+    terminal_executable: Option<&str>,
+    terminal_launch_args: &[String],
+) -> Result<()> {
+    let mut app = Application::new("tmux").with_working_dir(working_dir);
+    for arg in tmux_attach_args(session_name) {
+        app = app.with_arg(&arg);
+    }
+
+    let launch_result = if let Some(executable) = normalize_terminal_executable(terminal_executable)
+    {
+        let custom_terminal = Terminal::Custom(CustomTerminal {
+            executable,
+            arguments: normalize_terminal_launch_args(terminal_launch_args),
+            ..CustomTerminal::default()
+        });
+        app.launch_with(&custom_terminal)
+    } else {
+        app.launch()
+    };
+
+    match launch_result {
+        Ok(_) => Ok(()),
+        Err(err) => Err(anyhow!(terminal_launch_error_message(
+            &err,
+            terminal_executable
+        ))),
+    }
 }
 
 pub fn tmux_show_popup(lines: &[String], style: &PopupThemeStyle) -> Result<()> {
@@ -289,6 +322,64 @@ fn switch_client_args(session_name: &str) -> Vec<String> {
         "-t".to_string(),
         session_name.to_string(),
     ]
+}
+
+fn tmux_attach_args(session_name: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let socket = tmux_socket();
+    if !socket.is_empty() {
+        args.push("-L".to_string());
+        args.push(socket);
+    }
+
+    args.push("attach".to_string());
+    args.push("-t".to_string());
+    args.push(session_name.to_string());
+    args
+}
+
+fn normalize_terminal_executable(terminal_executable: Option<&str>) -> Option<String> {
+    terminal_executable
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn normalize_terminal_launch_args(terminal_launch_args: &[String]) -> Vec<String> {
+    terminal_launch_args
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn terminal_launch_error_message(
+    error: &TermlauncherError,
+    terminal_executable: Option<&str>,
+) -> String {
+    match error {
+        TermlauncherError::NoSupportedTerminalAvailable => {
+            "Failed to open task in a new terminal: no supported terminal was detected. Install a supported terminal or set settings.terminal_executable.".to_string()
+        }
+        TermlauncherError::TerminalNotFound(name) => {
+            if let Some(configured) = normalize_terminal_executable(terminal_executable) {
+                format!(
+                    "Failed to open task in a new terminal: configured terminal executable '{}' was not found on PATH (resolved as '{}').",
+                    configured, name
+                )
+            } else {
+                format!(
+                    "Failed to open task in a new terminal: terminal executable '{}' was not found on PATH.",
+                    name
+                )
+            }
+        }
+        TermlauncherError::IOError(io_error) => format!(
+            "Failed to open task in a new terminal: unable to launch terminal process ({io_error})."
+        ),
+    }
 }
 
 fn return_binding_args() -> Vec<String> {
@@ -540,6 +631,21 @@ mod tests {
             switch_client_args("ok-target"),
             vec!["switch-client", "-t", "ok-target"]
         );
+    }
+
+    #[test]
+    fn test_tmux_attach_args_builder() {
+        let args = tmux_attach_args("ok-target");
+        assert!(args.ends_with(&[
+            "attach".to_string(),
+            "-t".to_string(),
+            "ok-target".to_string()
+        ]));
+        let socket = tmux_socket();
+        if !socket.is_empty() {
+            assert_eq!(args[0], "-L");
+            assert_eq!(args[1], socket);
+        }
     }
 
     #[test]

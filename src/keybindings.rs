@@ -53,6 +53,7 @@ pub enum KeyAction {
     MoveTaskDown,
     MoveTaskUp,
     AttachTask,
+    OpenInNewTerminal,
     CycleTodoVisualization,
     Dismiss,
     ToggleCategoryEditMode,
@@ -393,6 +394,12 @@ const BOARD_DEFS: &[ActionDef] = &[
         defaults: &["Enter"],
     },
     ActionDef {
+        id: "open_in_new_terminal",
+        action: KeyAction::OpenInNewTerminal,
+        description: "open selected task in new terminal",
+        defaults: &["o"],
+    },
+    ActionDef {
         id: "cycle_todo_visualization",
         action: KeyAction::CycleTodoVisualization,
         description: "cycle todo visualization",
@@ -444,6 +451,9 @@ impl Keybindings {
             "open_archive_view" => self.display_for(KeyContext::Global, KeyAction::OpenArchiveView),
             "archive_task" => self.display_for(KeyContext::Board, KeyAction::ArchiveTask),
             "attach_task" => self.display_for(KeyContext::Board, KeyAction::AttachTask),
+            "open_in_new_terminal" => {
+                self.display_for(KeyContext::Board, KeyAction::OpenInNewTerminal)
+            }
             "add_category" => self.display_for(KeyContext::Board, KeyAction::AddCategory),
             "rename_category" => self.display_for(KeyContext::Board, KeyAction::RenameCategory),
             "delete_category" => self.display_for(KeyContext::Board, KeyAction::DeleteCategory),
@@ -590,6 +600,11 @@ impl Keybindings {
             format!(
                 "  {}: attach selected task",
                 self.display_for(KeyContext::Board, KeyAction::AttachTask)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {}: open selected task in new terminal",
+                self.display_for(KeyContext::Board, KeyAction::OpenInNewTerminal)
                     .unwrap_or_else(|| "-".to_string())
             ),
             format!(
@@ -1029,5 +1044,15 @@ mod tests {
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()),
         );
         assert_eq!(action, Some(KeyAction::EditTask));
+    }
+
+    #[test]
+    fn defaults_include_open_in_new_terminal() {
+        let keys = Keybindings::load();
+        let action = keys.action_for_key(
+            KeyContext::Board,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()),
+        );
+        assert_eq!(action, Some(KeyAction::OpenInNewTerminal));
     }
 }
