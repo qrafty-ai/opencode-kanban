@@ -60,6 +60,28 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Sync Cargo.toml version from tag
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Unsupported tag version: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["GITHUB_REF_NAME"][1:]
+          cargo_toml = Path("Cargo.toml")
+          text = cargo_toml.read_text()
+          updated = re.sub(r'^version = ".*"$', f'version = "{version}"', text, count=1, flags=re.MULTILINE)
+          cargo_toml.write_text(updated)
+          print(f"Set Cargo.toml package version to {version}")
+          PY
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -120,6 +142,28 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Sync Cargo.toml version from tag
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Unsupported tag version: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["GITHUB_REF_NAME"][1:]
+          cargo_toml = Path("Cargo.toml")
+          text = cargo_toml.read_text()
+          updated = re.sub(r'^version = ".*"$', f'version = "{version}"', text, count=1, flags=re.MULTILINE)
+          cargo_toml.write_text(updated)
+          print(f"Set Cargo.toml package version to {version}")
+          PY
       - name: Install Rust non-interactively if not already installed
         if: ${{ matrix.container }}
         run: |
@@ -179,6 +223,28 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Sync Cargo.toml version from tag
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Unsupported tag version: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["GITHUB_REF_NAME"][1:]
+          cargo_toml = Path("Cargo.toml")
+          text = cargo_toml.read_text()
+          updated = re.sub(r'^version = ".*"$', f'version = "{version}"', text, count=1, flags=re.MULTILINE)
+          cargo_toml.write_text(updated)
+          print(f"Set Cargo.toml package version to {version}")
+          PY
       - name: Install cached dist
         uses: actions/download-artifact@v7
         with:
@@ -229,6 +295,28 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Sync Cargo.toml version from tag
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Unsupported tag version: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["GITHUB_REF_NAME"][1:]
+          cargo_toml = Path("Cargo.toml")
+          text = cargo_toml.read_text()
+          updated = re.sub(r'^version = ".*"$', f'version = "{version}"', text, count=1, flags=re.MULTILINE)
+          cargo_toml.write_text(updated)
+          print(f"Set Cargo.toml package version to {version}")
+          PY
       - name: Install cached dist
         uses: actions/download-artifact@v7
         with:
