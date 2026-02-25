@@ -200,17 +200,24 @@ pub fn confirm_delete_category(
         _ => return Ok(Ok(())),
     };
 
-    if state.task_count > 0 {
+    let task_count = db.count_tasks_for_category(state.category_id)?;
+    if task_count > 0 {
         return Ok(Err(ErrorDialogState {
             title: "Category not empty".to_string(),
             detail: format!(
                 "Cannot delete '{}' because it still contains {} task(s).",
-                state.category_name, state.task_count
+                state.category_name, task_count
             ),
         }));
     }
 
-    db.delete_category(state.category_id)?;
+    if let Err(err) = db.delete_category(state.category_id) {
+        return Ok(Err(ErrorDialogState {
+            title: "Failed to delete category".to_string(),
+            detail: err.to_string(),
+        }));
+    }
+
     Ok(Ok(()))
 }
 
@@ -497,7 +504,7 @@ mod tests {
         let dialog = ActiveDialog::DeleteCategory(DeleteCategoryDialogState {
             category_id: categories[0].id,
             category_name: "TODO".to_string(),
-            task_count: 5,
+            task_count: 0,
             focused_field: ConfirmCancelField::Confirm,
         });
 
@@ -508,7 +515,31 @@ mod tests {
         match result.unwrap() {
             Err(ref error_state) => {
                 assert_eq!(error_state.title, "Category not empty");
-                assert!(error_state.detail.contains("5 task(s)"));
+                assert!(error_state.detail.contains("2 task(s)"));
+            }
+            _ => panic!("Expected Err with ErrorDialogState"),
+        }
+    }
+
+    #[test]
+    fn test_confirm_delete_category_counts_archived_tasks() {
+        let (db, _categories, tasks, _repo_dir) = create_test_db_with_data();
+        db.archive_task(tasks[0].id).unwrap();
+        let categories = db.list_categories().unwrap();
+        let dialog = ActiveDialog::DeleteCategory(DeleteCategoryDialogState {
+            category_id: categories[0].id,
+            category_name: "TODO".to_string(),
+            task_count: 0,
+            focused_field: ConfirmCancelField::Confirm,
+        });
+
+        let result = confirm_delete_category(&db, &dialog);
+        assert!(result.is_ok());
+
+        match result.unwrap() {
+            Err(ref error_state) => {
+                assert_eq!(error_state.title, "Category not empty");
+                assert!(error_state.detail.contains("2 task(s)"));
             }
             _ => panic!("Expected Err with ErrorDialogState"),
         }
