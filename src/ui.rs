@@ -429,7 +429,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  /:search  n:new  e:edit  a:archive  A:archive view  Enter:attach  t:todo view  Ctrl+P:palette  c/r/x/p:category  H/L move  J/K reorder  v:view"
             }
             ViewMode::SidePanel => {
-                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  /:search  Space:collapse  e:edit  a:archive  A:archive view  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
+                "j/k:select  Ctrl+u/d:half-page  gg/G:top/bottom  /:task palette  Space:collapse  e:edit  a:archive  A:archive view  Enter:attach task  t:todo view  c/r/x/p:category  H/L/J/K:move  v:view"
             }
         }
     };
@@ -1374,7 +1374,9 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     let (width_percent, height_percent) = match &app.active_dialog {
-        ActiveDialog::CommandPalette(_) => command_palette_overlay_size(app.viewport),
+        ActiveDialog::CommandPalette(_) | ActiveDialog::TaskPalette(_) => {
+            command_palette_overlay_size(app.viewport)
+        }
         ActiveDialog::NewTask(_) => (80, 72),
         ActiveDialog::ArchiveTask(_) => (55, 35),
         ActiveDialog::DeleteTask(_) => (60, 60),
@@ -1389,7 +1391,10 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         ActiveDialog::DeleteRepo(_) => (60, 35),
         _ => (60, 45),
     };
-    let anchor = if matches!(app.active_dialog, ActiveDialog::CommandPalette(_)) {
+    let anchor = if matches!(
+        app.active_dialog,
+        ActiveDialog::CommandPalette(_) | ActiveDialog::TaskPalette(_)
+    ) {
         OverlayAnchor::Top
     } else {
         OverlayAnchor::Center
@@ -1444,6 +1449,9 @@ fn render_dialog(frame: &mut Frame<'_>, app: &mut App) {
         }
         ActiveDialog::CommandPalette(state) => {
             render_command_palette_dialog(frame, dialog_area, app, &state)
+        }
+        ActiveDialog::TaskPalette(state) => {
+            render_task_palette_dialog(frame, dialog_area, app, &state)
         }
         ActiveDialog::NewProject(state) => {
             render_new_project_dialog(frame, dialog_area, app, &state)
@@ -2767,7 +2775,7 @@ fn render_command_palette_dialog(
     set_text_input_cursor(frame, chunks[0], &state.query);
 
     let mut hint = Label::default()
-        .text("Type to filter. Enter to execute. Esc to close.")
+        .text("Type to filter. Ctrl+n/p, Ctrl+j/k, or Up/Down to move. Enter execute. Esc close.")
         .alignment(Alignment::Left)
         .foreground(theme.base.text_muted)
         .background(dialog_surface(theme));
@@ -2828,6 +2836,287 @@ fn render_command_palette_dialog(
             Message::SelectCommandPaletteItem(idx),
         );
     }
+}
+
+fn render_task_palette_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &mut App,
+    state: &crate::task_palette::TaskPaletteState,
+) {
+    let theme = app.theme;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    render_input_component(
+        frame,
+        chunks[0],
+        "Task Search",
+        &state.query,
+        true,
+        theme,
+        None,
+    );
+    set_text_input_cursor(frame, chunks[0], &state.query);
+
+    let hint_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(chunks[1]);
+
+    let mut hint = Label::default()
+        .text("Type to filter. Ctrl+n/p, Ctrl+j/k, or Up/Down to move. Enter focus. Esc close.")
+        .alignment(Alignment::Left)
+        .foreground(theme.base.text_muted)
+        .background(dialog_surface(theme));
+    hint.view(frame, hint_chunks[0]);
+
+    let selection = state
+        .selected_position()
+        .map(|position| format!(" · {position}/{}", state.filtered.len()))
+        .unwrap_or_default();
+    let meta = format!(
+        "Scope: {} · {} results{}",
+        state.scope_label,
+        state.filtered.len(),
+        selection
+    );
+    let mut meta_label = Label::default()
+        .text(meta)
+        .alignment(Alignment::Right)
+        .foreground(theme.base.text_muted)
+        .background(dialog_surface(theme));
+    meta_label.view(frame, hint_chunks[1]);
+
+    if !should_render_command_palette_results(app.viewport) {
+        return;
+    }
+
+    let selected = state
+        .selected_index
+        .min(state.filtered.len().saturating_sub(1));
+    let viewport_lines = list_inner_height(chunks[2]);
+    let row_heights = if state.filtered.is_empty() {
+        vec![1]
+    } else {
+        vec![2; state.filtered.len()]
+    };
+    let row_count = row_heights.iter().sum::<usize>();
+    let selected_line = if state.filtered.is_empty() {
+        0
+    } else {
+        selected_line_for_row_heights(&row_heights, selected)
+    };
+    let scroll_offset = column_scroll_offset(selected_line, row_count, viewport_lines);
+    let show_scrollbar = viewport_lines > 0 && row_count > viewport_lines;
+    let content_width = list_inner_width(chunks[2]).saturating_sub(usize::from(show_scrollbar));
+
+    let mut rows = TableBuilder::default();
+    for (idx, ranked) in state.filtered.iter().enumerate() {
+        if let Some(candidate) = state.candidate_for_ranked(ranked) {
+            let is_hovered =
+                app.hovered_message.as_ref() == Some(&Message::SelectTaskPaletteItem(idx));
+            append_task_palette_rows(
+                &mut rows,
+                candidate,
+                ranked,
+                idx == selected || is_hovered,
+                content_width,
+                theme,
+            );
+        }
+    }
+
+    if state.filtered.is_empty() {
+        rows.add_col(TextSpan::new("No matching tasks in active project scope"))
+            .add_row();
+    }
+
+    let mut list = List::default()
+        .title(
+            format!("Results ({})", state.filtered.len()),
+            Alignment::Left,
+        )
+        .borders(dialog_border(theme))
+        .foreground(theme.base.text)
+        .background(dialog_surface(theme))
+        .scroll(true)
+        .rows(rows.build())
+        .selected_line(selected_line)
+        .inactive(Style::default().fg(theme.base.text_muted));
+    list.attr(Attribute::Focus, AttrValue::Flag(true));
+    list.view(frame, chunks[2]);
+
+    let results_area = chunks[2];
+    let content_x = results_area.x.saturating_add(1);
+    let content_y = results_area.y.saturating_add(1);
+    let content_width = results_area.width.saturating_sub(2);
+    if content_width > 0 && viewport_lines > 0 {
+        let viewport_start = scroll_offset;
+        let viewport_end = scroll_offset + viewport_lines;
+        let mut row_start = 0usize;
+        for idx in 0..state.filtered.len() {
+            let row_end = row_start + 2;
+            let visible_start = row_start.max(viewport_start);
+            let visible_end = row_end.min(viewport_end);
+            if visible_end > visible_start {
+                let y = content_y + (visible_start - viewport_start) as u16;
+                let h = (visible_end - visible_start) as u16;
+                app.interaction_map.register_click(
+                    InteractionLayer::Dialog,
+                    Rect::new(content_x, y, content_width, h),
+                    Message::SelectTaskPaletteItem(idx),
+                );
+            }
+            row_start = row_end;
+        }
+    }
+
+    if show_scrollbar {
+        let mut scrollbar_state = ScrollbarState::new(row_count)
+            .position(scrollbar_position_for_offset(
+                scroll_offset,
+                row_count,
+                viewport_lines,
+            ))
+            .viewport_content_length(viewport_lines);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .track_style(RatatuiStyle::default().fg(theme.base.text_muted))
+            .thumb_style(RatatuiStyle::default().fg(theme.interactive.focus))
+            .thumb_symbol("█");
+        let scrollbar_area = inset_rect(chunks[2], 1, 1);
+        if scrollbar_area.width > 0 && scrollbar_area.height > 0 {
+            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+        }
+    }
+}
+
+fn append_task_palette_rows(
+    rows: &mut TableBuilder,
+    candidate: &crate::task_palette::TaskPaletteCandidate,
+    ranked: &crate::task_palette::RankedTaskCandidate,
+    is_selected: bool,
+    row_width: usize,
+    theme: Theme,
+) {
+    let bg = if is_selected {
+        theme.interactive.selected_bg
+    } else {
+        dialog_surface(theme)
+    };
+    let accent = if is_selected {
+        theme.interactive.selected_border
+    } else {
+        theme.base.text_muted
+    };
+    let marker = if is_selected { "▌" } else { " " };
+
+    let inner_width = row_width.saturating_sub(2).max(8);
+    let title = clamp_text(candidate.title.as_str(), inner_width);
+    rows.add_col(TextSpan::new(marker).fg(accent).bg(bg).bold())
+        .add_col(TextSpan::new(" ").bg(bg));
+    for span in highlighted_text_spans_for_indices(
+        title.as_str(),
+        ranked.match_parts.title.as_slice(),
+        theme.base.text,
+        bg,
+        theme.base.accent,
+        true,
+    ) {
+        rows.add_col(span);
+    }
+    let title_filler = inner_width.saturating_sub(count_chars(title.as_str()));
+    if title_filler > 0 {
+        rows.add_col(TextSpan::new(" ".repeat(title_filler)).bg(bg));
+    }
+    rows.add_row();
+
+    let project = clamp_text(candidate.project_name.as_str(), 14);
+    let category = clamp_text(candidate.category_name.as_str(), 14);
+    let repo = clamp_text(candidate.repo_name.as_str(), 20);
+    let branch = clamp_text(candidate.branch.as_str(), 28);
+    rows.add_col(TextSpan::new(marker).fg(accent).bg(bg).bold())
+        .add_col(TextSpan::new(" ").bg(bg));
+    append_palette_chip(
+        rows,
+        project.as_str(),
+        ranked.match_parts.project_name.as_slice(),
+        theme.base.text_muted,
+        bg,
+        theme.base.accent,
+    );
+    rows.add_col(TextSpan::new(" ").bg(bg));
+    append_palette_chip(
+        rows,
+        category.as_str(),
+        ranked.match_parts.category_name.as_slice(),
+        task_palette_status_color(theme, candidate.category_name.as_str()),
+        bg,
+        theme.base.accent,
+    );
+    rows.add_col(TextSpan::new(" ").bg(bg));
+    for span in highlighted_text_spans_for_indices(
+        repo.as_str(),
+        ranked.match_parts.repo_name.as_slice(),
+        theme.tile.repo,
+        bg,
+        theme.base.accent,
+        false,
+    ) {
+        rows.add_col(span);
+    }
+    rows.add_col(TextSpan::new(":").fg(theme.base.text_muted).bg(bg));
+    for span in highlighted_text_spans_for_indices(
+        branch.as_str(),
+        ranked.match_parts.branch.as_slice(),
+        theme.tile.branch,
+        bg,
+        theme.base.accent,
+        false,
+    ) {
+        rows.add_col(span);
+    }
+    rows.add_row();
+}
+
+fn append_palette_chip(
+    rows: &mut TableBuilder,
+    text: &str,
+    matched_indices: &[usize],
+    fg: Color,
+    bg: Color,
+    highlight_fg: Color,
+) {
+    rows.add_col(TextSpan::new("[").fg(fg).bg(bg));
+    for span in
+        highlighted_text_spans_for_indices(text, matched_indices, fg, bg, highlight_fg, false)
+    {
+        rows.add_col(span);
+    }
+    rows.add_col(TextSpan::new("]").fg(fg).bg(bg));
+}
+
+fn task_palette_status_color(theme: Theme, category_name: &str) -> Color {
+    let lowered = category_name.trim().to_ascii_lowercase();
+    if lowered.contains("done") || lowered.contains("complete") || lowered.contains("closed") {
+        return theme.status.idle;
+    }
+    if lowered.contains("progress") || lowered.contains("doing") || lowered.contains("wip") {
+        return theme.status.running;
+    }
+    if lowered.contains("blocked") || lowered.contains("error") || lowered.contains("fail") {
+        return theme.status.dead;
+    }
+    theme.interactive.focus
 }
 
 fn render_help_overlay(frame: &mut Frame<'_>, app: &App) {
@@ -3046,11 +3335,11 @@ fn render_repo_picker_dialog(
     let (picker_title, picker_hint) = match picker.target {
         RepoPickerTarget::Repo => (
             "Select Repository Folder",
-            "Type path/name. Up/Down move, Enter accept, Tab complete, Esc close",
+            "Type path/name. Ctrl+n/p, Ctrl+j/k, or Up/Down move. Enter accept, Tab complete, Esc close",
         ),
         RepoPickerTarget::ExistingDirectory => (
             "Select Existing Directory",
-            "Type path. Up/Down move, Enter accept, Tab complete, Esc close",
+            "Type path. Ctrl+n/p, Ctrl+j/k, or Up/Down move. Enter accept, Tab complete, Esc close",
         ),
     };
 
@@ -3457,6 +3746,87 @@ fn highlighted_text_spans(
         spans.push(styled_span(suffix, default_fg, bg, bold));
     }
     spans
+}
+
+fn highlighted_text_spans_for_indices(
+    text: &str,
+    matched_indices: &[usize],
+    default_fg: Color,
+    bg: Color,
+    highlight_fg: Color,
+    bold: bool,
+) -> Vec<TextSpan> {
+    if text.is_empty() {
+        return vec![styled_span(String::new(), default_fg, bg, bold)];
+    }
+    if matched_indices.is_empty() {
+        return vec![styled_span(text.to_string(), default_fg, bg, bold)];
+    }
+
+    let highlighted: HashSet<usize> = matched_indices.iter().copied().collect();
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut current_highlighted: Option<bool> = None;
+
+    for (idx, ch) in text.chars().enumerate() {
+        let is_highlighted = highlighted.contains(&idx);
+        match current_highlighted {
+            None => {
+                current_highlighted = Some(is_highlighted);
+                current.push(ch);
+            }
+            Some(active) if active == is_highlighted => {
+                current.push(ch);
+            }
+            Some(active) => {
+                spans.push(styled_span_for_palette_match(
+                    std::mem::take(&mut current),
+                    default_fg,
+                    bg,
+                    highlight_fg,
+                    bold,
+                    active,
+                ));
+                current.push(ch);
+                current_highlighted = Some(is_highlighted);
+            }
+        }
+    }
+
+    if let Some(active) = current_highlighted {
+        spans.push(styled_span_for_palette_match(
+            current,
+            default_fg,
+            bg,
+            highlight_fg,
+            bold,
+            active,
+        ));
+    }
+
+    spans
+}
+
+fn styled_span_for_palette_match(
+    text: String,
+    default_fg: Color,
+    bg: Color,
+    highlight_fg: Color,
+    bold: bool,
+    highlighted: bool,
+) -> TextSpan {
+    let span = TextSpan::new(text)
+        .fg(if highlighted {
+            highlight_fg
+        } else {
+            default_fg
+        })
+        .bg(bg);
+    if bold || highlighted {
+        span.bold()
+    } else {
+        span
+    }
 }
 
 fn styled_span(text: String, fg: Color, bg: Color, bold: bool) -> TextSpan {

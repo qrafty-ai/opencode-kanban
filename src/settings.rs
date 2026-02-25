@@ -35,6 +35,7 @@ pub struct Settings {
     pub terminal_executable: Option<String>,
     pub terminal_launch_args: Vec<String>,
     pub project_order: Vec<String>,
+    pub archived_project_paths: Vec<String>,
     pub keybindings: KeybindingsConfig,
 }
 
@@ -59,6 +60,7 @@ impl Default for Settings {
             terminal_executable: None,
             terminal_launch_args: Vec::new(),
             project_order: Vec::new(),
+            archived_project_paths: Vec::new(),
             keybindings: KeybindingsConfig::default(),
         }
     }
@@ -178,6 +180,17 @@ impl Settings {
             .map(str::to_string)
             .collect();
 
+        self.archived_project_paths = self
+            .archived_project_paths
+            .iter()
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect();
+        self.archived_project_paths.sort();
+        self.archived_project_paths.dedup();
+
         self.theme = match ThemePreset::from_str(&self.theme) {
             Ok(preset) => preset.as_str().to_string(),
             Err(()) => {
@@ -237,6 +250,13 @@ impl Settings {
             }
         };
     }
+
+    pub fn is_archived_project_path(&self, path: &Path) -> bool {
+        let value = path.to_string_lossy();
+        self.archived_project_paths
+            .iter()
+            .any(|candidate| candidate == value.as_ref())
+    }
 }
 
 #[cfg(test)]
@@ -293,6 +313,7 @@ mod tests {
         assert_eq!(settings.scroll_column_width_chars, 42);
         assert_eq!(settings.terminal_executable, None);
         assert!(settings.terminal_launch_args.is_empty());
+        assert!(settings.archived_project_paths.is_empty());
         assert_eq!(settings.keybindings, KeybindingsConfig::default());
     }
 
@@ -338,6 +359,7 @@ mod tests {
         assert_eq!(settings.terminal_executable, None);
         assert!(settings.terminal_launch_args.is_empty());
         assert!(settings.project_order.is_empty());
+        assert!(settings.archived_project_paths.is_empty());
         assert_eq!(settings.keybindings, KeybindingsConfig::default());
         assert_eq!(settings.custom_theme, CustomThemeConfig::default());
     }
@@ -357,6 +379,7 @@ mod tests {
             terminal_executable: Some("wezterm".to_string()),
             terminal_launch_args: vec!["start".to_string(), "--new-window".to_string()],
             project_order: vec!["/tmp/demo.sqlite".to_string()],
+            archived_project_paths: vec!["/tmp/old.sqlite".to_string()],
             keybindings: KeybindingsConfig::default(),
         };
         expected.validate();
@@ -382,6 +405,7 @@ mod tests {
             terminal_executable: Some("   ".to_string()),
             terminal_launch_args: vec!["  --new-window  ".to_string(), "   ".to_string()],
             project_order: Vec::new(),
+            archived_project_paths: vec!["  /tmp/archived.sqlite  ".to_string(), " ".to_string()],
             keybindings: KeybindingsConfig::default(),
         };
 
@@ -395,6 +419,10 @@ mod tests {
         );
         assert_eq!(settings.terminal_executable, None);
         assert_eq!(settings.terminal_launch_args, vec!["--new-window"]);
+        assert_eq!(
+            settings.archived_project_paths,
+            vec!["/tmp/archived.sqlite"]
+        );
 
         settings.poll_interval_ms = u64::MAX;
         settings.side_panel_width = 0;

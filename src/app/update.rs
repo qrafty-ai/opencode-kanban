@@ -90,6 +90,16 @@ impl App {
                 self.active_dialog =
                     ActiveDialog::CommandPalette(CommandPaletteState::new(frequencies));
             }
+            Message::OpenTaskPalette => {
+                if self.current_view == View::Board {
+                    self.active_dialog = ActiveDialog::TaskPalette(
+                        crate::task_palette::TaskPaletteState::new_with_scope(
+                            self.task_palette_candidates(),
+                            self.task_palette_scope_label(),
+                        ),
+                    );
+                }
+            }
             Message::DismissDialog => {
                 self.active_dialog = ActiveDialog::None;
                 self.context_menu = None;
@@ -838,6 +848,29 @@ impl App {
                     }
                 }
             }
+            Message::JumpToTaskFromPalette(project_path, task_id) => {
+                self.active_dialog = ActiveDialog::None;
+                self.current_view = View::Board;
+                self.archived_tasks.clear();
+                self.archive_selected_index = 0;
+
+                if self.current_project_path.as_ref() != Some(&project_path) {
+                    if let Some(idx) = self
+                        .project_list
+                        .iter()
+                        .position(|project| project.path == project_path)
+                    {
+                        self.selected_project_index = idx;
+                        self.project_list_state.select(Some(idx));
+                        if let Some(project) = self.project_list.get(idx) {
+                            self.project_detail_cache = load_project_detail(project);
+                        }
+                    }
+                    self.switch_project(project_path)?;
+                }
+
+                self.focus_task_by_id(task_id);
+            }
             #[allow(clippy::collapsible_if)]
             Message::SelectCommandPaletteItem(idx) => {
                 if let ActiveDialog::CommandPalette(ref mut state) = self.active_dialog {
@@ -845,6 +878,17 @@ impl App {
                         state.selected_index = idx;
                         if let Some(cmd_id) = state.selected_command_id() {
                             self.update(Message::ExecuteCommand(cmd_id))?;
+                        }
+                    }
+                }
+            }
+            #[allow(clippy::collapsible_if)]
+            Message::SelectTaskPaletteItem(idx) => {
+                if let ActiveDialog::TaskPalette(ref mut state) = self.active_dialog {
+                    if idx < state.filtered.len() {
+                        state.selected_index = idx;
+                        if let Some(message) = state.selected_jump_message() {
+                            self.update(message)?;
                         }
                     }
                 }

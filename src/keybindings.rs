@@ -596,7 +596,7 @@ impl Keybindings {
                     .unwrap_or_else(|| "-".to_string())
             ),
             "  gg: select first item".to_string(),
-            "  / then Enter: search tasks; n / N: next/previous match".to_string(),
+            "  /: open global task search palette".to_string(),
             format!(
                 "  {}: attach selected task",
                 self.display_for(KeyContext::Board, KeyAction::AttachTask)

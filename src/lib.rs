@@ -11,6 +11,7 @@ pub mod opencode;
 pub mod projects;
 pub mod realm;
 pub mod settings;
+pub mod task_palette;
 pub mod theme;
 pub mod tmux;
 pub mod types;

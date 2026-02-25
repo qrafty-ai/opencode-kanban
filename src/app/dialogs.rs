@@ -106,6 +106,48 @@ pub fn handle_dialog_key(
             }
             KeyCode::Up => state.move_selection(-1),
             KeyCode::Down => state.move_selection(1),
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.move_selection(-1)
+            }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.move_selection(1)
+            }
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.move_selection(-1)
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.move_selection(1)
+            }
+            KeyCode::Backspace => {
+                if state.query.is_empty() {
+                    *dialog = ActiveDialog::None;
+                } else {
+                    state.query.pop();
+                    state.update_query();
+                }
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                state.query.push(ch);
+                state.update_query();
+            }
+            _ => {}
+        },
+        ActiveDialog::TaskPalette(state) => match key.code {
+            KeyCode::Esc => *dialog = ActiveDialog::None,
+            KeyCode::Enter => {
+                follow_up = state.selected_jump_message();
+            }
+            KeyCode::Up => state.move_selection(-1),
+            KeyCode::Down => state.move_selection(1),
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.move_selection(-1)
+            }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.move_selection(1)
+            }
             KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 state.move_selection(-1)
             }
@@ -329,6 +371,12 @@ fn handle_repo_picker_key(
             }
             KeyCode::Up => move_picker_selection(picker, -1),
             KeyCode::Down => move_picker_selection(picker, 1),
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                move_picker_selection(picker, -1)
+            }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                move_picker_selection(picker, 1)
+            }
             KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 move_picker_selection(picker, -1)
             }
@@ -1189,6 +1237,13 @@ mod tests {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())
     }
 
+    fn key_ctrl_char(ch: char) -> KeyEvent {
+        KeyEvent::new(
+            KeyCode::Char(ch.to_ascii_lowercase()),
+            KeyModifiers::CONTROL,
+        )
+    }
+
     fn key_space() -> KeyEvent {
         KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty())
     }
@@ -1315,6 +1370,86 @@ mod tests {
         handle_new_task_dialog_key(
             &mut state,
             key_down(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+        handle_new_task_dialog_key(
+            &mut state,
+            key_enter(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+
+        assert_eq!(state.repo_idx, 1);
+        assert_eq!(state.base_input, "develop");
+        assert_eq!(state.repo_input, second.path);
+        assert!(follow_up.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn picker_ctrl_n_moves_selection_and_enter_applies() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let first = test_repo(Uuid::new_v4(), "api-admin", "main");
+        let second = test_repo(Uuid::new_v4(), "api-gateway", "develop");
+        let mut repos = vec![first, second.clone()];
+
+        let mut state = repo_focused_state();
+        state.repo_input = "api".to_string();
+
+        let mut follow_up = None;
+        handle_new_task_dialog_key(
+            &mut state,
+            key_enter(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+        handle_new_task_dialog_key(
+            &mut state,
+            key_ctrl_char('n'),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+        handle_new_task_dialog_key(
+            &mut state,
+            key_enter(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+
+        assert_eq!(state.repo_idx, 1);
+        assert_eq!(state.base_input, "develop");
+        assert_eq!(state.repo_input, second.path);
+        assert!(follow_up.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn picker_ctrl_p_wraps_to_last_selection() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let first = test_repo(Uuid::new_v4(), "api-admin", "main");
+        let second = test_repo(Uuid::new_v4(), "api-gateway", "develop");
+        let mut repos = vec![first, second.clone()];
+
+        let mut state = repo_focused_state();
+        state.repo_input = "api".to_string();
+
+        let mut follow_up = None;
+        handle_new_task_dialog_key(
+            &mut state,
+            key_enter(),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+        handle_new_task_dialog_key(
+            &mut state,
+            key_ctrl_char('p'),
             repos.as_mut_slice(),
             &db,
             &mut follow_up,
