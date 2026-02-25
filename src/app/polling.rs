@@ -115,6 +115,12 @@ pub fn spawn_status_poller(
                         let _ = db
                             .update_task_status_async(task.id, Status::Idle.as_str())
                             .await;
+                        if should_mark_needs_inspection(
+                            task.tmux_status.as_str(),
+                            Status::Idle.as_str(),
+                        ) {
+                            let _ = db.update_task_needs_inspection_async(task.id, true).await;
+                        }
                     }
                     debug!(
                         task_id = %task.id,
@@ -192,12 +198,17 @@ pub fn spawn_status_poller(
                                     );
 
                                     if task.tmux_status != status_match.status.state.as_str() {
-                                        let _ = db
-                                            .update_task_status_async(
-                                                task.id,
-                                                status_match.status.state.as_str(),
-                                            )
-                                            .await;
+                                        let next_status = status_match.status.state.as_str();
+                                        let _ =
+                                            db.update_task_status_async(task.id, next_status).await;
+                                        if should_mark_needs_inspection(
+                                            task.tmux_status.as_str(),
+                                            next_status,
+                                        ) {
+                                            let _ = db
+                                                .update_task_needs_inspection_async(task.id, true)
+                                                .await;
+                                        }
                                     }
 
                                     if task.status_source != SessionStatusSource::Server.as_str()
@@ -243,6 +254,14 @@ pub fn spawn_status_poller(
                                                 Status::Idle.as_str(),
                                             )
                                             .await;
+                                        if should_mark_needs_inspection(
+                                            task.tmux_status.as_str(),
+                                            Status::Idle.as_str(),
+                                        ) {
+                                            let _ = db
+                                                .update_task_needs_inspection_async(task.id, true)
+                                                .await;
+                                        }
                                     }
 
                                     if task.status_source != SessionStatusSource::None.as_str()
@@ -289,6 +308,14 @@ pub fn spawn_status_poller(
                                     let _ = db
                                         .update_task_status_async(task.id, Status::Idle.as_str())
                                         .await;
+                                    if should_mark_needs_inspection(
+                                        task.tmux_status.as_str(),
+                                        Status::Idle.as_str(),
+                                    ) {
+                                        let _ = db
+                                            .update_task_needs_inspection_async(task.id, true)
+                                            .await;
+                                    }
                                 }
 
                                 if task.status_source != SessionStatusSource::None.as_str()
@@ -644,6 +671,11 @@ fn find_eldest_ancestor_recursive(
     }
 }
 
+fn should_mark_needs_inspection(previous_status: &str, next_status: &str) -> bool {
+    SessionState::from_raw_status(previous_status) == SessionState::Running
+        && SessionState::from_raw_status(next_status) == SessionState::Idle
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,5 +909,14 @@ mod tests {
 
         let ids = live_subagent_session_ids(&statuses, "root-1", Some(&complete_parent_map));
         assert_eq!(ids, vec!["subagent-1".to_string()]);
+    }
+
+    #[test]
+    fn should_mark_needs_inspection_only_on_running_to_idle_transition() {
+        assert!(should_mark_needs_inspection("running", "idle"));
+        assert!(should_mark_needs_inspection("thinking", "completed"));
+        assert!(!should_mark_needs_inspection("idle", "idle"));
+        assert!(!should_mark_needs_inspection("running", "running"));
+        assert!(!should_mark_needs_inspection("unknown", "idle"));
     }
 }

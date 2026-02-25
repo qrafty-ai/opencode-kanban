@@ -906,6 +906,7 @@ mod tests {
             status_error: None,
             opencode_session_id: None,
             attach_overlay_shown: false,
+            needs_inspection: false,
             archived: false,
             archived_at: None,
             created_at: "now".to_string(),
@@ -2518,6 +2519,8 @@ mod tests {
         let repo = app.repos[0].clone();
         let worktree = TempDir::new()?;
 
+        app.db.update_task_needs_inspection(task_id, true)?;
+
         app.db.update_task_tmux(
             task_id,
             Some("ok-session".to_string()),
@@ -2539,6 +2542,7 @@ mod tests {
         assert_eq!(result, AttachTaskResult::Attached);
         assert_eq!(runtime.create_session_calls.get(), 1);
         assert_eq!(runtime.switch_client_calls.get(), 1);
+        assert!(!app.db.get_task(task_id)?.needs_inspection);
         Ok(())
     }
 
@@ -2548,6 +2552,8 @@ mod tests {
         let (app, _repo_dir, task_id, _category_ids) = test_app_with_middle_task()?;
         let repo = app.repos[0].clone();
         let worktree = TempDir::new()?;
+
+        app.db.update_task_needs_inspection(task_id, true)?;
 
         app.db.update_task_tmux(
             task_id,
@@ -2571,6 +2577,7 @@ mod tests {
         assert_eq!(runtime.create_session_calls.get(), 1);
         assert_eq!(runtime.open_in_new_terminal_calls.get(), 1);
         assert_eq!(runtime.switch_client_calls.get(), 0);
+        assert!(!app.db.get_task(task_id)?.needs_inspection);
         Ok(())
     }
 
