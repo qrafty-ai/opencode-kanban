@@ -194,8 +194,8 @@ impl Database {
                 id, title, repo_id, branch, category_id, position, tmux_session_name,
                 worktree_path, tmux_status, status_source,
                 status_fetched_at, status_error, opencode_session_id,
-                attach_overlay_shown, archived, archived_at, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                attach_overlay_shown, needs_inspection, archived, archived_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(resolved_title)
@@ -210,6 +210,7 @@ impl Database {
         .bind(Option::<String>::None)
         .bind(Option::<String>::None)
         .bind(Option::<String>::None)
+        .bind(0)
         .bind(0)
         .bind(0)
         .bind(Option::<String>::None)
@@ -242,7 +243,7 @@ impl Database {
             "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
                     worktree_path, tmux_status, status_source,
                     status_fetched_at, status_error, opencode_session_id,
-                    attach_overlay_shown, archived, archived_at,
+                    attach_overlay_shown, needs_inspection, archived, archived_at,
                     created_at, updated_at
              FROM tasks WHERE id = ?",
         )
@@ -263,7 +264,7 @@ impl Database {
             "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
                     worktree_path, tmux_status, status_source,
                     status_fetched_at, status_error, opencode_session_id,
-                    attach_overlay_shown, archived, archived_at,
+                    attach_overlay_shown, needs_inspection, archived, archived_at,
                     created_at, updated_at
              FROM tasks WHERE archived = 0
              ORDER BY category_id ASC, position ASC, created_at ASC",
@@ -284,7 +285,7 @@ impl Database {
             "SELECT id, title, repo_id, branch, category_id, position, tmux_session_name,
                     worktree_path, tmux_status, status_source,
                     status_fetched_at, status_error, opencode_session_id,
-                    attach_overlay_shown, archived, archived_at,
+                    attach_overlay_shown, needs_inspection, archived, archived_at,
                     created_at, updated_at
              FROM tasks WHERE archived = 1
              ORDER BY archived_at DESC, updated_at DESC",
@@ -535,6 +536,30 @@ impl Database {
         attach_overlay_shown: bool,
     ) -> Result<()> {
         block_on_db(self.update_task_attach_overlay_shown_async(id, attach_overlay_shown))
+    }
+
+    pub async fn update_task_needs_inspection_async(
+        &self,
+        id: Uuid,
+        needs_inspection: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks
+             SET needs_inspection = ?,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(if needs_inspection { 1 } else { 0 })
+        .bind(now_iso())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to update task needs-inspection state")?;
+        Ok(())
+    }
+
+    pub fn update_task_needs_inspection(&self, id: Uuid, needs_inspection: bool) -> Result<()> {
+        block_on_db(self.update_task_needs_inspection_async(id, needs_inspection))
     }
 
     pub async fn delete_task_async(&self, id: Uuid) -> Result<()> {
@@ -823,6 +848,7 @@ impl Database {
                 status_error TEXT,
                 opencode_session_id TEXT,
                 attach_overlay_shown INTEGER NOT NULL DEFAULT 0,
+                needs_inspection INTEGER NOT NULL DEFAULT 0,
                 archived INTEGER NOT NULL DEFAULT 0,
                 archived_at TEXT,
                 created_at TEXT NOT NULL,
@@ -877,6 +903,12 @@ impl Database {
         .await?;
         execute_add_column_if_missing(
             &self.pool,
+            "ALTER TABLE tasks ADD COLUMN needs_inspection INTEGER NOT NULL DEFAULT 0",
+            "failed to migrate tasks.needs_inspection",
+        )
+        .await?;
+        execute_add_column_if_missing(
+            &self.pool,
             "ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "failed to migrate tasks.archived",
         )
@@ -896,6 +928,10 @@ impl Database {
             .execute(&self.pool)
             .await
             .context("failed to backfill tasks.attach_overlay_shown")?;
+        sqlx::query("UPDATE tasks SET needs_inspection = 0 WHERE needs_inspection IS NULL")
+            .execute(&self.pool)
+            .await
+            .context("failed to backfill tasks.needs_inspection")?;
         sqlx::query("UPDATE tasks SET archived = 0 WHERE archived IS NULL")
             .execute(&self.pool)
             .await
@@ -1112,6 +1148,7 @@ fn map_task_row(row: &SqliteRow) -> Result<Task> {
         status_error: row.try_get("status_error")?,
         opencode_session_id: row.try_get("opencode_session_id")?,
         attach_overlay_shown: row.try_get::<i64, _>("attach_overlay_shown")? != 0,
+        needs_inspection: row.try_get::<i64, _>("needs_inspection")? != 0,
         archived: row.try_get::<i64, _>("archived")? != 0,
         archived_at: row.try_get("archived_at")?,
         created_at: row.try_get("created_at")?,
@@ -1269,6 +1306,7 @@ mod tests {
         assert_eq!(task.tmux_status, "unknown");
         assert_eq!(task.status_source, "none");
         assert!(!task.attach_overlay_shown);
+        assert!(!task.needs_inspection);
         assert!(!task.archived);
         assert_eq!(task.archived_at, None);
 
@@ -1294,6 +1332,10 @@ mod tests {
         db.update_task_attach_overlay_shown(task.id, true)?;
         let updated = db.get_task(task.id)?;
         assert!(updated.attach_overlay_shown);
+
+        db.update_task_needs_inspection(task.id, true)?;
+        let updated = db.get_task(task.id)?;
+        assert!(updated.needs_inspection);
 
         db.delete_task(task.id)?;
         assert!(db.get_task(task.id).is_err());

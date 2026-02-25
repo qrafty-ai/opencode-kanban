@@ -3591,9 +3591,16 @@ fn append_task_tile_rows(
 ) {
     let theme = app.theme;
     let tile = theme.tile_colors(is_selected);
-    let bg = tile.background;
+    let needs_inspection = task_needs_inspection_highlight(task);
+    let bg = if needs_inspection && !is_selected {
+        theme.interactive.selected_bg
+    } else {
+        tile.background
+    };
     let border = if is_selected {
         selected_border
+    } else if needs_inspection {
+        theme.status.waiting
     } else {
         tile.border
     };
@@ -3606,13 +3613,13 @@ fn append_task_tile_rows(
         &format!(" {}", task_tile_status_line(app, task)),
         inner_width,
     );
+    let status_color = if needs_inspection {
+        theme.status.waiting
+    } else {
+        theme.status_color(task.tmux_status.as_str())
+    };
     rows.add_col(TextSpan::new("│").fg(border).bg(bg))
-        .add_col(
-            TextSpan::new(status_line)
-                .fg(theme.status_color(task.tmux_status.as_str()))
-                .bg(bg)
-                .bold(),
-        )
+        .add_col(TextSpan::new(status_line).fg(status_color).bg(bg).bold())
         .add_col(TextSpan::new("│").fg(border).bg(bg))
         .add_row();
 
@@ -3857,10 +3864,22 @@ fn slice_chars(value: &str, start: usize, end: usize) -> String {
 }
 
 fn task_tile_status_line(app: &App, task: &Task) -> String {
-    let spinner = status_spinner_ascii(task.tmux_status.as_str(), app.pulse_phase);
+    let spinner = task_tile_status_icon(task, app.pulse_phase);
     match app.session_todo_summary(task.id) {
         Some((done, total)) => format!("{spinner}  todo {done}/{total}"),
         None => spinner.to_string(),
+    }
+}
+
+fn task_needs_inspection_highlight(task: &Task) -> bool {
+    task.needs_inspection && task.tmux_status == "idle"
+}
+
+fn task_tile_status_icon(task: &Task, pulse_phase: u8) -> &'static str {
+    if task_needs_inspection_highlight(task) {
+        "!!"
+    } else {
+        status_spinner_ascii(task.tmux_status.as_str(), pulse_phase)
     }
 }
 
@@ -5274,6 +5293,39 @@ mod tests {
         assert_eq!(offset, 35);
     }
 
+    #[test]
+    fn test_task_needs_inspection_highlight_only_for_idle_tasks() {
+        let category_id = Uuid::new_v4();
+        let mut task = test_task(category_id, 0);
+
+        task.needs_inspection = true;
+        task.tmux_status = "idle".to_string();
+        assert!(task_needs_inspection_highlight(&task));
+
+        task.tmux_status = "running".to_string();
+        assert!(!task_needs_inspection_highlight(&task));
+
+        task.needs_inspection = false;
+        task.tmux_status = "idle".to_string();
+        assert!(!task_needs_inspection_highlight(&task));
+    }
+
+    #[test]
+    fn test_task_tile_status_icon_uses_unique_icon_for_needs_inspection() {
+        let category_id = Uuid::new_v4();
+        let mut task = test_task(category_id, 0);
+        task.needs_inspection = true;
+        task.tmux_status = "idle".to_string();
+        assert_eq!(task_tile_status_icon(&task, 0), "!!");
+
+        task.needs_inspection = false;
+        task.tmux_status = "idle".to_string();
+        assert_eq!(task_tile_status_icon(&task, 0), "--");
+
+        task.tmux_status = "running".to_string();
+        assert_eq!(task_tile_status_icon(&task, 1), "::");
+    }
+
     fn test_task(category_id: Uuid, position: i64) -> Task {
         Task {
             id: Uuid::new_v4(),
@@ -5290,6 +5342,7 @@ mod tests {
             status_error: None,
             opencode_session_id: None,
             attach_overlay_shown: false,
+            needs_inspection: false,
             archived: false,
             archived_at: None,
             created_at: "now".to_string(),

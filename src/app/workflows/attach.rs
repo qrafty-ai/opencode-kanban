@@ -40,6 +40,7 @@ pub(crate) fn attach_task_with_runtime(
         &popup_style,
         runtime,
     );
+    db.update_task_needs_inspection(task.id, false)?;
     Ok(AttachTaskResult::Attached)
 }
 
@@ -62,6 +63,7 @@ pub(crate) fn open_task_in_new_terminal_with_runtime(
         terminal_executable,
         terminal_launch_args,
     )?;
+    db.update_task_needs_inspection(task.id, false)?;
     Ok(AttachTaskResult::Attached)
 }
 
