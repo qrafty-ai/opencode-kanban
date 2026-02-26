@@ -124,7 +124,6 @@ pub fn spawn_status_poller(
                             Status::Idle.as_str(),
                         ) {
                             let _ = db.update_task_needs_inspection_async(task.id, true).await;
-                            notify_task_completion(task, notification_display_duration_ms);
                         }
                     }
                     debug!(
@@ -213,10 +212,16 @@ pub fn spawn_status_poller(
                                             let _ = db
                                                 .update_task_needs_inspection_async(task.id, true)
                                                 .await;
-                                            notify_task_completion(
-                                                task,
-                                                notification_display_duration_ms,
-                                            );
+                                            if should_notify_root_session_completion(
+                                                task.tmux_status.as_str(),
+                                                next_status,
+                                                &status_match,
+                                            ) {
+                                                notify_task_completion(
+                                                    task,
+                                                    notification_display_duration_ms,
+                                                );
+                                            }
                                         }
                                     }
 
@@ -270,10 +275,6 @@ pub fn spawn_status_poller(
                                             let _ = db
                                                 .update_task_needs_inspection_async(task.id, true)
                                                 .await;
-                                            notify_task_completion(
-                                                task,
-                                                notification_display_duration_ms,
-                                            );
                                         }
                                     }
 
@@ -328,10 +329,6 @@ pub fn spawn_status_poller(
                                         let _ = db
                                             .update_task_needs_inspection_async(task.id, true)
                                             .await;
-                                        notify_task_completion(
-                                            task,
-                                            notification_display_duration_ms,
-                                        );
                                     }
                                 }
 
@@ -693,6 +690,14 @@ fn should_mark_needs_inspection(previous_status: &str, next_status: &str) -> boo
         && SessionState::from_raw_status(next_status) == SessionState::Idle
 }
 
+fn should_notify_root_session_completion(
+    previous_status: &str,
+    next_status: &str,
+    status_match: &SessionStatusMatch,
+) -> bool {
+    should_mark_needs_inspection(previous_status, next_status) && status_match.is_root_session()
+}
+
 fn notify_task_completion(task: &Task, notification_display_duration_ms: u64) {
     let sessions = tmux_list_sessions()
         .into_iter()
@@ -956,5 +961,27 @@ mod tests {
         assert!(!should_mark_needs_inspection("idle", "idle"));
         assert!(!should_mark_needs_inspection("running", "running"));
         assert!(!should_mark_needs_inspection("unknown", "idle"));
+    }
+
+    #[test]
+    fn should_notify_root_session_completion_only_for_root_running_to_idle() {
+        let root_match = status_match_with_state("root-1", None, SessionState::Idle);
+        let subagent_match = status_match_with_state("sub-1", Some("root-1"), SessionState::Idle);
+
+        assert!(should_notify_root_session_completion(
+            "running",
+            "idle",
+            &root_match
+        ));
+        assert!(!should_notify_root_session_completion(
+            "running",
+            "idle",
+            &subagent_match
+        ));
+        assert!(!should_notify_root_session_completion(
+            "idle",
+            "idle",
+            &root_match
+        ));
     }
 }
