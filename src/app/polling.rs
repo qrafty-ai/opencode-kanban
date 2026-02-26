@@ -275,6 +275,17 @@ pub fn spawn_status_poller(
                                             let _ = db
                                                 .update_task_needs_inspection_async(task.id, true)
                                                 .await;
+                                            if should_notify_root_completion_without_status_match(
+                                                task.tmux_status.as_str(),
+                                                Status::Idle.as_str(),
+                                                task.opencode_session_id.as_deref(),
+                                                complete_session_parent_map.as_ref(),
+                                            ) {
+                                                notify_task_completion(
+                                                    task,
+                                                    notification_display_duration_ms,
+                                                );
+                                            }
                                         }
                                     }
 
@@ -698,6 +709,26 @@ fn should_notify_root_session_completion(
     should_mark_needs_inspection(previous_status, next_status) && status_match.is_root_session()
 }
 
+fn should_notify_root_completion_without_status_match(
+    previous_status: &str,
+    next_status: &str,
+    bound_session_id: Option<&str>,
+    complete_parent_map: Option<&HashMap<String, Option<String>>>,
+) -> bool {
+    if !should_mark_needs_inspection(previous_status, next_status) {
+        return false;
+    }
+
+    let Some(bound_session_id) = bound_session_id else {
+        return false;
+    };
+
+    match complete_parent_map.and_then(|parent_map| parent_map.get(bound_session_id)) {
+        Some(parent_session_id) => parent_session_id.is_none(),
+        None => true,
+    }
+}
+
 fn notify_task_completion(task: &Task, notification_display_duration_ms: u64) {
     let sessions = tmux_list_sessions()
         .into_iter()
@@ -982,6 +1013,50 @@ mod tests {
             "idle",
             "idle",
             &root_match
+        ));
+    }
+
+    #[test]
+    fn should_notify_root_completion_without_status_match_for_root_binding() {
+        let mut complete_parent_map = HashMap::new();
+        complete_parent_map.insert("root-1".to_string(), None);
+        complete_parent_map.insert("sub-1".to_string(), Some("root-1".to_string()));
+
+        assert!(should_notify_root_completion_without_status_match(
+            "running",
+            "idle",
+            Some("root-1"),
+            Some(&complete_parent_map)
+        ));
+        assert!(!should_notify_root_completion_without_status_match(
+            "running",
+            "idle",
+            Some("sub-1"),
+            Some(&complete_parent_map)
+        ));
+        assert!(!should_notify_root_completion_without_status_match(
+            "running",
+            "idle",
+            None,
+            Some(&complete_parent_map)
+        ));
+    }
+
+    #[test]
+    fn should_notify_root_completion_without_status_match_when_binding_not_in_map() {
+        let complete_parent_map = HashMap::<String, Option<String>>::new();
+
+        assert!(should_notify_root_completion_without_status_match(
+            "running",
+            "idle",
+            Some("root-1"),
+            Some(&complete_parent_map)
+        ));
+        assert!(!should_notify_root_completion_without_status_match(
+            "idle",
+            "idle",
+            Some("root-1"),
+            Some(&complete_parent_map)
         ));
     }
 }
