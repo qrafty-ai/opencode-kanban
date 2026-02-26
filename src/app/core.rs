@@ -243,6 +243,8 @@ impl App {
             Arc::clone(&app.session_title_cache),
             Arc::clone(&app.session_message_cache),
             app.settings.poll_interval_ms,
+            app.settings.notification_display_duration_ms,
+            app.current_project_slug_for_tmux(),
         ));
         Ok(app)
     }
@@ -354,6 +356,8 @@ impl App {
             Arc::clone(&self.session_title_cache),
             Arc::clone(&self.session_message_cache),
             self.settings.poll_interval_ms,
+            self.settings.notification_display_duration_ms,
+            self.current_project_slug_for_tmux(),
         ));
     }
 
@@ -520,6 +524,13 @@ impl App {
         self.refresh_data()?;
 
         self.poller_stop.store(false, Ordering::Relaxed);
+        let project_slug = path.file_stem().and_then(|s| s.to_str()).and_then(|s| {
+            if s == projects::DEFAULT_PROJECT {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        });
         self.poller_thread = Some(polling::spawn_status_poller(
             path.clone(),
             Arc::clone(&self.poller_stop),
@@ -528,6 +539,8 @@ impl App {
             Arc::clone(&self.session_title_cache),
             Arc::clone(&self.session_message_cache),
             self.settings.poll_interval_ms,
+            self.settings.notification_display_duration_ms,
+            project_slug,
         ));
 
         self.current_project_path = Some(path);

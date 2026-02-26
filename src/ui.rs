@@ -4668,14 +4668,18 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(10)])
+        .constraints([Constraint::Length(8), Constraint::Min(10)])
         .split(area);
 
-    let field_rows: [(&str, String); 5] = [
+    let field_rows: [(&str, String); 6] = [
         ("Theme", app.settings.theme.clone()),
         (
             "Poll Interval",
             format!("{} ms", app.settings.poll_interval_ms),
+        ),
+        (
+            "Notification Duration",
+            format!("{} ms", app.settings.notification_display_duration_ms),
         ),
         (
             "Side Panel Width",
@@ -4728,7 +4732,7 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let content_x = list_area.x.saturating_add(1);
     let content_y = list_area.y.saturating_add(1);
     let content_width = list_area.width.saturating_sub(2);
-    for index in 0..5 {
+    for index in 0..field_rows.len() {
         let row = content_y.saturating_add(index as u16);
         if row
             < list_area
@@ -4792,6 +4796,22 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
         ],
         2 => vec![
+            TextSpan::new("Notification Duration")
+                .fg(theme.base.header)
+                .bold(),
+            TextSpan::new("How long task completion messages stay visible in tmux status lines.")
+                .fg(theme.base.text),
+            TextSpan::new(""),
+            TextSpan::new(format!("{:>8}: {}", "Range", "500 – 30 000 ms"))
+                .fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Step", "500 ms")).fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Default", "3 000 ms")).fg(theme.base.text_muted),
+            TextSpan::new(""),
+            TextSpan::new("  l / →    increase value").fg(theme.base.text_muted),
+            TextSpan::new("  h / ←    decrease value").fg(theme.base.text_muted),
+            TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
+        ],
+        3 => vec![
             TextSpan::new("Side Panel Width")
                 .fg(theme.base.header)
                 .bold(),
@@ -4809,7 +4829,7 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             TextSpan::new("  h / ←    decrease value").fg(theme.base.text_muted),
             TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
         ],
-        3 => {
+        4 => {
             let current = &app.settings.default_view;
             let mut lines = vec![
                 TextSpan::new("Default View").fg(theme.base.header).bold(),
@@ -4837,7 +4857,7 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             lines.push(TextSpan::new("  0         reset to default").fg(theme.base.text_muted));
             lines
         }
-        4 => {
+        5 => {
             let current = &app.settings.board_alignment_mode;
             let mut lines =
                 vec![

@@ -17,9 +17,11 @@ use super::SubagentTodoSummary;
 use crate::db::Database;
 use crate::opencode::status_server::SessionStatusMatch;
 use crate::opencode::{ServerStatusProvider, Status};
-use crate::types::{SessionMessageItem, SessionState, SessionStatusSource, SessionTodoItem};
+use crate::tmux::{tmux_broadcast_to_sessions, tmux_list_sessions};
+use crate::types::{SessionMessageItem, SessionState, SessionStatusSource, SessionTodoItem, Task};
 
 /// Spawn a background task that polls task status from the OpenCode server
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_status_poller(
     db_path: PathBuf,
     stop: Arc<AtomicBool>,
@@ -28,6 +30,8 @@ pub fn spawn_status_poller(
     session_title_cache: Arc<Mutex<HashMap<String, String>>>,
     session_message_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionMessageItem>>>>,
     poll_interval_ms: u64,
+    notification_display_duration_ms: u64,
+    _project_slug: Option<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let server_provider = ServerStatusProvider::default();
@@ -120,6 +124,7 @@ pub fn spawn_status_poller(
                             Status::Idle.as_str(),
                         ) {
                             let _ = db.update_task_needs_inspection_async(task.id, true).await;
+                            notify_task_completion(task, notification_display_duration_ms);
                         }
                     }
                     debug!(
@@ -208,6 +213,10 @@ pub fn spawn_status_poller(
                                             let _ = db
                                                 .update_task_needs_inspection_async(task.id, true)
                                                 .await;
+                                            notify_task_completion(
+                                                task,
+                                                notification_display_duration_ms,
+                                            );
                                         }
                                     }
 
@@ -261,6 +270,10 @@ pub fn spawn_status_poller(
                                             let _ = db
                                                 .update_task_needs_inspection_async(task.id, true)
                                                 .await;
+                                            notify_task_completion(
+                                                task,
+                                                notification_display_duration_ms,
+                                            );
                                         }
                                     }
 
@@ -315,6 +328,10 @@ pub fn spawn_status_poller(
                                         let _ = db
                                             .update_task_needs_inspection_async(task.id, true)
                                             .await;
+                                        notify_task_completion(
+                                            task,
+                                            notification_display_duration_ms,
+                                        );
                                     }
                                 }
 
@@ -674,6 +691,27 @@ fn find_eldest_ancestor_recursive(
 fn should_mark_needs_inspection(previous_status: &str, next_status: &str) -> bool {
     SessionState::from_raw_status(previous_status) == SessionState::Running
         && SessionState::from_raw_status(next_status) == SessionState::Idle
+}
+
+fn notify_task_completion(task: &Task, notification_display_duration_ms: u64) {
+    let sessions = tmux_list_sessions()
+        .into_iter()
+        .map(|session| session.name)
+        .collect::<Vec<_>>();
+    if sessions.is_empty() {
+        debug!(task_id = %task.id, "skipping completion notification with no tmux sessions");
+        return;
+    }
+
+    let message = format!("✓ Task completed | {}:{}", task.branch, task.title);
+    debug!(
+        task_id = %task.id,
+        session_count = sessions.len(),
+        notification_display_duration_ms,
+        message = %message,
+        "broadcasting completion notification to tmux sessions"
+    );
+    let _ = tmux_broadcast_to_sessions(&sessions, &message, notification_display_duration_ms);
 }
 
 #[cfg(test)]

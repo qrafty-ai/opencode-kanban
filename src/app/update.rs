@@ -172,7 +172,7 @@ impl App {
                     match state.active_section {
                         SettingsSection::General => {
                             state.general_selected_field =
-                                state.general_selected_field.saturating_add(1).min(4);
+                                state.general_selected_field.saturating_add(1).min(5);
                         }
                         SettingsSection::CategoryColors => {
                             state.category_color_selected = state
@@ -228,12 +228,20 @@ impl App {
                                     self.restart_status_poller();
                                 }
                                 2 => {
+                                    let next = self
+                                        .settings
+                                        .notification_display_duration_ms
+                                        .saturating_add(500);
+                                    self.settings.notification_display_duration_ms =
+                                        if next > 30_000 { 500 } else { next };
+                                }
+                                3 => {
                                     let next = self.settings.side_panel_width.saturating_add(5);
                                     self.settings.side_panel_width =
                                         if next > 80 { 20 } else { next };
                                     self.side_panel_width = self.settings.side_panel_width;
                                 }
-                                3 => {
+                                4 => {
                                     self.settings.default_view =
                                         if self.settings.default_view == "kanban" {
                                             "detail".to_string()
@@ -241,7 +249,7 @@ impl App {
                                             "kanban".to_string()
                                         };
                                 }
-                                4 => {
+                                5 => {
                                     self.settings.board_alignment_mode =
                                         if self.settings.board_alignment_mode == "fit" {
                                             "scroll".to_string()
@@ -310,11 +318,19 @@ impl App {
                             self.restart_status_poller();
                         }
                         2 => {
+                            let prev = self
+                                .settings
+                                .notification_display_duration_ms
+                                .saturating_sub(500);
+                            self.settings.notification_display_duration_ms =
+                                if prev < 500 { 30_000 } else { prev };
+                        }
+                        3 => {
                             let prev = self.settings.side_panel_width.saturating_sub(5);
                             self.settings.side_panel_width = if prev < 20 { 80 } else { prev };
                             self.side_panel_width = self.settings.side_panel_width;
                         }
-                        4 => {
+                        5 => {
                             self.settings.board_alignment_mode =
                                 if self.settings.board_alignment_mode == "fit" {
                                     "scroll".to_string()
@@ -345,10 +361,13 @@ impl App {
                             self.restart_status_poller();
                         }
                         2 => {
+                            self.settings.notification_display_duration_ms = 3_000;
+                        }
+                        3 => {
                             self.settings.side_panel_width = 40;
                             self.side_panel_width = 40;
                         }
-                        4 => {
+                        5 => {
                             self.settings.board_alignment_mode = "fit".to_string();
                             self.kanban_viewport_x = 0;
                         }
@@ -365,7 +384,7 @@ impl App {
             Message::SettingsSelectGeneralField(index) => {
                 if let Some(state) = &mut self.settings_view_state {
                     state.active_section = SettingsSection::General;
-                    state.general_selected_field = index.min(4);
+                    state.general_selected_field = index.min(5);
                 }
             }
             Message::SettingsSelectCategoryColor(index) => {
