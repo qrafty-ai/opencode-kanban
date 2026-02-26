@@ -216,6 +216,62 @@ pub fn tmux_list_sessions() -> Vec<TmuxSession> {
     sessions
 }
 
+pub fn tmux_display_message(
+    session_name: &str,
+    message: &str,
+    display_duration_ms: u64,
+) -> Result<()> {
+    let clients = tmux_list_clients_for_session(session_name);
+
+    if clients.is_empty() {
+        let output = tmux_command()
+            .args(display_message_args(
+                session_name,
+                message,
+                display_duration_ms,
+            ))
+            .output()
+            .context("failed to run tmux display-message")?;
+        return ensure_success_with_output(&output, "display-message");
+    }
+
+    for client_id in clients {
+        let output = tmux_command()
+            .args(display_message_to_client_args(
+                &client_id,
+                message,
+                display_duration_ms,
+            ))
+            .output()
+            .context("failed to run tmux display-message")?;
+        let _ = ensure_success_with_output(&output, "display-message");
+    }
+
+    Ok(())
+}
+
+pub fn tmux_list_project_sessions(project_slug: &str) -> Vec<String> {
+    let prefix = format!("ok-{project_slug}-");
+    let kanban_session = "opencode-kanban";
+
+    tmux_list_sessions()
+        .into_iter()
+        .filter(|s| s.name == kanban_session || s.name.starts_with(&prefix))
+        .map(|s| s.name)
+        .collect()
+}
+
+pub fn tmux_broadcast_to_sessions(
+    session_names: &[String],
+    message: &str,
+    display_duration_ms: u64,
+) -> Result<()> {
+    for session_name in session_names {
+        let _ = tmux_display_message(session_name, message, display_duration_ms);
+    }
+    Ok(())
+}
+
 pub fn tmux_get_pane_pid(session_name: &str) -> Option<u32> {
     let output = tmux_command()
         .args(list_panes_args(session_name))
@@ -313,6 +369,68 @@ fn kill_session_args(session_name: &str) -> Vec<String> {
         "kill-session".to_string(),
         "-t".to_string(),
         session_name.to_string(),
+    ]
+}
+
+fn display_message_args(
+    session_name: &str,
+    message: &str,
+    display_duration_ms: u64,
+) -> Vec<String> {
+    vec![
+        "display-message".to_string(),
+        "-t".to_string(),
+        format!("{session_name}:."),
+        "-d".to_string(),
+        display_duration_ms.to_string(),
+        message.to_string(),
+    ]
+}
+
+fn tmux_list_clients_for_session(session_name: &str) -> Vec<String> {
+    let output = match tmux_command()
+        .args(list_clients_args(session_name))
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return Vec::new(),
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn list_clients_args(session_name: &str) -> Vec<String> {
+    vec![
+        "list-clients".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+        "-F".to_string(),
+        "#{client_id}".to_string(),
+    ]
+}
+
+fn display_message_to_client_args(
+    client_id: &str,
+    message: &str,
+    display_duration_ms: u64,
+) -> Vec<String> {
+    vec![
+        "display-message".to_string(),
+        "-c".to_string(),
+        client_id.to_string(),
+        "-d".to_string(),
+        display_duration_ms.to_string(),
+        message.to_string(),
     ]
 }
 
@@ -622,6 +740,22 @@ mod tests {
         assert_eq!(
             kill_session_args("ok-test"),
             vec!["kill-session", "-t", "ok-test"]
+        );
+    }
+
+    #[test]
+    fn test_display_message_args_builder() {
+        assert_eq!(
+            display_message_args("ok-test", "done", 3_000),
+            vec!["display-message", "-t", "ok-test:.", "-d", "3000", "done"]
+        );
+    }
+
+    #[test]
+    fn test_display_message_to_client_args_builder() {
+        assert_eq!(
+            display_message_to_client_args("%1", "done", 3_000),
+            vec!["display-message", "-c", "%1", "-d", "3000", "done"]
         );
     }
 

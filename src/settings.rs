@@ -15,6 +15,9 @@ const DEFAULT_BOARD_ALIGNMENT_MODE: &str = "fit";
 const MIN_POLL_INTERVAL_MS: u64 = 500;
 const MAX_POLL_INTERVAL_MS: u64 = 30_000;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
+const MIN_NOTIFICATION_DISPLAY_DURATION_MS: u64 = 500;
+const MAX_NOTIFICATION_DISPLAY_DURATION_MS: u64 = 30_000;
+const DEFAULT_NOTIFICATION_DISPLAY_DURATION_MS: u64 = 3_000;
 const MIN_SIDE_PANEL_WIDTH: u16 = 20;
 const MAX_SIDE_PANEL_WIDTH: u16 = 80;
 const DEFAULT_SIDE_PANEL_WIDTH: u16 = 40;
@@ -30,6 +33,7 @@ pub struct Settings {
     pub default_view: String,
     pub board_alignment_mode: String,
     pub poll_interval_ms: u64,
+    pub notification_display_duration_ms: u64,
     pub side_panel_width: u16,
     pub scroll_column_width_chars: u16,
     pub terminal_executable: Option<String>,
@@ -55,6 +59,7 @@ impl Default for Settings {
             default_view: DEFAULT_DEFAULT_VIEW.to_string(),
             board_alignment_mode: DEFAULT_BOARD_ALIGNMENT_MODE.to_string(),
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
+            notification_display_duration_ms: DEFAULT_NOTIFICATION_DISPLAY_DURATION_MS,
             side_panel_width: DEFAULT_SIDE_PANEL_WIDTH,
             scroll_column_width_chars: DEFAULT_SCROLL_COLUMN_WIDTH_CHARS,
             terminal_executable: None,
@@ -158,6 +163,10 @@ impl Settings {
         self.poll_interval_ms = self
             .poll_interval_ms
             .clamp(MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS);
+        self.notification_display_duration_ms = self.notification_display_duration_ms.clamp(
+            MIN_NOTIFICATION_DISPLAY_DURATION_MS,
+            MAX_NOTIFICATION_DISPLAY_DURATION_MS,
+        );
         self.side_panel_width = self
             .side_panel_width
             .clamp(MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH);
@@ -309,6 +318,7 @@ mod tests {
         assert_eq!(settings.default_view, "kanban");
         assert_eq!(settings.board_alignment_mode, "fit");
         assert_eq!(settings.poll_interval_ms, 1_000);
+        assert_eq!(settings.notification_display_duration_ms, 3_000);
         assert_eq!(settings.side_panel_width, 40);
         assert_eq!(settings.scroll_column_width_chars, 42);
         assert_eq!(settings.terminal_executable, None);
@@ -351,6 +361,10 @@ mod tests {
         assert_eq!(settings.default_view, DEFAULT_DEFAULT_VIEW);
         assert_eq!(settings.board_alignment_mode, DEFAULT_BOARD_ALIGNMENT_MODE);
         assert_eq!(settings.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS);
+        assert_eq!(
+            settings.notification_display_duration_ms,
+            DEFAULT_NOTIFICATION_DISPLAY_DURATION_MS
+        );
         assert_eq!(settings.side_panel_width, DEFAULT_SIDE_PANEL_WIDTH);
         assert_eq!(
             settings.scroll_column_width_chars,
@@ -374,6 +388,7 @@ mod tests {
             default_view: "detail".to_string(),
             board_alignment_mode: "scroll".to_string(),
             poll_interval_ms: 2_500,
+            notification_display_duration_ms: 4_000,
             side_panel_width: 55,
             scroll_column_width_chars: 48,
             terminal_executable: Some("wezterm".to_string()),
@@ -400,6 +415,7 @@ mod tests {
             default_view: "kanban".to_string(),
             board_alignment_mode: "fit".to_string(),
             poll_interval_ms: 1,
+            notification_display_duration_ms: 1,
             side_panel_width: 999,
             scroll_column_width_chars: 999,
             terminal_executable: Some("   ".to_string()),
@@ -412,6 +428,10 @@ mod tests {
         settings.validate();
 
         assert_eq!(settings.poll_interval_ms, MIN_POLL_INTERVAL_MS);
+        assert_eq!(
+            settings.notification_display_duration_ms,
+            MIN_NOTIFICATION_DISPLAY_DURATION_MS
+        );
         assert_eq!(settings.side_panel_width, MAX_SIDE_PANEL_WIDTH);
         assert_eq!(
             settings.scroll_column_width_chars,
@@ -425,11 +445,16 @@ mod tests {
         );
 
         settings.poll_interval_ms = u64::MAX;
+        settings.notification_display_duration_ms = u64::MAX;
         settings.side_panel_width = 0;
         settings.scroll_column_width_chars = 0;
         settings.validate();
 
         assert_eq!(settings.poll_interval_ms, MAX_POLL_INTERVAL_MS);
+        assert_eq!(
+            settings.notification_display_duration_ms,
+            MAX_NOTIFICATION_DISPLAY_DURATION_MS
+        );
         assert_eq!(settings.side_panel_width, MIN_SIDE_PANEL_WIDTH);
         assert_eq!(
             settings.scroll_column_width_chars,
