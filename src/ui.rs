@@ -4668,10 +4668,10 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(10)])
+        .constraints([Constraint::Length(9), Constraint::Min(10)])
         .split(area);
 
-    let field_rows: [(&str, String); 6] = [
+    let field_rows: [(&str, String); 7] = [
         ("Theme", app.settings.theme.clone()),
         (
             "Poll Interval",
@@ -4680,6 +4680,10 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         (
             "Notification Duration",
             format!("{} ms", app.settings.notification_display_duration_ms),
+        ),
+        (
+            "Notification Backend",
+            app.settings.notification_backend.clone(),
         ),
         (
             "Side Panel Width",
@@ -4811,7 +4815,39 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             TextSpan::new("  h / ←    decrease value").fg(theme.base.text_muted),
             TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
         ],
-        3 => vec![
+        3 => {
+            let current = &app.settings.notification_backend;
+            let mut lines = vec![
+                TextSpan::new("Notification Backend")
+                    .fg(theme.base.header)
+                    .bold(),
+                TextSpan::new("Where to show task completion notifications.").fg(theme.base.text),
+                TextSpan::new(""),
+            ];
+            for (backend, desc) in [
+                ("tmux", "Tmux status line only"),
+                ("both", "Tmux status line and system notification"),
+                ("system", "System notification only"),
+                ("none", "No notifications"),
+            ] {
+                let marker = if current == backend { "●" } else { "○" };
+                lines.push(
+                    TextSpan::new(format!("  {} {:<10}  {}", marker, backend, desc)).fg(
+                        if current == backend {
+                            theme.interactive.focus
+                        } else {
+                            theme.base.text_muted
+                        },
+                    ),
+                );
+            }
+            lines.push(TextSpan::new(""));
+            lines.push(TextSpan::new("  l / →    cycle forward").fg(theme.base.text_muted));
+            lines.push(TextSpan::new("  h / ←    cycle backward").fg(theme.base.text_muted));
+            lines.push(TextSpan::new("  0         reset to default").fg(theme.base.text_muted));
+            lines
+        }
+        4 => vec![
             TextSpan::new("Side Panel Width")
                 .fg(theme.base.header)
                 .bold(),
@@ -4829,7 +4865,7 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             TextSpan::new("  h / ←    decrease value").fg(theme.base.text_muted),
             TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
         ],
-        4 => {
+        5 => {
             let current = &app.settings.default_view;
             let mut lines = vec![
                 TextSpan::new("Default View").fg(theme.base.header).bold(),
@@ -4857,7 +4893,7 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             lines.push(TextSpan::new("  0         reset to default").fg(theme.base.text_muted));
             lines
         }
-        5 => {
+        6 => {
             let current = &app.settings.board_alignment_mode;
             let mut lines =
                 vec![

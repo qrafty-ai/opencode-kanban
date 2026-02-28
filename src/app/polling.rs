@@ -15,10 +15,10 @@ use uuid::Uuid;
 
 use super::SubagentTodoSummary;
 use crate::db::Database;
+use crate::notification::{NotificationBackend, notify_task_completion};
 use crate::opencode::status_server::SessionStatusMatch;
 use crate::opencode::{ServerStatusProvider, Status};
-use crate::tmux::{tmux_broadcast_to_sessions, tmux_list_sessions};
-use crate::types::{SessionMessageItem, SessionState, SessionStatusSource, SessionTodoItem, Task};
+use crate::types::{SessionMessageItem, SessionState, SessionStatusSource, SessionTodoItem};
 
 /// Spawn a background task that polls task status from the OpenCode server
 #[allow(clippy::too_many_arguments)]
@@ -31,6 +31,7 @@ pub fn spawn_status_poller(
     session_message_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionMessageItem>>>>,
     poll_interval_ms: u64,
     notification_display_duration_ms: u64,
+    notification_backend: NotificationBackend,
     _project_slug: Option<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -219,6 +220,7 @@ pub fn spawn_status_poller(
                                             ) {
                                                 notify_task_completion(
                                                     task,
+                                                    notification_backend,
                                                     notification_display_duration_ms,
                                                 );
                                             }
@@ -283,6 +285,7 @@ pub fn spawn_status_poller(
                                             ) {
                                                 notify_task_completion(
                                                     task,
+                                                    notification_backend,
                                                     notification_display_duration_ms,
                                                 );
                                             }
@@ -727,27 +730,6 @@ fn should_notify_root_completion_without_status_match(
         Some(parent_session_id) => parent_session_id.is_none(),
         None => true,
     }
-}
-
-fn notify_task_completion(task: &Task, notification_display_duration_ms: u64) {
-    let sessions = tmux_list_sessions()
-        .into_iter()
-        .map(|session| session.name)
-        .collect::<Vec<_>>();
-    if sessions.is_empty() {
-        debug!(task_id = %task.id, "skipping completion notification with no tmux sessions");
-        return;
-    }
-
-    let message = format!("✓ Task completed | {}:{}", task.branch, task.title);
-    debug!(
-        task_id = %task.id,
-        session_count = sessions.len(),
-        notification_display_duration_ms,
-        message = %message,
-        "broadcasting completion notification to tmux sessions"
-    );
-    let _ = tmux_broadcast_to_sessions(&sessions, &message, notification_display_duration_ms);
 }
 
 #[cfg(test)]

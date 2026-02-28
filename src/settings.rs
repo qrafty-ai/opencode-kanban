@@ -18,6 +18,7 @@ const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
 const MIN_NOTIFICATION_DISPLAY_DURATION_MS: u64 = 500;
 const MAX_NOTIFICATION_DISPLAY_DURATION_MS: u64 = 30_000;
 const DEFAULT_NOTIFICATION_DISPLAY_DURATION_MS: u64 = 3_000;
+const DEFAULT_NOTIFICATION_BACKEND: &str = "tmux";
 const MIN_SIDE_PANEL_WIDTH: u16 = 20;
 const MAX_SIDE_PANEL_WIDTH: u16 = 80;
 const DEFAULT_SIDE_PANEL_WIDTH: u16 = 40;
@@ -34,6 +35,7 @@ pub struct Settings {
     pub board_alignment_mode: String,
     pub poll_interval_ms: u64,
     pub notification_display_duration_ms: u64,
+    pub notification_backend: String,
     pub side_panel_width: u16,
     pub scroll_column_width_chars: u16,
     pub terminal_executable: Option<String>,
@@ -60,6 +62,7 @@ impl Default for Settings {
             board_alignment_mode: DEFAULT_BOARD_ALIGNMENT_MODE.to_string(),
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             notification_display_duration_ms: DEFAULT_NOTIFICATION_DISPLAY_DURATION_MS,
+            notification_backend: DEFAULT_NOTIFICATION_BACKEND.to_string(),
             side_panel_width: DEFAULT_SIDE_PANEL_WIDTH,
             scroll_column_width_chars: DEFAULT_SCROLL_COLUMN_WIDTH_CHARS,
             terminal_executable: None,
@@ -167,6 +170,17 @@ impl Settings {
             MIN_NOTIFICATION_DISPLAY_DURATION_MS,
             MAX_NOTIFICATION_DISPLAY_DURATION_MS,
         );
+        let normalized_notification_backend = self.notification_backend.trim().to_ascii_lowercase();
+        self.notification_backend = match normalized_notification_backend.as_str() {
+            "tmux" | "system" | "both" | "none" => normalized_notification_backend,
+            _ => {
+                warn!(
+                    "invalid notification_backend '{}' in settings config; falling back to {}",
+                    self.notification_backend, DEFAULT_NOTIFICATION_BACKEND
+                );
+                DEFAULT_NOTIFICATION_BACKEND.to_string()
+            }
+        };
         self.side_panel_width = self
             .side_panel_width
             .clamp(MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH);
@@ -319,6 +333,7 @@ mod tests {
         assert_eq!(settings.board_alignment_mode, "fit");
         assert_eq!(settings.poll_interval_ms, 1_000);
         assert_eq!(settings.notification_display_duration_ms, 3_000);
+        assert_eq!(settings.notification_backend, "tmux");
         assert_eq!(settings.side_panel_width, 40);
         assert_eq!(settings.scroll_column_width_chars, 42);
         assert_eq!(settings.terminal_executable, None);
@@ -365,6 +380,7 @@ mod tests {
             settings.notification_display_duration_ms,
             DEFAULT_NOTIFICATION_DISPLAY_DURATION_MS
         );
+        assert_eq!(settings.notification_backend, DEFAULT_NOTIFICATION_BACKEND);
         assert_eq!(settings.side_panel_width, DEFAULT_SIDE_PANEL_WIDTH);
         assert_eq!(
             settings.scroll_column_width_chars,
@@ -389,6 +405,7 @@ mod tests {
             board_alignment_mode: "scroll".to_string(),
             poll_interval_ms: 2_500,
             notification_display_duration_ms: 4_000,
+            notification_backend: "both".to_string(),
             side_panel_width: 55,
             scroll_column_width_chars: 48,
             terminal_executable: Some("wezterm".to_string()),
@@ -416,6 +433,7 @@ mod tests {
             board_alignment_mode: "fit".to_string(),
             poll_interval_ms: 1,
             notification_display_duration_ms: 1,
+            notification_backend: "invalid".to_string(),
             side_panel_width: 999,
             scroll_column_width_chars: 999,
             terminal_executable: Some("   ".to_string()),
@@ -432,6 +450,7 @@ mod tests {
             settings.notification_display_duration_ms,
             MIN_NOTIFICATION_DISPLAY_DURATION_MS
         );
+        assert_eq!(settings.notification_backend, DEFAULT_NOTIFICATION_BACKEND);
         assert_eq!(settings.side_panel_width, MAX_SIDE_PANEL_WIDTH);
         assert_eq!(
             settings.scroll_column_width_chars,
@@ -509,6 +528,33 @@ mod tests {
         settings.validate();
 
         assert_eq!(settings.board_alignment_mode, "fit");
+    }
+
+    #[test]
+    fn test_validate_notification_backend_accepts_valid_values() {
+        for backend in ["tmux", "system", "both", "none", " SyStEm "] {
+            let mut settings = Settings {
+                notification_backend: backend.to_string(),
+                ..Settings::default()
+            };
+
+            settings.validate();
+
+            let expected = backend.trim().to_ascii_lowercase();
+            assert_eq!(settings.notification_backend, expected);
+        }
+    }
+
+    #[test]
+    fn test_validate_notification_backend_invalid_falls_back_to_default() {
+        let mut settings = Settings {
+            notification_backend: "desktop".to_string(),
+            ..Settings::default()
+        };
+
+        settings.validate();
+
+        assert_eq!(settings.notification_backend, DEFAULT_NOTIFICATION_BACKEND);
     }
 
     #[test]
