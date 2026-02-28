@@ -2633,7 +2633,7 @@ mod tests {
             settings_state.active_section,
             SettingsSection::CategoryColors
         );
-        assert_eq!(settings_state.general_selected_field, 5);
+        assert_eq!(settings_state.general_selected_field, 6);
         assert_eq!(
             settings_state.category_color_selected,
             app.categories.len().saturating_sub(1)
@@ -2711,7 +2711,7 @@ mod tests {
         app.settings.board_alignment_mode = "fit".to_string();
 
         app.update(Message::OpenSettings)?;
-        app.update(Message::SettingsSelectGeneralField(5))?;
+        app.update(Message::SettingsSelectGeneralField(6))?;
         app.kanban_viewport_x = 33;
 
         app.update(Message::SettingsToggle)?;

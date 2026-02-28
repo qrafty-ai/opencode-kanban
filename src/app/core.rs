@@ -1,4 +1,5 @@
 use super::*;
+use crate::notification::NotificationBackend;
 use crate::task_palette::TaskPaletteCandidate;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -244,6 +245,8 @@ impl App {
             Arc::clone(&app.session_message_cache),
             app.settings.poll_interval_ms,
             app.settings.notification_display_duration_ms,
+            NotificationBackend::from_settings_value(&app.settings.notification_backend)
+                .unwrap_or(NotificationBackend::Tmux),
             app.current_project_slug_for_tmux(),
         ));
         Ok(app)
@@ -357,6 +360,8 @@ impl App {
             Arc::clone(&self.session_message_cache),
             self.settings.poll_interval_ms,
             self.settings.notification_display_duration_ms,
+            NotificationBackend::from_settings_value(&self.settings.notification_backend)
+                .unwrap_or(NotificationBackend::Tmux),
             self.current_project_slug_for_tmux(),
         ));
     }
@@ -540,6 +545,8 @@ impl App {
             Arc::clone(&self.session_message_cache),
             self.settings.poll_interval_ms,
             self.settings.notification_display_duration_ms,
+            NotificationBackend::from_settings_value(&self.settings.notification_backend)
+                .unwrap_or(NotificationBackend::Tmux),
             project_slug,
         ));
 
