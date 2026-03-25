@@ -1069,3 +1069,13 @@ mod tests {
         assert_eq!(action, Some(KeyAction::OpenInNewTerminal));
     }
 }
+
+#[test]
+fn defaults_include_open_in_web() {
+    let keys = Keybindings::load();
+    let action = keys.action_for_key(
+        KeyContext::Board,
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::empty()),
+    );
+    assert_eq!(action, Some(KeyAction::OpenInWeb));
+}
