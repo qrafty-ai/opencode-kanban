@@ -54,6 +54,7 @@ pub enum KeyAction {
     MoveTaskUp,
     AttachTask,
     OpenInNewTerminal,
+    OpenInWeb,
     CycleTodoVisualization,
     Dismiss,
     ToggleCategoryEditMode,
@@ -400,6 +401,12 @@ const BOARD_DEFS: &[ActionDef] = &[
         defaults: &["o"],
     },
     ActionDef {
+        id: "open_in_web",
+        action: KeyAction::OpenInWeb,
+        description: "open selected task in web browser",
+        defaults: &["w"],
+    },
+    ActionDef {
         id: "cycle_todo_visualization",
         action: KeyAction::CycleTodoVisualization,
         description: "cycle todo visualization",
@@ -454,6 +461,7 @@ impl Keybindings {
             "open_in_new_terminal" => {
                 self.display_for(KeyContext::Board, KeyAction::OpenInNewTerminal)
             }
+            "open_in_web" => self.display_for(KeyContext::Board, KeyAction::OpenInWeb),
             "add_category" => self.display_for(KeyContext::Board, KeyAction::AddCategory),
             "rename_category" => self.display_for(KeyContext::Board, KeyAction::RenameCategory),
             "delete_category" => self.display_for(KeyContext::Board, KeyAction::DeleteCategory),
@@ -605,6 +613,11 @@ impl Keybindings {
             format!(
                 "  {}: open selected task in new terminal",
                 self.display_for(KeyContext::Board, KeyAction::OpenInNewTerminal)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "  {}: open selected task in web browser",
+                self.display_for(KeyContext::Board, KeyAction::OpenInWeb)
                     .unwrap_or_else(|| "-".to_string())
             ),
             format!(

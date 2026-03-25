@@ -63,6 +63,15 @@ impl App {
             }
             Message::AttachSelectedTask => self.attach_selected_task()?,
             Message::OpenSelectedTaskInNewTerminal => self.open_selected_task_in_new_terminal()?,
+            Message::OpenSelectedTaskInWeb => {
+                if let Some(task) = self.selected_task()
+                    && let (Some(session_id), Some(worktree_path)) =
+                        (&task.opencode_session_id, &task.worktree_path)
+                    && let Err(e) = crate::opencode::opencode_open_in_web(session_id, worktree_path)
+                {
+                    tracing::error!("Failed to open session in browser: {}", e);
+                }
+            }
             Message::OpenNewTaskDialog => {
                 let usage = repo_selection_usage_map(&self.db);
                 let ranked_repo_indexes = rank_repos_for_query("", &self.repos, &usage);

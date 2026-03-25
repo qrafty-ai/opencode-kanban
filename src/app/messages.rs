@@ -22,6 +22,7 @@ pub enum Message {
     SelectDown,
     AttachSelectedTask,
     OpenSelectedTaskInNewTerminal,
+    OpenSelectedTaskInWeb,
     OpenNewTaskDialog,
     OpenCommandPalette,
     OpenTaskPalette,

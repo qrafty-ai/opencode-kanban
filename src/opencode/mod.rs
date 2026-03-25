@@ -212,6 +212,14 @@ pub fn opencode_attach_command(session_id: Option<&str>, worktree_dir: Option<&s
     parts.join(" ")
 }
 
+pub fn opencode_open_in_web(session_id: &str, worktree_path: &str) -> Result<()> {
+    let encoded_path =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, worktree_path);
+    let url = format!("{DEFAULT_SERVER_URL}/{encoded_path}/session/{session_id}");
+    open::that(&url).with_context(|| format!("failed to open browser for session {session_id}"))?;
+    Ok(())
+}
+
 pub fn opencode_query_session_by_dir(working_dir: &Path) -> Result<Option<String>> {
     #[derive(Debug, Deserialize)]
     struct SessionListEntry {

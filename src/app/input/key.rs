@@ -335,6 +335,9 @@ impl App {
                 KeyAction::OpenInNewTerminal => {
                     self.update(Message::OpenSelectedTaskInNewTerminal)?;
                 }
+                KeyAction::OpenInWeb => {
+                    self.update(Message::OpenSelectedTaskInWeb)?;
+                }
                 KeyAction::CycleTodoVisualization => {
                     self.update(Message::CycleTodoVisualization)?;
                 }
