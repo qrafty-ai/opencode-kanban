@@ -212,6 +212,14 @@ pub fn opencode_attach_command(session_id: Option<&str>, worktree_dir: Option<&s
     parts.join(" ")
 }
 
+pub fn opencode_open_in_web(session_id: &str, worktree_path: &str) -> Result<()> {
+    let encoded_path =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, worktree_path);
+    let url = format!("{DEFAULT_SERVER_URL}/{encoded_path}/session/{session_id}");
+    open::that(&url).with_context(|| format!("failed to open browser for session {session_id}"))?;
+    Ok(())
+}
+
 pub fn opencode_query_session_by_dir(working_dir: &Path) -> Result<Option<String>> {
     #[derive(Debug, Deserialize)]
     struct SessionListEntry {
@@ -717,5 +725,23 @@ mod tests {
             .join()
             .expect("mock session lookup server thread should join");
         Ok(())
+    }
+    #[test]
+    fn test_open_in_web_generates_correct_url() {
+        let session_id = "test-session-123";
+        let worktree_path = "/home/user/projects/my-project";
+
+        // Test URL construction logic
+        let encoded_path =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, worktree_path);
+        let url = format!("{DEFAULT_SERVER_URL}/{encoded_path}/session/{session_id}");
+
+        // Verify the URL contains expected components
+        assert!(url.contains("http://127.0.0.1:4096/"));
+        assert!(url.contains("/session/test-session-123"));
+        assert!(url.contains(&encoded_path));
+
+        // Verify base64 encoding is correct
+        assert_eq!(encoded_path, "L2hvbWUvdXNlci9wcm9qZWN0cy9teS1wcm9qZWN0");
     }
 }

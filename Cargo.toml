@@ -36,6 +36,8 @@ termlauncher = "0.2"
 notify-rust = "4"
 uuid = { version = "1", features = ["v4", "serde"] }
 urlencoding = "2"
+open = "5"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
