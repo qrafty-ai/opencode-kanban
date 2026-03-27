@@ -19,6 +19,8 @@ const MIN_NOTIFICATION_DISPLAY_DURATION_MS: u64 = 500;
 const MAX_NOTIFICATION_DISPLAY_DURATION_MS: u64 = 30_000;
 const DEFAULT_NOTIFICATION_DISPLAY_DURATION_MS: u64 = 3_000;
 const DEFAULT_NOTIFICATION_BACKEND: &str = "tmux";
+const DEFAULT_COMPLETION_SOUND: &str = "none";
+const DEFAULT_COMPLETION_SOUND_VOLUME_PERCENT: u8 = 100;
 const MIN_SIDE_PANEL_WIDTH: u16 = 20;
 const MAX_SIDE_PANEL_WIDTH: u16 = 80;
 const DEFAULT_SIDE_PANEL_WIDTH: u16 = 40;
@@ -36,6 +38,8 @@ pub struct Settings {
     pub poll_interval_ms: u64,
     pub notification_display_duration_ms: u64,
     pub notification_backend: String,
+    pub completion_sound: String,
+    pub completion_sound_volume_percent: u8,
     pub side_panel_width: u16,
     pub scroll_column_width_chars: u16,
     pub terminal_executable: Option<String>,
@@ -63,6 +67,8 @@ impl Default for Settings {
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             notification_display_duration_ms: DEFAULT_NOTIFICATION_DISPLAY_DURATION_MS,
             notification_backend: DEFAULT_NOTIFICATION_BACKEND.to_string(),
+            completion_sound: DEFAULT_COMPLETION_SOUND.to_string(),
+            completion_sound_volume_percent: DEFAULT_COMPLETION_SOUND_VOLUME_PERCENT,
             side_panel_width: DEFAULT_SIDE_PANEL_WIDTH,
             scroll_column_width_chars: DEFAULT_SCROLL_COLUMN_WIDTH_CHARS,
             terminal_executable: None,
@@ -181,6 +187,18 @@ impl Settings {
                 DEFAULT_NOTIFICATION_BACKEND.to_string()
             }
         };
+        let normalized_completion_sound = self.completion_sound.trim().to_ascii_lowercase();
+        self.completion_sound = match normalized_completion_sound.as_str() {
+            "none" | "beep" => normalized_completion_sound,
+            _ => {
+                warn!(
+                    "invalid completion_sound '{}' in settings config; falling back to {}",
+                    self.completion_sound, DEFAULT_COMPLETION_SOUND
+                );
+                DEFAULT_COMPLETION_SOUND.to_string()
+            }
+        };
+        self.completion_sound_volume_percent = self.completion_sound_volume_percent.min(100);
         self.side_panel_width = self
             .side_panel_width
             .clamp(MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH);
@@ -334,6 +352,8 @@ mod tests {
         assert_eq!(settings.poll_interval_ms, 1_000);
         assert_eq!(settings.notification_display_duration_ms, 3_000);
         assert_eq!(settings.notification_backend, "tmux");
+        assert_eq!(settings.completion_sound, "none");
+        assert_eq!(settings.completion_sound_volume_percent, 100);
         assert_eq!(settings.side_panel_width, 40);
         assert_eq!(settings.scroll_column_width_chars, 42);
         assert_eq!(settings.terminal_executable, None);
@@ -381,6 +401,11 @@ mod tests {
             DEFAULT_NOTIFICATION_DISPLAY_DURATION_MS
         );
         assert_eq!(settings.notification_backend, DEFAULT_NOTIFICATION_BACKEND);
+        assert_eq!(settings.completion_sound, DEFAULT_COMPLETION_SOUND);
+        assert_eq!(
+            settings.completion_sound_volume_percent,
+            DEFAULT_COMPLETION_SOUND_VOLUME_PERCENT
+        );
         assert_eq!(settings.side_panel_width, DEFAULT_SIDE_PANEL_WIDTH);
         assert_eq!(
             settings.scroll_column_width_chars,
@@ -406,6 +431,8 @@ mod tests {
             poll_interval_ms: 2_500,
             notification_display_duration_ms: 4_000,
             notification_backend: "both".to_string(),
+            completion_sound: "beep".to_string(),
+            completion_sound_volume_percent: 65,
             side_panel_width: 55,
             scroll_column_width_chars: 48,
             terminal_executable: Some("wezterm".to_string()),
@@ -434,6 +461,8 @@ mod tests {
             poll_interval_ms: 1,
             notification_display_duration_ms: 1,
             notification_backend: "invalid".to_string(),
+            completion_sound: "invalid".to_string(),
+            completion_sound_volume_percent: u8::MAX,
             side_panel_width: 999,
             scroll_column_width_chars: 999,
             terminal_executable: Some("   ".to_string()),
@@ -451,6 +480,8 @@ mod tests {
             MIN_NOTIFICATION_DISPLAY_DURATION_MS
         );
         assert_eq!(settings.notification_backend, DEFAULT_NOTIFICATION_BACKEND);
+        assert_eq!(settings.completion_sound, DEFAULT_COMPLETION_SOUND);
+        assert_eq!(settings.completion_sound_volume_percent, 100);
         assert_eq!(settings.side_panel_width, MAX_SIDE_PANEL_WIDTH);
         assert_eq!(
             settings.scroll_column_width_chars,
@@ -555,6 +586,32 @@ mod tests {
         settings.validate();
 
         assert_eq!(settings.notification_backend, DEFAULT_NOTIFICATION_BACKEND);
+    }
+
+    #[test]
+    fn test_validate_completion_sound_accepts_valid_values() {
+        for sound in ["none", "beep", " BEEP "] {
+            let mut settings = Settings {
+                completion_sound: sound.to_string(),
+                ..Settings::default()
+            };
+
+            settings.validate();
+
+            assert_eq!(settings.completion_sound, sound.trim().to_ascii_lowercase());
+        }
+    }
+
+    #[test]
+    fn test_validate_completion_sound_invalid_falls_back_to_default() {
+        let mut settings = Settings {
+            completion_sound: "bell".to_string(),
+            ..Settings::default()
+        };
+
+        settings.validate();
+
+        assert_eq!(settings.completion_sound, DEFAULT_COMPLETION_SOUND);
     }
 
     #[test]
