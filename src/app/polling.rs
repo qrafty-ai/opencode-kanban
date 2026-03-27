@@ -15,23 +15,26 @@ use uuid::Uuid;
 
 use super::SubagentTodoSummary;
 use crate::db::Database;
-use crate::notification::{NotificationBackend, notify_task_completion};
+use crate::notification::{TaskCompletionNotificationConfig, notify_task_completion};
 use crate::opencode::status_server::SessionStatusMatch;
 use crate::opencode::{ServerStatusProvider, Status};
 use crate::types::{SessionMessageItem, SessionState, SessionStatusSource, SessionTodoItem};
 
+#[derive(Clone)]
+pub struct StatusPollerCaches {
+    pub session_todo_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionTodoItem>>>>,
+    pub session_subagent_cache: Arc<Mutex<HashMap<Uuid, Vec<SubagentTodoSummary>>>>,
+    pub session_title_cache: Arc<Mutex<HashMap<String, String>>>,
+    pub session_message_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionMessageItem>>>>,
+}
+
 /// Spawn a background task that polls task status from the OpenCode server
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_status_poller(
     db_path: PathBuf,
     stop: Arc<AtomicBool>,
-    session_todo_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionTodoItem>>>>,
-    session_subagent_cache: Arc<Mutex<HashMap<Uuid, Vec<SubagentTodoSummary>>>>,
-    session_title_cache: Arc<Mutex<HashMap<String, String>>>,
-    session_message_cache: Arc<Mutex<HashMap<Uuid, Vec<SessionMessageItem>>>>,
+    caches: StatusPollerCaches,
     poll_interval_ms: u64,
-    notification_display_duration_ms: u64,
-    notification_backend: NotificationBackend,
+    notification_config: TaskCompletionNotificationConfig,
     _project_slug: Option<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -72,24 +75,26 @@ pub fn spawn_status_poller(
                 }
             };
             let fetched_at = SystemTime::now();
-            let mut next_todo_cache: HashMap<Uuid, Vec<SessionTodoItem>> = session_todo_cache
+            let mut next_todo_cache: HashMap<Uuid, Vec<SessionTodoItem>> = caches
+                .session_todo_cache
                 .lock()
                 .ok()
                 .map(|cache| cache.clone())
                 .unwrap_or_default();
-            let mut next_subagent_cache: HashMap<Uuid, Vec<SubagentTodoSummary>> =
-                session_subagent_cache
-                    .lock()
-                    .ok()
-                    .map(|cache| cache.clone())
-                    .unwrap_or_default();
-            let mut next_message_cache: HashMap<Uuid, Vec<SessionMessageItem>> =
-                session_message_cache
-                    .lock()
-                    .ok()
-                    .map(|cache| cache.clone())
-                    .unwrap_or_default();
-            let mut next_title_cache: HashMap<String, String> = session_title_cache
+            let mut next_subagent_cache: HashMap<Uuid, Vec<SubagentTodoSummary>> = caches
+                .session_subagent_cache
+                .lock()
+                .ok()
+                .map(|cache| cache.clone())
+                .unwrap_or_default();
+            let mut next_message_cache: HashMap<Uuid, Vec<SessionMessageItem>> = caches
+                .session_message_cache
+                .lock()
+                .ok()
+                .map(|cache| cache.clone())
+                .unwrap_or_default();
+            let mut next_title_cache: HashMap<String, String> = caches
+                .session_title_cache
                 .lock()
                 .ok()
                 .map(|cache| cache.clone())
@@ -218,11 +223,7 @@ pub fn spawn_status_poller(
                                                 next_status,
                                                 &status_match,
                                             ) {
-                                                notify_task_completion(
-                                                    task,
-                                                    notification_backend,
-                                                    notification_display_duration_ms,
-                                                );
+                                                notify_task_completion(task, notification_config);
                                             }
                                         }
                                     }
@@ -283,11 +284,7 @@ pub fn spawn_status_poller(
                                                 task.opencode_session_id.as_deref(),
                                                 complete_session_parent_map.as_ref(),
                                             ) {
-                                                notify_task_completion(
-                                                    task,
-                                                    notification_backend,
-                                                    notification_display_duration_ms,
-                                                );
+                                                notify_task_completion(task, notification_config);
                                             }
                                         }
                                     }
@@ -430,22 +427,22 @@ pub fn spawn_status_poller(
                 break;
             }
 
-            if let Ok(mut cache) = session_todo_cache.lock() {
+            if let Ok(mut cache) = caches.session_todo_cache.lock() {
                 cache.clear();
                 cache.extend(next_todo_cache);
             }
 
-            if let Ok(mut cache) = session_subagent_cache.lock() {
+            if let Ok(mut cache) = caches.session_subagent_cache.lock() {
                 cache.clear();
                 cache.extend(next_subagent_cache);
             }
 
-            if let Ok(mut cache) = session_title_cache.lock() {
+            if let Ok(mut cache) = caches.session_title_cache.lock() {
                 cache.clear();
                 cache.extend(next_title_cache);
             }
 
-            if let Ok(mut cache) = session_message_cache.lock() {
+            if let Ok(mut cache) = caches.session_message_cache.lock() {
                 cache.clear();
                 cache.extend(next_message_cache);
             }

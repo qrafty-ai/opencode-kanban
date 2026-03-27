@@ -138,6 +138,22 @@ For full, current bindings, use the in-app help overlay (`?`).
 
 The app creates config/data files on demand.
 
+Additional top-level notification settings:
+
+- `notification_backend`: `tmux` | `system` | `both` | `none`
+- `notification_display_duration_ms`: `500..=30000`
+- `completion_sound`: `none` | `beep` (defaults to `none`)
+- `completion_sound_volume_percent`: `0..=100` (defaults to `100`; `0` skips audio init and playback)
+
+Example:
+
+```toml
+notification_backend = "both"
+notification_display_duration_ms = 3000
+completion_sound = "beep"
+completion_sound_volume_percent = 40
+```
+
 ### Theme configuration options
 
 Theme values live in `~/.config/opencode-kanban/settings.toml`.

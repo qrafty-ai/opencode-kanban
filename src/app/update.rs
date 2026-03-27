@@ -1,5 +1,5 @@
 use super::*;
-use crate::notification::NotificationBackend;
+use crate::notification::{CompletionSound, NotificationBackend};
 
 impl App {
     pub fn update(&mut self, message: Message) -> Result<()> {
@@ -182,7 +182,7 @@ impl App {
                     match state.active_section {
                         SettingsSection::General => {
                             state.general_selected_field =
-                                state.general_selected_field.saturating_add(1).min(6);
+                                state.general_selected_field.saturating_add(1).min(8);
                         }
                         SettingsSection::CategoryColors => {
                             state.category_color_selected = state
@@ -255,12 +255,30 @@ impl App {
                                     self.restart_status_poller();
                                 }
                                 4 => {
+                                    let sound = CompletionSound::from_settings_value(
+                                        &self.settings.completion_sound,
+                                    )
+                                    .unwrap_or_default();
+                                    self.settings.completion_sound =
+                                        sound.next().as_str().to_string();
+                                    self.restart_status_poller();
+                                }
+                                5 => {
+                                    let next = self
+                                        .settings
+                                        .completion_sound_volume_percent
+                                        .saturating_add(5);
+                                    self.settings.completion_sound_volume_percent =
+                                        if next > 100 { 0 } else { next };
+                                    self.restart_status_poller();
+                                }
+                                6 => {
                                     let next = self.settings.side_panel_width.saturating_add(5);
                                     self.settings.side_panel_width =
                                         if next > 80 { 20 } else { next };
                                     self.side_panel_width = self.settings.side_panel_width;
                                 }
-                                5 => {
+                                7 => {
                                     self.settings.default_view =
                                         if self.settings.default_view == "kanban" {
                                             "detail".to_string()
@@ -268,7 +286,7 @@ impl App {
                                             "kanban".to_string()
                                         };
                                 }
-                                6 => {
+                                8 => {
                                     self.settings.board_alignment_mode =
                                         if self.settings.board_alignment_mode == "fit" {
                                             "scroll".to_string()
@@ -354,11 +372,39 @@ impl App {
                             self.restart_status_poller();
                         }
                         4 => {
+                            let sound = CompletionSound::from_settings_value(
+                                &self.settings.completion_sound,
+                            )
+                            .unwrap_or_default();
+                            self.settings.completion_sound = sound.previous().as_str().to_string();
+                            self.restart_status_poller();
+                        }
+                        5 => {
+                            let prev = self
+                                .settings
+                                .completion_sound_volume_percent
+                                .saturating_sub(5);
+                            self.settings.completion_sound_volume_percent =
+                                if self.settings.completion_sound_volume_percent < 5 {
+                                    100
+                                } else {
+                                    prev
+                                };
+                            self.restart_status_poller();
+                        }
+                        6 => {
                             let prev = self.settings.side_panel_width.saturating_sub(5);
                             self.settings.side_panel_width = if prev < 20 { 80 } else { prev };
                             self.side_panel_width = self.settings.side_panel_width;
                         }
-                        6 => {
+                        7 => {
+                            self.settings.default_view = if self.settings.default_view == "kanban" {
+                                "detail".to_string()
+                            } else {
+                                "kanban".to_string()
+                            };
+                        }
+                        8 => {
                             self.settings.board_alignment_mode =
                                 if self.settings.board_alignment_mode == "fit" {
                                     "scroll".to_string()
@@ -397,10 +443,22 @@ impl App {
                             self.restart_status_poller();
                         }
                         4 => {
+                            self.settings.completion_sound =
+                                CompletionSound::default().as_str().to_string();
+                            self.restart_status_poller();
+                        }
+                        5 => {
+                            self.settings.completion_sound_volume_percent = 100;
+                            self.restart_status_poller();
+                        }
+                        6 => {
                             self.settings.side_panel_width = 40;
                             self.side_panel_width = 40;
                         }
-                        6 => {
+                        7 => {
+                            self.settings.default_view = "kanban".to_string();
+                        }
+                        8 => {
                             self.settings.board_alignment_mode = "fit".to_string();
                             self.kanban_viewport_x = 0;
                         }
@@ -417,7 +475,7 @@ impl App {
             Message::SettingsSelectGeneralField(index) => {
                 if let Some(state) = &mut self.settings_view_state {
                     state.active_section = SettingsSection::General;
-                    state.general_selected_field = index.min(6);
+                    state.general_selected_field = index.min(8);
                 }
             }
             Message::SettingsSelectCategoryColor(index) => {

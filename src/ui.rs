@@ -32,6 +32,7 @@ use crate::app::{
     ViewMode, category_color_label,
 };
 use crate::command_palette::all_commands;
+use crate::notification::CompletionSound;
 use crate::theme::{Theme, ThemePreset};
 use crate::types::{Category, SessionTodoItem, Task};
 
@@ -4668,10 +4669,10 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Min(10)])
+        .constraints([Constraint::Length(11), Constraint::Min(10)])
         .split(area);
 
-    let field_rows: [(&str, String); 7] = [
+    let field_rows: [(&str, String); 9] = [
         ("Theme", app.settings.theme.clone()),
         (
             "Poll Interval",
@@ -4684,6 +4685,11 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         (
             "Notification Backend",
             app.settings.notification_backend.clone(),
+        ),
+        ("Completion Sound", app.settings.completion_sound.clone()),
+        (
+            "Sound Volume",
+            format!("{}%", app.settings.completion_sound_volume_percent),
         ),
         (
             "Side Panel Width",
@@ -4848,6 +4854,38 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             lines
         }
         4 => vec![
+            TextSpan::new("Completion Sound")
+                .fg(theme.base.header)
+                .bold(),
+            TextSpan::new("Optional audio addon that plays alongside task completion notifications.")
+                .fg(theme.base.text),
+            TextSpan::new(""),
+            TextSpan::new(format!("{:>8}: {}", "Modes", "none | beep"))
+                .fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Default", CompletionSound::default().as_str()))
+                .fg(theme.base.text_muted),
+            TextSpan::new(""),
+            TextSpan::new("  l / →    cycle forward").fg(theme.base.text_muted),
+            TextSpan::new("  h / ←    cycle backward").fg(theme.base.text_muted),
+            TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
+        ],
+        5 => vec![
+            TextSpan::new("Completion Sound Volume")
+                .fg(theme.base.header)
+                .bold(),
+            TextSpan::new("Volume for the completion beep. Zero disables audio without changing the selected mode.")
+                .fg(theme.base.text),
+            TextSpan::new(""),
+            TextSpan::new(format!("{:>8}: {}", "Range", "0 – 100 %"))
+                .fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Step", "5 %")).fg(theme.base.text_muted),
+            TextSpan::new(format!("{:>8}: {}", "Default", "100 %")).fg(theme.base.text_muted),
+            TextSpan::new(""),
+            TextSpan::new("  l / →    increase value").fg(theme.base.text_muted),
+            TextSpan::new("  h / ←    decrease value").fg(theme.base.text_muted),
+            TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
+        ],
+        6 => vec![
             TextSpan::new("Side Panel Width")
                 .fg(theme.base.header)
                 .bold(),
@@ -4865,7 +4903,7 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             TextSpan::new("  h / ←    decrease value").fg(theme.base.text_muted),
             TextSpan::new("  0         reset to default").fg(theme.base.text_muted),
         ],
-        5 => {
+        7 => {
             let current = &app.settings.default_view;
             let mut lines = vec![
                 TextSpan::new("Default View").fg(theme.base.header).bold(),
@@ -4893,7 +4931,7 @@ fn render_settings_general(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             lines.push(TextSpan::new("  0         reset to default").fg(theme.base.text_muted));
             lines
         }
-        6 => {
+        8 => {
             let current = &app.settings.board_alignment_mode;
             let mut lines =
                 vec![

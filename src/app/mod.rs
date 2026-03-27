@@ -2633,7 +2633,7 @@ mod tests {
             settings_state.active_section,
             SettingsSection::CategoryColors
         );
-        assert_eq!(settings_state.general_selected_field, 6);
+        assert_eq!(settings_state.general_selected_field, 8);
         assert_eq!(
             settings_state.category_color_selected,
             app.categories.len().saturating_sub(1)
@@ -2711,7 +2711,7 @@ mod tests {
         app.settings.board_alignment_mode = "fit".to_string();
 
         app.update(Message::OpenSettings)?;
-        app.update(Message::SettingsSelectGeneralField(6))?;
+        app.update(Message::SettingsSelectGeneralField(8))?;
         app.kanban_viewport_x = 33;
 
         app.update(Message::SettingsToggle)?;
@@ -2727,6 +2727,41 @@ mod tests {
         app.update(Message::SettingsResetItem)?;
         assert_eq!(app.settings.board_alignment_mode, "fit");
         assert_eq!(app.kanban_viewport_x, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn settings_completion_sound_toggle_volume_and_reset_work() -> Result<()> {
+        let (mut app, _repo_dir, _task_id, _category_ids) = test_app_with_middle_task()?;
+
+        app.update(Message::OpenSettings)?;
+        app.update(Message::SettingsSelectGeneralField(4))?;
+        app.update(Message::SettingsToggle)?;
+        assert_eq!(app.settings.completion_sound, "beep");
+
+        app.update(Message::SettingsDecreaseItem)?;
+        assert_eq!(app.settings.completion_sound, "none");
+
+        app.update(Message::SettingsSelectGeneralField(5))?;
+        app.settings.completion_sound_volume_percent = 95;
+        app.update(Message::SettingsToggle)?;
+        assert_eq!(app.settings.completion_sound_volume_percent, 100);
+        app.update(Message::SettingsToggle)?;
+        assert_eq!(app.settings.completion_sound_volume_percent, 0);
+        app.update(Message::SettingsDecreaseItem)?;
+        assert_eq!(app.settings.completion_sound_volume_percent, 100);
+
+        app.settings.completion_sound = "beep".to_string();
+        app.settings.completion_sound_volume_percent = 25;
+        app.update(Message::SettingsSelectGeneralField(4))?;
+        app.update(Message::SettingsResetItem)?;
+        assert_eq!(app.settings.completion_sound, "none");
+        assert_eq!(app.settings.completion_sound_volume_percent, 25);
+
+        app.update(Message::SettingsSelectGeneralField(5))?;
+        app.update(Message::SettingsResetItem)?;
+        assert_eq!(app.settings.completion_sound_volume_percent, 100);
 
         Ok(())
     }
