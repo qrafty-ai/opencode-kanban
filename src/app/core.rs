@@ -1,5 +1,7 @@
 use super::*;
-use crate::notification::NotificationBackend;
+use crate::notification::{
+    CompletionSound, CompletionSoundConfig, NotificationBackend, TaskCompletionNotificationConfig,
+};
 use crate::task_palette::TaskPaletteCandidate;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -109,6 +111,28 @@ pub(crate) fn load_project_detail(
 }
 
 impl App {
+    fn status_poller_caches(&self) -> polling::StatusPollerCaches {
+        polling::StatusPollerCaches {
+            session_todo_cache: Arc::clone(&self.session_todo_cache),
+            session_subagent_cache: Arc::clone(&self.session_subagent_cache),
+            session_title_cache: Arc::clone(&self.session_title_cache),
+            session_message_cache: Arc::clone(&self.session_message_cache),
+        }
+    }
+
+    fn task_completion_notification_config(&self) -> TaskCompletionNotificationConfig {
+        TaskCompletionNotificationConfig {
+            backend: NotificationBackend::from_settings_value(&self.settings.notification_backend)
+                .unwrap_or(NotificationBackend::Tmux),
+            notification_display_duration_ms: self.settings.notification_display_duration_ms,
+            sound: CompletionSoundConfig {
+                sound: CompletionSound::from_settings_value(&self.settings.completion_sound)
+                    .unwrap_or_default(),
+                volume_percent: self.settings.completion_sound_volume_percent,
+            },
+        }
+    }
+
     pub fn active_session_count(&self) -> usize {
         self.tasks
             .iter()
@@ -239,14 +263,9 @@ impl App {
         app.poller_thread = Some(polling::spawn_status_poller(
             db_path,
             Arc::clone(&app.poller_stop),
-            Arc::clone(&app.session_todo_cache),
-            Arc::clone(&app.session_subagent_cache),
-            Arc::clone(&app.session_title_cache),
-            Arc::clone(&app.session_message_cache),
+            app.status_poller_caches(),
             app.settings.poll_interval_ms,
-            app.settings.notification_display_duration_ms,
-            NotificationBackend::from_settings_value(&app.settings.notification_backend)
-                .unwrap_or(NotificationBackend::Tmux),
+            app.task_completion_notification_config(),
             app.current_project_slug_for_tmux(),
         ));
         Ok(app)
@@ -345,6 +364,11 @@ impl App {
     }
 
     pub(crate) fn restart_status_poller(&mut self) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            tracing::debug!("skipping status poller restart outside a Tokio runtime");
+            return;
+        }
+
         self.poller_stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.poller_thread.take() {
             handle.abort();
@@ -354,14 +378,9 @@ impl App {
         self.poller_thread = Some(polling::spawn_status_poller(
             self.poller_db_path(),
             Arc::clone(&self.poller_stop),
-            Arc::clone(&self.session_todo_cache),
-            Arc::clone(&self.session_subagent_cache),
-            Arc::clone(&self.session_title_cache),
-            Arc::clone(&self.session_message_cache),
+            self.status_poller_caches(),
             self.settings.poll_interval_ms,
-            self.settings.notification_display_duration_ms,
-            NotificationBackend::from_settings_value(&self.settings.notification_backend)
-                .unwrap_or(NotificationBackend::Tmux),
+            self.task_completion_notification_config(),
             self.current_project_slug_for_tmux(),
         ));
     }
@@ -539,14 +558,9 @@ impl App {
         self.poller_thread = Some(polling::spawn_status_poller(
             path.clone(),
             Arc::clone(&self.poller_stop),
-            Arc::clone(&self.session_todo_cache),
-            Arc::clone(&self.session_subagent_cache),
-            Arc::clone(&self.session_title_cache),
-            Arc::clone(&self.session_message_cache),
+            self.status_poller_caches(),
             self.settings.poll_interval_ms,
-            self.settings.notification_display_duration_ms,
-            NotificationBackend::from_settings_value(&self.settings.notification_backend)
-                .unwrap_or(NotificationBackend::Tmux),
+            self.task_completion_notification_config(),
             project_slug,
         ));
 

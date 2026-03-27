@@ -1,9 +1,20 @@
 //! Notification backend module for system and tmux notifications
 
+pub mod sound;
+
 use crate::tmux::{tmux_broadcast_to_sessions, tmux_list_sessions};
 use crate::types::Task;
 use std::str::FromStr;
 use tracing::{debug, warn};
+
+pub use sound::{CompletionSound, CompletionSoundConfig};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskCompletionNotificationConfig {
+    pub backend: NotificationBackend,
+    pub notification_display_duration_ms: u64,
+    pub sound: CompletionSoundConfig,
+}
 
 /// Notification backend types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,12 +82,10 @@ impl FromStr for NotificationBackend {
 }
 
 /// Send task completion notification via configured backend(s)
-pub fn notify_task_completion(
-    task: &Task,
-    backend: NotificationBackend,
-    notification_display_duration_ms: u64,
-) {
-    let (send_tmux, send_system) = backend_targets(backend);
+pub fn notify_task_completion(task: &Task, config: TaskCompletionNotificationConfig) {
+    sound::play_completion_sound(config.sound);
+
+    let (send_tmux, send_system) = backend_targets(config.backend);
     if !send_tmux && !send_system {
         debug!(task_id = %task.id, "notification skipped (backend is none)");
         return;
@@ -85,11 +94,11 @@ pub fn notify_task_completion(
     let message = format!("✓ Task completed | {}:{}", task.branch, task.title);
 
     if send_tmux {
-        send_tmux_notification(task, &message, notification_display_duration_ms);
+        send_tmux_notification(task, &message, config.notification_display_duration_ms);
     }
 
     if send_system {
-        send_system_notification(task, &message, notification_display_duration_ms);
+        send_system_notification(task, &message, config.notification_display_duration_ms);
     }
 }
 
