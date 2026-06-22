@@ -138,7 +138,7 @@ fn send_tmux_notification(task: &Task, message: &str, notification_display_durat
 }
 
 fn send_system_notification(task: &Task, message: &str, notification_display_duration_ms: u64) {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         let timeout_ms = notification_display_duration_ms.min(u32::MAX as u64) as u32;
         debug!(
@@ -165,7 +165,7 @@ fn send_system_notification(task: &Task, message: &str, notification_display_dur
         }
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         debug!(
             task_id = %task.id,

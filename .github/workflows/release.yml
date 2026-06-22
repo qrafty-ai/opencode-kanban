@@ -398,6 +398,7 @@ jobs:
           archives["aarch64-unknown-linux-gnu"]="dist/release-artifacts/artifacts-build-local-aarch64-unknown-linux-gnu/opencode-kanban-aarch64-unknown-linux-gnu.tar.xz"
           archives["x86_64-apple-darwin"]="dist/release-artifacts/artifacts-build-local-x86_64-apple-darwin/opencode-kanban-x86_64-apple-darwin.tar.xz"
           archives["aarch64-apple-darwin"]="dist/release-artifacts/artifacts-build-local-aarch64-apple-darwin/opencode-kanban-aarch64-apple-darwin.tar.xz"
+          archives["x86_64-pc-windows-msvc"]="dist/release-artifacts/artifacts-build-local-x86_64-pc-windows-msvc/opencode-kanban-x86_64-pc-windows-msvc.zip"
 
           for target in "${!archives[@]}"; do
             archive="${archives[$target]}"
@@ -407,10 +408,18 @@ jobs:
             fi
 
             unpack_dir="$(mktemp -d)"
-            tar -xJf "${archive}" -C "${unpack_dir}"
+            if [[ "${archive}" == *.zip ]]; then
+              unzip -q "${archive}" -d "${unpack_dir}"
+              archive_base="$(basename "${archive}" .zip)"
+              source_path="${unpack_dir}/${archive_base}/opencode-kanban.exe"
+              destination_binary="opencode-kanban.exe"
+            else
+              tar -xJf "${archive}" -C "${unpack_dir}"
+              archive_base="$(basename "${archive}" .tar.xz)"
+              source_path="${unpack_dir}/${archive_base}/opencode-kanban"
+              destination_binary="opencode-kanban"
+            fi
 
-            archive_base="$(basename "${archive}" .tar.xz)"
-            source_path="${unpack_dir}/${archive_base}/opencode-kanban"
             if [[ ! -f "${source_path}" ]]; then
               echo "Binary not found in archive for ${target}: ${source_path}"
               exit 1
@@ -418,8 +427,8 @@ jobs:
 
             destination_dir="vendor/${target}/opencode-kanban"
             mkdir -p "${destination_dir}"
-            cp "${source_path}" "${destination_dir}/opencode-kanban"
-            chmod +x "${destination_dir}/opencode-kanban"
+            cp "${source_path}" "${destination_dir}/${destination_binary}"
+            chmod +x "${destination_dir}/${destination_binary}"
             rm -rf "${unpack_dir}"
           done
       - name: Setup Node.js

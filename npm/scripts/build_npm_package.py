@@ -14,6 +14,13 @@ BIN_SOURCE_PATH = NPM_ROOT / "bin" / "opencode-kanban.js"
 PACKAGE_NAME = "@qrafty-ai/opencode-kanban"
 
 
+def binary_name_for_target(target: str) -> str:
+    """Return the binary filename for the given Rust target triple."""
+    if "windows" in target or "win32" in target:
+        return "opencode-kanban.exe"
+    return "opencode-kanban"
+
+
 def package_name_to_filename(name: str) -> str:
     return name.replace("@", "").replace("/", "-")
 
@@ -40,6 +47,11 @@ PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
         "target": "aarch64-apple-darwin",
         "os": "darwin",
         "cpu": "arm64",
+    },
+    "win32-x64": {
+        "target": "x86_64-pc-windows-msvc",
+        "os": "win32",
+        "cpu": "x64",
     },
 }
 
@@ -143,7 +155,8 @@ def stage_platform_package(
     platform_config = PLATFORM_PACKAGES[platform_tag]
     target = platform_config["target"]
 
-    binary_path = vendor_src / target / "opencode-kanban" / "opencode-kanban"
+    bin_name = binary_name_for_target(target)
+    binary_path = vendor_src / target / "opencode-kanban" / bin_name
     if not binary_path.exists():
         raise RuntimeError(f"Missing binary for target {target}: {binary_path}")
 
@@ -152,12 +165,13 @@ def stage_platform_package(
     destination_vendor_root.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(vendor_src / target, destination_vendor_root)
 
-    staged_binary_path = destination_vendor_root / "opencode-kanban" / "opencode-kanban"
+    staged_binary_path = destination_vendor_root / "opencode-kanban" / bin_name
     if not staged_binary_path.exists():
         raise RuntimeError(
             f"Missing staged binary for target {target}: {staged_binary_path}"
         )
-    staged_binary_path.chmod(0o755)
+    if platform_config["os"] != "win32":
+        staged_binary_path.chmod(0o755)
 
     readme_src = ROOT / "README.md"
     if readme_src.exists():

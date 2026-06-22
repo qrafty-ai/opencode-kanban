@@ -166,11 +166,27 @@ fn run_app() -> Result<RunOutcome> {
 }
 
 fn validate_runtime_environment() -> Result<()> {
-    if !cfg!(target_os = "linux") && !cfg!(target_os = "macos") {
-        bail!("opencode-kanban supports only Linux and macOS.");
+    #[cfg(target_os = "windows")]
+    {
+        let wsl_status = std::process::Command::new("wsl.exe")
+            .args(["--status"])
+            .output()
+            .ok();
+        match wsl_status {
+            Some(out) if out.status.success() => {
+                // WSL2 is available — proceed (tmux runs inside WSL)
+            }
+            _ => {
+                bail!("Windows requires WSL2 with tmux installed. See https://learn.microsoft.com/en-us/windows/wsl/install");
+            }
+        }
+        return Ok(());
     }
 
-    ensure_tmux_installed()?;
+    #[cfg(not(target_os = "windows"))]
+    {
+        ensure_tmux_installed()?;
+    }
 
     if std::env::var_os("TMUX").is_none() {
         let session_name = "opencode-kanban";
