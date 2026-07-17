@@ -1670,14 +1670,19 @@ fn render_new_task_dialog(
             layout[2],
             Message::FocusNewTaskField(NewTaskField::Branch),
         );
-        render_input_component(
+        let base_picker_editing = state
+            .repo_picker
+            .as_ref()
+            .is_some_and(|picker| picker.target == RepoPickerTarget::Base);
+        render_repo_picker_input_component(
             frame,
             layout[3],
-            "Base",
+            "From",
             &state.base_input,
+            base_picker_editing,
             state.focused_field == NewTaskField::Base,
+            surface,
             theme,
-            None,
         );
         app.interaction_map.register_click(
             InteractionLayer::Dialog,
@@ -1753,6 +1758,14 @@ fn render_new_task_dialog(
             NewTaskField::Base => set_text_input_cursor(frame, layout[3], &state.base_input),
             NewTaskField::Title => set_text_input_cursor(frame, layout[4], &state.title_input),
             _ => {}
+        }
+        if let Some(error) = &state.source_error {
+            let area = layout[7];
+            let mut message = Label::default()
+                .text(error.as_str())
+                .foreground(theme.base.danger)
+                .background(surface);
+            message.view(frame, area);
         }
     }
 }
@@ -3343,6 +3356,10 @@ fn render_repo_picker_dialog(
             "Select Existing Directory",
             "Type path. Ctrl+n/p, Ctrl+j/k, or Up/Down move. Enter accept, Tab complete, Esc close",
         ),
+        RepoPickerTarget::Base => (
+            "Select Source Branch",
+            "Local and origin branches. Type any ref, Enter accept, Tab complete, Esc close",
+        ),
     };
 
     render_input_component(
@@ -3368,6 +3385,8 @@ fn render_repo_picker_dialog(
         let kind = match suggestion.kind {
             crate::app::RepoSuggestionKind::KnownRepo { .. } => "Repo",
             crate::app::RepoSuggestionKind::FolderPath => "Folder",
+            crate::app::RepoSuggestionKind::Branch { is_remote: true } => "Origin",
+            crate::app::RepoSuggestionKind::Branch { is_remote: false } => "Local",
         };
         rows.add_col(TextSpan::from(kind.to_string()))
             .add_col(TextSpan::from(suggestion.label.clone()))

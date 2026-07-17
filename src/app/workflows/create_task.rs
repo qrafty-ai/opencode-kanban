@@ -115,13 +115,20 @@ pub(crate) fn create_task_pipeline_with_runtime(
             .git_validate_branch(&repo_path, &branch)
             .context("branch validation failed")?;
 
-        let base_ref = if state.base_input.trim().is_empty() {
+        let mut base_ref = if state.base_input.trim().is_empty() {
             runtime.git_detect_default_branch(&repo_path)
         } else {
             state.base_input.trim().to_string()
         };
 
-        if let Err(err) = runtime.git_fetch(&repo_path) {
+        if state.base_is_remote {
+            runtime
+                .git_fetch(&repo_path)
+                .context("failed to fetch origin; no task was created")?;
+            base_ref = runtime
+                .git_resolve_remote_ref(&repo_path, &base_ref)
+                .context("selected origin branch is no longer available; no task was created")?;
+        } else if let Err(err) = runtime.git_fetch(&repo_path) {
             let message = format!("fetch from origin failed, continuing offline: {err:#}");
             tracing::warn!("{message}");
             warning = Some(message);
@@ -145,6 +152,14 @@ pub(crate) fn create_task_pipeline_with_runtime(
         runtime
             .git_create_worktree(&repo_path, &derived_worktree_path, &branch, &base_ref)
             .context("worktree creation failed")?;
+
+        if state.base_is_remote
+            && let Err(error) = runtime.git_set_upstream(&derived_worktree_path, &branch, &base_ref)
+        {
+            let _ = runtime.git_remove_worktree(&repo_path, &derived_worktree_path);
+            return Err(error)
+                .context("worktree was created but upstream tracking could not be configured");
+        }
 
         (repo, branch, repo_path, derived_worktree_path, true)
     };
@@ -482,13 +497,213 @@ fn repo_selection_bonus(
 
 #[cfg(test)]
 mod tests {
+    use super::create_task_pipeline_with_runtime;
     use super::{
         generate_human_readable_branch_slug, rank_repos_for_query, resolve_create_task_branch,
         resolve_task_title,
     };
+    use crate::app::runtime::CreateTaskRuntime;
+    use crate::app::state::{NewTaskDialogState, NewTaskField};
+    use crate::db::Database;
     use crate::types::Repo;
+    use anyhow::Result;
+    use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
     use uuid::Uuid;
+
+    struct FakeCreateRuntime {
+        fetch_error: Option<String>,
+        resolve_error: Option<String>,
+        fetched: RefCell<bool>,
+        created: RefCell<bool>,
+        upstream: RefCell<Vec<String>>,
+    }
+
+    impl FakeCreateRuntime {
+        fn new(fetch_error: Option<&str>, resolve_error: Option<&str>) -> Self {
+            Self {
+                fetch_error: fetch_error.map(str::to_string),
+                resolve_error: resolve_error.map(str::to_string),
+                fetched: RefCell::new(false),
+                created: RefCell::new(false),
+                upstream: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CreateTaskRuntime for FakeCreateRuntime {
+        fn git_is_valid_repo(&self, _: &Path) -> bool {
+            true
+        }
+        fn git_resolve_repo_root(&self, path: &Path) -> Result<PathBuf> {
+            Ok(path.to_path_buf())
+        }
+        fn git_current_branch(&self, _: &Path) -> Result<String> {
+            Ok("main".into())
+        }
+        fn git_detect_default_branch(&self, _: &Path) -> String {
+            "main".into()
+        }
+        fn git_fetch(&self, _: &Path) -> Result<()> {
+            *self.fetched.borrow_mut() = true;
+            match &self.fetch_error {
+                Some(error) => Err(anyhow::anyhow!(error.clone())),
+                None => Ok(()),
+            }
+        }
+        fn git_resolve_remote_ref(&self, _: &Path, source: &str) -> Result<String> {
+            match &self.resolve_error {
+                Some(error) => Err(anyhow::anyhow!(error.clone())),
+                None => Ok(source.to_string()),
+            }
+        }
+        fn git_validate_branch(&self, _: &Path, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn git_check_branch_up_to_date(&self, _: &Path, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn git_create_worktree(&self, _: &Path, _: &Path, _: &str, _: &str) -> Result<()> {
+            *self.created.borrow_mut() = true;
+            Ok(())
+        }
+        fn git_set_upstream(&self, _: &Path, branch: &str, source: &str) -> Result<()> {
+            self.upstream
+                .borrow_mut()
+                .push(format!("{branch}:{source}"));
+            Ok(())
+        }
+        fn git_remove_worktree(&self, _: &Path, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn tmux_session_exists(&self, _: &str) -> bool {
+            false
+        }
+        fn tmux_create_session(&self, _: &str, _: &Path, _: Option<&str>) -> Result<()> {
+            Ok(())
+        }
+        fn tmux_apply_task_status_bar(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn tmux_kill_session(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn pipeline_state(repo_path: &Path, remote: bool) -> NewTaskDialogState {
+        NewTaskDialogState {
+            repo_idx: 0,
+            repo_input: repo_path.display().to_string(),
+            repo_picker: None,
+            use_existing_directory: false,
+            existing_dir_input: String::new(),
+            branch_input: "feature/workflow".into(),
+            base_input: "origin/main".into(),
+            base_is_remote: remote,
+            source_error: None,
+            title_input: "Workflow test".into(),
+            ensure_base_up_to_date: false,
+            loading_message: None,
+            focused_field: NewTaskField::Base,
+        }
+    }
+
+    fn pipeline_fixture() -> (TempDir, Database, Repo) {
+        let temp = TempDir::new().expect("temp dir");
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("repo path");
+        let db = Database::open(":memory:").expect("db");
+        let repo = db.add_repo(&repo_path).expect("repo");
+        (temp, db, repo)
+    }
+
+    #[test]
+    fn remote_fetch_failure_stops_creation_before_worktree_or_task() {
+        let (_temp, db, repo) = pipeline_fixture();
+        let categories = db.list_categories().expect("categories");
+        let runtime = FakeCreateRuntime::new(Some("offline"), None);
+        let error = create_task_pipeline_with_runtime(
+            &db,
+            &mut vec![repo.clone()],
+            categories[0].id,
+            &pipeline_state(Path::new(&repo.path), true),
+            None,
+            &runtime,
+        )
+        .expect_err("fetch failure");
+        assert!(error.to_string().contains("failed to fetch origin"));
+        assert!(*runtime.fetched.borrow());
+        assert!(!*runtime.created.borrow());
+        assert_eq!(db.list_tasks().expect("tasks").len(), 0);
+    }
+
+    #[test]
+    fn remote_resolution_failure_stops_creation_after_fetch() {
+        let (_temp, db, repo) = pipeline_fixture();
+        let categories = db.list_categories().expect("categories");
+        let runtime = FakeCreateRuntime::new(None, Some("missing ref"));
+        let error = create_task_pipeline_with_runtime(
+            &db,
+            &mut vec![repo.clone()],
+            categories[0].id,
+            &pipeline_state(Path::new(&repo.path), true),
+            None,
+            &runtime,
+        )
+        .expect_err("resolution failure");
+        assert!(
+            error
+                .to_string()
+                .contains("selected origin branch is no longer available")
+        );
+        assert!(*runtime.fetched.borrow());
+        assert!(!*runtime.created.borrow());
+        assert_eq!(db.list_tasks().expect("tasks").len(), 0);
+    }
+
+    #[test]
+    fn only_explicit_remote_sources_configure_upstream() {
+        let (_temp, db, repo) = pipeline_fixture();
+        let category = db.list_categories().expect("categories")[0].id;
+        let remote_runtime = FakeCreateRuntime::new(None, None);
+        create_task_pipeline_with_runtime(
+            &db,
+            &mut vec![repo.clone()],
+            category,
+            &pipeline_state(Path::new(&repo.path), true),
+            None,
+            &remote_runtime,
+        )
+        .expect("remote task");
+        assert_eq!(
+            remote_runtime.upstream.borrow().as_slice(),
+            &["feature/workflow:origin/main"]
+        );
+
+        let local_runtime = FakeCreateRuntime::new(None, None);
+        let mut local = pipeline_state(Path::new(&repo.path), false);
+        local.base_input = "main".into();
+        local.branch_input = "feature/local".into();
+        create_task_pipeline_with_runtime(
+            &db,
+            &mut vec![repo],
+            category,
+            &local,
+            None,
+            &local_runtime,
+        )
+        .expect("local task");
+        assert!(local_runtime.upstream.borrow().is_empty());
+    }
 
     #[test]
     fn resolve_create_task_branch_rejects_empty_branch_and_title() {

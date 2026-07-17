@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::db::Database;
+use crate::git::{git_fetch, git_source_branches};
 use crate::types::{Category, Repo};
 
 use super::messages::Message;
@@ -247,12 +248,14 @@ fn handle_new_task_dialog_key(
             state.repo_idx = state.repo_idx.saturating_sub(1);
             if let Some(repo) = repos.get(state.repo_idx) {
                 state.base_input = repo_default_base(repo);
+                state.base_is_remote = false;
             }
         }
         KeyCode::Right if state.focused_field == NewTaskField::Repo && !repos.is_empty() => {
             state.repo_idx = (state.repo_idx + 1).min(repos.len() - 1);
             if let Some(repo) = repos.get(state.repo_idx) {
                 state.base_input = repo_default_base(repo);
+                state.base_is_remote = false;
             }
         }
         KeyCode::Left if state.focused_field == NewTaskField::Create => {
@@ -283,6 +286,7 @@ fn handle_new_task_dialog_key(
             }
             NewTaskField::Base => {
                 state.base_input.pop();
+                state.base_is_remote = false;
             }
             NewTaskField::Title => {
                 state.title_input.pop();
@@ -294,6 +298,8 @@ fn handle_new_task_dialog_key(
                 open_repo_picker(state, RepoPickerTarget::Repo, repos, db);
             } else if state.focused_field == NewTaskField::ExistingDirectory {
                 open_repo_picker(state, RepoPickerTarget::ExistingDirectory, repos, db);
+            } else if state.focused_field == NewTaskField::Base {
+                open_base_picker(state, repos);
             } else {
                 *follow_up = Some(match state.focused_field {
                     NewTaskField::Cancel => Message::DismissDialog,
@@ -305,7 +311,10 @@ fn handle_new_task_dialog_key(
             NewTaskField::Repo => state.repo_input.push(ch),
             NewTaskField::ExistingDirectory => state.existing_dir_input.push(ch),
             NewTaskField::Branch => state.branch_input.push(ch),
-            NewTaskField::Base => state.base_input.push(ch),
+            NewTaskField::Base => {
+                state.base_input.push(ch);
+                state.base_is_remote = false;
+            }
             NewTaskField::Title => state.title_input.push(ch),
             _ => {}
         },
@@ -331,6 +340,7 @@ fn open_repo_picker(
             }
         }
         RepoPickerTarget::ExistingDirectory => state.existing_dir_input.clone(),
+        RepoPickerTarget::Base => state.base_input.clone(),
     };
 
     let mut picker = super::state::RepoPickerDialogState {
@@ -340,6 +350,25 @@ fn open_repo_picker(
         suggestions: Vec::new(),
     };
     refresh_repo_picker_suggestions(&mut picker, repos, db);
+    state.repo_picker = Some(picker);
+}
+
+fn open_base_picker(state: &mut NewTaskDialogState, repos: &[Repo]) {
+    let Some(repo) = repos.get(state.repo_idx) else {
+        return;
+    };
+    let mut picker = super::state::RepoPickerDialogState {
+        target: RepoPickerTarget::Base,
+        query: state.base_input.clone(),
+        selected_index: 0,
+        suggestions: Vec::new(),
+    };
+    if let Err(error) = git_fetch(Path::new(&repo.path)) {
+        state.source_error = Some(format!("Unable to refresh origin branches: {error:#}"));
+    } else {
+        refresh_base_picker_suggestions(&mut picker, &repo.path);
+        state.source_error = None;
+    }
     state.repo_picker = Some(picker);
 }
 
@@ -366,7 +395,13 @@ fn handle_repo_picker_key(
             KeyCode::Tab => {
                 if let Some(selected) = picker.suggestions.get(picker.selected_index) {
                     picker.query = selected.value.clone();
-                    refresh_repo_picker_suggestions(picker, repos, db);
+                    if picker.target == RepoPickerTarget::Base {
+                        if let Some(repo) = repos.get(state.repo_idx) {
+                            refresh_base_picker_suggestions(picker, &repo.path);
+                        }
+                    } else {
+                        refresh_repo_picker_suggestions(picker, repos, db);
+                    }
                 }
             }
             KeyCode::Up => move_picker_selection(picker, -1),
@@ -385,14 +420,26 @@ fn handle_repo_picker_key(
             }
             KeyCode::Backspace => {
                 picker.query.pop();
-                refresh_repo_picker_suggestions(picker, repos, db);
+                if picker.target == RepoPickerTarget::Base {
+                    if let Some(repo) = repos.get(state.repo_idx) {
+                        refresh_base_picker_suggestions(picker, &repo.path);
+                    }
+                } else {
+                    refresh_repo_picker_suggestions(picker, repos, db);
+                }
             }
             KeyCode::Char(ch)
                 if !key.modifiers.contains(KeyModifiers::CONTROL)
                     && !key.modifiers.contains(KeyModifiers::ALT) =>
             {
                 picker.query.push(ch);
-                refresh_repo_picker_suggestions(picker, repos, db);
+                if picker.target == RepoPickerTarget::Base {
+                    if let Some(repo) = repos.get(state.repo_idx) {
+                        refresh_base_picker_suggestions(picker, &repo.path);
+                    }
+                } else {
+                    refresh_repo_picker_suggestions(picker, repos, db);
+                }
             }
             _ => {}
         }
@@ -404,11 +451,51 @@ fn handle_repo_picker_key(
             .as_ref()
             .map(|picker| picker.target.clone())
             .unwrap_or(RepoPickerTarget::Repo);
-        apply_repo_suggestion(state, repos, target, &suggestion);
+        if target == RepoPickerTarget::Base {
+            apply_base_suggestion(state, &suggestion);
+        } else {
+            apply_repo_suggestion(state, repos, target, &suggestion);
+        }
     }
     if dismiss {
         state.repo_picker = None;
     }
+}
+
+fn apply_base_suggestion(state: &mut NewTaskDialogState, suggestion: &RepoSuggestionItem) {
+    state.base_input = suggestion.value.clone();
+    state.base_is_remote = matches!(
+        suggestion.kind,
+        RepoSuggestionKind::Branch { is_remote: true }
+    );
+    if state.base_is_remote
+        && state.branch_input.trim().is_empty()
+        && let Some(short_name) = suggestion.value.strip_prefix("origin/")
+    {
+        state.branch_input = short_name.to_string();
+    }
+    state.source_error = None;
+}
+
+fn refresh_base_picker_suggestions(
+    picker: &mut super::state::RepoPickerDialogState,
+    repo_path: &str,
+) {
+    let query = picker.query.trim().to_ascii_lowercase();
+    picker.suggestions = git_source_branches(Path::new(repo_path))
+        .into_iter()
+        .filter(|branch| query.is_empty() || branch.name.to_ascii_lowercase().contains(&query))
+        .map(|branch| RepoSuggestionItem {
+            label: branch.name.clone(),
+            value: branch.name,
+            kind: RepoSuggestionKind::Branch {
+                is_remote: branch.is_remote,
+            },
+        })
+        .collect();
+    picker.selected_index = picker
+        .selected_index
+        .min(picker.suggestions.len().saturating_sub(1));
 }
 
 fn refresh_repo_picker_suggestions(
@@ -464,6 +551,7 @@ fn apply_repo_suggestion(
     let repo_idx_from_suggestion = match suggestion.kind {
         RepoSuggestionKind::KnownRepo { repo_idx } => Some(repo_idx),
         RepoSuggestionKind::FolderPath => find_repo_idx_by_path_value(repos, &suggestion.value),
+        RepoSuggestionKind::Branch { .. } => None,
     };
 
     if let Some(repo_idx) = repo_idx_from_suggestion {
@@ -1249,6 +1337,8 @@ mod tests {
             existing_dir_input: String::new(),
             branch_input: String::new(),
             base_input: "main".to_string(),
+            base_is_remote: false,
+            source_error: None,
             title_input: String::new(),
             ensure_base_up_to_date: true,
             loading_message: None,
@@ -1265,6 +1355,8 @@ mod tests {
             existing_dir_input: String::new(),
             branch_input: String::new(),
             base_input: "main".to_string(),
+            base_is_remote: false,
+            source_error: None,
             title_input: String::new(),
             ensure_base_up_to_date: true,
             loading_message: None,
@@ -1294,6 +1386,64 @@ mod tests {
         assert_eq!(state.focused_field, NewTaskField::Repo);
         assert!(follow_up.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn manually_editing_selected_remote_source_disables_remote_tracking() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let mut repos = vec![test_repo(Uuid::new_v4(), "frontend-app", "main")];
+        let mut state = repo_focused_state();
+        state.focused_field = NewTaskField::Base;
+        state.base_input = "origin/feature".to_string();
+        state.base_is_remote = true;
+        let mut follow_up = None;
+
+        handle_new_task_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+        assert!(!state.base_is_remote);
+
+        state.base_is_remote = true;
+        handle_new_task_dialog_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+            repos.as_mut_slice(),
+            &db,
+            &mut follow_up,
+        );
+        assert!(!state.base_is_remote);
+        Ok(())
+    }
+
+    #[test]
+    fn selecting_remote_source_marks_tracking_and_prefills_branch_but_local_does_not() {
+        let mut remote_state = repo_focused_state();
+        apply_base_suggestion(
+            &mut remote_state,
+            &RepoSuggestionItem {
+                label: "origin/release".into(),
+                value: "origin/release".into(),
+                kind: RepoSuggestionKind::Branch { is_remote: true },
+            },
+        );
+        assert!(remote_state.base_is_remote);
+        assert_eq!(remote_state.branch_input, "release");
+
+        let mut local_state = repo_focused_state();
+        apply_base_suggestion(
+            &mut local_state,
+            &RepoSuggestionItem {
+                label: "release".into(),
+                value: "release".into(),
+                kind: RepoSuggestionKind::Branch { is_remote: false },
+            },
+        );
+        assert!(!local_state.base_is_remote);
+        assert!(local_state.branch_input.is_empty());
     }
 
     #[test]

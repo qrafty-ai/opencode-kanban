@@ -89,6 +89,8 @@ impl App {
                     existing_dir_input: String::new(),
                     branch_input: String::new(),
                     base_input: default_base,
+                    base_is_remote: false,
+                    source_error: None,
                     title_input: String::new(),
                     ensure_base_up_to_date: true,
                     loading_message: None,

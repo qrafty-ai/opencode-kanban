@@ -25,12 +25,14 @@ pub enum NewTaskField {
 pub enum RepoSuggestionKind {
     KnownRepo { repo_idx: usize },
     FolderPath,
+    Branch { is_remote: bool },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RepoPickerTarget {
     Repo,
     ExistingDirectory,
+    Base,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -57,6 +59,8 @@ pub struct NewTaskDialogState {
     pub existing_dir_input: String,
     pub branch_input: String,
     pub base_input: String,
+    pub base_is_remote: bool,
+    pub source_error: Option<String>,
     pub title_input: String,
     pub ensure_base_up_to_date: bool,
     pub loading_message: Option<String>,

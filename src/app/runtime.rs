@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use crate::git::{
     git_check_branch_up_to_date, git_create_worktree, git_detect_default_branch, git_fetch,
-    git_is_valid_repo, git_remove_worktree,
+    git_is_valid_repo, git_remove_worktree, git_resolve_remote_ref, git_set_upstream,
 };
 use crate::process::command;
 use crate::tmux::{
@@ -118,6 +118,7 @@ pub trait CreateTaskRuntime {
     fn git_current_branch(&self, path: &Path) -> Result<String>;
     fn git_detect_default_branch(&self, repo_path: &Path) -> String;
     fn git_fetch(&self, repo_path: &Path) -> Result<()>;
+    fn git_resolve_remote_ref(&self, repo_path: &Path, source: &str) -> Result<String>;
     fn git_validate_branch(&self, repo_path: &Path, branch_name: &str) -> Result<()>;
     fn git_check_branch_up_to_date(&self, repo_path: &Path, base_ref: &str) -> Result<()>;
     fn git_create_worktree(
@@ -127,6 +128,7 @@ pub trait CreateTaskRuntime {
         branch_name: &str,
         base_ref: &str,
     ) -> Result<()>;
+    fn git_set_upstream(&self, repo_path: &Path, branch: &str, remote_source: &str) -> Result<()>;
     fn git_remove_worktree(&self, repo_path: &Path, worktree_path: &Path) -> Result<()>;
     fn tmux_session_exists(&self, session_name: &str) -> bool;
     fn tmux_create_session(
@@ -205,6 +207,10 @@ impl CreateTaskRuntime for RealCreateTaskRuntime {
         git_fetch(repo_path)
     }
 
+    fn git_resolve_remote_ref(&self, repo_path: &Path, source: &str) -> Result<String> {
+        git_resolve_remote_ref(repo_path, source)
+    }
+
     fn git_validate_branch(&self, repo_path: &Path, branch_name: &str) -> Result<()> {
         let output = command("git")
             .args(["check-ref-format", "--branch", branch_name])
@@ -244,6 +250,10 @@ impl CreateTaskRuntime for RealCreateTaskRuntime {
 
     fn git_remove_worktree(&self, repo_path: &Path, worktree_path: &Path) -> Result<()> {
         git_remove_worktree(repo_path, worktree_path)
+    }
+
+    fn git_set_upstream(&self, repo_path: &Path, branch: &str, remote_source: &str) -> Result<()> {
+        git_set_upstream(repo_path, branch, remote_source)
     }
 
     fn tmux_session_exists(&self, session_name: &str) -> bool {

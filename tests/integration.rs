@@ -16,7 +16,7 @@ use tokio::net::TcpListener as TokioTcpListener;
 use opencode_kanban::app::App;
 use opencode_kanban::db::Database;
 use opencode_kanban::git::{
-    git_create_worktree, git_delete_branch, git_fetch, git_remove_worktree,
+    git_create_worktree, git_delete_branch, git_fetch, git_remove_worktree, git_set_upstream,
 };
 use opencode_kanban::opencode::{OpenCodeBindingState, Status, classify_binding_state};
 use opencode_kanban::tmux::{
@@ -59,7 +59,16 @@ async fn integration_test_full_lifecycle() -> Result<()> {
 
     git_fetch(fixture.repo_path())?;
     git_create_worktree(fixture.repo_path(), &worktree_path, branch, "origin/main")?;
+    git_set_upstream(&worktree_path, branch, "origin/main")?;
     assert!(worktree_path.exists());
+    assert_eq!(
+        git_stdout(
+            &worktree_path,
+            ["config", "branch.feature/integration-lifecycle.merge"]
+        )?
+        .trim(),
+        "refs/heads/main"
+    );
 
     let session_name = sanitize_session_name(&repo.name, branch);
     tmux_create_session(

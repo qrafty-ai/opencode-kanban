@@ -62,6 +62,39 @@ pub fn git_fetch(repo_path: &Path) -> Result<()> {
     run_git(repo_path, ["fetch", "origin"]).context("failed to fetch from origin")
 }
 
+/// Return the source choices exposed by the new-task picker.
+pub fn git_source_branches(repo_path: &Path) -> Vec<Branch> {
+    git_list_branches(repo_path)
+        .into_iter()
+        .filter(|branch| {
+            branch.name != "origin/HEAD"
+                && (!branch.is_remote || branch.name.starts_with("origin/"))
+        })
+        .collect()
+}
+
+pub fn git_resolve_remote_ref(repo_path: &Path, source: &str) -> Result<String> {
+    let source = source.trim();
+    if !source.starts_with("origin/") || source == "origin/HEAD" {
+        bail!("not an origin branch: {source}");
+    }
+    let ref_name = format!("refs/remotes/{source}");
+    run_git_output(
+        repo_path,
+        ["show-ref", "--verify", "--quiet", ref_name.as_str()],
+    )
+    .with_context(|| format!("origin branch `{source}` is unavailable after fetch"))?;
+    Ok(source.to_string())
+}
+
+pub fn git_set_upstream(repo_path: &Path, branch: &str, remote_source: &str) -> Result<()> {
+    run_git(
+        repo_path,
+        ["branch", "--set-upstream-to", remote_source, branch],
+    )
+    .with_context(|| format!("failed to set upstream of `{branch}` to `{remote_source}`"))
+}
+
 pub fn git_check_branch_up_to_date(repo_path: &Path, base_ref: &str) -> Result<()> {
     let remote_ref = if base_ref.starts_with("origin/") {
         format!("refs/remotes/{}", base_ref)
@@ -572,6 +605,79 @@ mod tests {
     }
 
     #[test]
+    fn source_branches_keep_local_and_origin_only() {
+        let repo = TestRepo::new_with_origin_main("source-branches").expect("repo should exist");
+        repo.git(["branch", "feature/local"])
+            .expect("local branch should be created");
+        repo.git(["update-ref", "refs/remotes/origin/feature/remote", "HEAD"])
+            .expect("origin ref should be created");
+        repo.git(["update-ref", "refs/remotes/upstream/feature/other", "HEAD"])
+            .expect("upstream ref should be created");
+        repo.git([
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ])
+        .expect("origin head should be created");
+
+        let sources = git_source_branches(repo.path());
+        assert!(
+            sources
+                .iter()
+                .any(|branch| branch.name == "main" && !branch.is_remote)
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|branch| branch.name == "origin/main" && branch.is_remote)
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|branch| branch.name == "origin/feature/remote")
+        );
+        assert!(!sources.iter().any(|branch| branch.name == "origin/HEAD"));
+        assert!(
+            !sources
+                .iter()
+                .any(|branch| branch.name.starts_with("upstream/"))
+        );
+    }
+
+    #[test]
+    fn remote_ref_resolution_reports_missing_origin_refs() {
+        let repo = TestRepo::new_with_origin_main("resolve-remote-ref").expect("repo should exist");
+        assert_eq!(
+            git_resolve_remote_ref(repo.path(), "origin/main").expect("origin/main should resolve"),
+            "origin/main"
+        );
+        let error = git_resolve_remote_ref(repo.path(), "origin/missing")
+            .expect_err("missing origin ref should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("origin branch `origin/missing` is unavailable")
+        );
+    }
+
+    #[test]
+    fn explicit_upstream_supports_differently_named_local_branch() {
+        let repo = TestRepo::new_with_origin_main("explicit-upstream").expect("repo should exist");
+        let worktree = repo.temp.path().join("wt-explicit-upstream");
+        git_create_worktree(repo.path(), &worktree, "feature/local-name", "origin/main")
+            .expect("worktree should be created");
+        git_set_upstream(&worktree, "feature/local-name", "origin/main")
+            .expect("upstream should be configured");
+
+        let remote = run_git_stdout(&worktree, ["config", "branch.feature/local-name.remote"])
+            .expect("branch remote should be readable");
+        let merge = run_git_stdout(&worktree, ["config", "branch.feature/local-name.merge"])
+            .expect("branch merge should be readable");
+        assert_eq!(remote.trim(), "origin");
+        assert_eq!(merge.trim(), "refs/heads/main");
+    }
+
+    #[test]
     fn test_get_remote_url() {
         let repo = TestRepo::new_with_origin_main("remote-url").expect("repo should be created");
         let remote = git_get_remote_url(repo.path());
@@ -862,5 +968,30 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr).trim()
             )
         }
+    }
+
+    fn run_git_stdout<I, S>(dir: &Path, args: I) -> Result<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let args_vec: Vec<String> = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_string())
+            .collect();
+        let output = Command::new("git")
+            .args(args_vec.iter().map(String::as_str))
+            .current_dir(dir)
+            .output()
+            .with_context(|| format!("failed to run git {}", args_vec.join(" ")))?;
+        if !output.status.success() {
+            bail!(
+                "git command failed: git {}\nstdout: {}\nstderr: {}",
+                args_vec.join(" "),
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 }
