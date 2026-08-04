@@ -225,6 +225,8 @@ pub fn opencode_query_session_by_dir(working_dir: &Path) -> Result<Option<String
     struct SessionListEntry {
         #[serde(default)]
         id: String,
+        #[serde(default)]
+        directory: String,
     }
 
     let config = status_server::ServerStatusConfig::default();
@@ -264,6 +266,7 @@ pub fn opencode_query_session_by_dir(working_dir: &Path) -> Result<Option<String
 
     let session_id = sessions
         .into_iter()
+        .filter(|entry| Path::new(&entry.directory) == working_dir)
         .find_map(|entry| match entry.id.trim() {
             "" => None,
             id => Some(id.to_string()),
@@ -692,8 +695,11 @@ mod tests {
     fn test_query_session_by_dir_uses_api_with_directory_filter() -> Result<()> {
         let _guard = TEST_ENV_LOCK.lock().expect("test env mutex should lock");
         let working_dir = tempfile::tempdir()?;
-        let (port, handle) =
-            spawn_session_lookup_server(r#"[{"id":"sid-latest","directory":"/tmp/project"}]"#)?;
+        let response_body = format!(
+            r#"[{{"id":"sid-latest","directory":"{}"}}]"#,
+            working_dir.path().display()
+        );
+        let (port, handle) = spawn_session_lookup_server(&response_body)?;
         let _port_guard = EnvVarGuard::set("OPENCODE_KANBAN_STATUS_PORT", port.to_string());
 
         let found = opencode_query_session_by_dir(working_dir.path())?;
@@ -726,6 +732,25 @@ mod tests {
             .expect("mock session lookup server thread should join");
         Ok(())
     }
+
+    #[test]
+    fn test_query_session_by_dir_rejects_directory_prefix_collisions() -> Result<()> {
+        let _guard = TEST_ENV_LOCK.lock().expect("test env mutex should lock");
+        let working_dir = Path::new("/home/cc/frontier");
+        let (port, handle) = spawn_session_lookup_server(
+            r#"[{"id":"sid-wrong","directory":"/home/cc/frontier_/abc"},{"id":"sid-right","directory":"/home/cc/frontier"}]"#,
+        )?;
+        let _port_guard = EnvVarGuard::set("OPENCODE_KANBAN_STATUS_PORT", port.to_string());
+
+        let found = opencode_query_session_by_dir(working_dir)?;
+
+        assert_eq!(found.as_deref(), Some("sid-right"));
+        handle
+            .join()
+            .expect("mock session lookup server thread should join");
+        Ok(())
+    }
+
     #[test]
     fn test_open_in_web_generates_correct_url() {
         let session_id = "test-session-123";

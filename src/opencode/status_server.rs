@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use reqwest::Client;
@@ -161,7 +162,11 @@ impl ServerStatusProvider {
             .await
             .map_err(|err| map_reqwest_error(err, "SERVER_READ_FAILED"))?;
 
-        parse_session_records_body(&body)
+        let mut records = parse_session_records_body(&body)?;
+        if let Some(directory) = directory {
+            records.retain(|record| Path::new(&record.directory) == Path::new(directory));
+        }
+        Ok(records)
     }
 
     pub async fn fetch_all_statuses(
@@ -1011,6 +1016,27 @@ mod tests {
             .expect("sub record should exist");
         assert_eq!(sub.parent_session_id.as_deref(), Some("root"));
         assert_eq!(sub.title.as_deref(), Some("Sub Session"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_all_session_records_rejects_directory_prefix_collisions() {
+        let port = spawn_single_response_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[{\"id\":\"frontier\",\"directory\":\"/home/cc/frontier\"},{\"id\":\"frontier-abc\",\"directory\":\"/home/cc/frontier_/abc\"}]".to_string(),
+        )
+        .await;
+        let provider = ServerStatusProvider::new(ServerStatusConfig {
+            port,
+            request_timeout: Duration::from_millis(500),
+            ..ServerStatusConfig::default()
+        });
+
+        let records = provider
+            .list_all_session_records(Some("/home/cc/frontier"))
+            .await
+            .expect("session records should parse");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].session_id, "frontier");
     }
 
     #[tokio::test(flavor = "multi_thread")]
