@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::SubagentTodoSummary;
 use crate::db::Database;
 use crate::notification::{TaskCompletionNotificationConfig, notify_task_completion};
-use crate::opencode::status_server::SessionStatusMatch;
+use crate::opencode::status_server::{SessionRecord, SessionStatusMatch};
 use crate::opencode::{ServerStatusProvider, Status};
 use crate::types::{SessionMessageItem, SessionState, SessionStatusSource, SessionTodoItem};
 
@@ -192,6 +192,12 @@ pub fn spawn_status_poller(
                             .await
                         {
                             Ok(statuses) => {
+                                let statuses = match task_session_records.as_deref() {
+                                    Some(records) => {
+                                        status_matches_for_session_records(statuses, records)
+                                    }
+                                    None => statuses,
+                                };
                                 let selected_status_match = select_status_match(
                                     statuses.clone(),
                                     complete_session_parent_map.as_ref(),
@@ -662,6 +668,20 @@ fn select_status_match(
     })
 }
 
+fn status_matches_for_session_records(
+    status_matches: Vec<SessionStatusMatch>,
+    session_records: &[SessionRecord],
+) -> Vec<SessionStatusMatch> {
+    let session_ids: HashSet<&str> = session_records
+        .iter()
+        .map(|record| record.session_id.as_str())
+        .collect();
+    status_matches
+        .into_iter()
+        .filter(|status_match| session_ids.contains(status_match.session_id.as_str()))
+        .collect()
+}
+
 fn find_eldest_ancestor(session_id: &str, parent_map: &HashMap<String, Option<String>>) -> String {
     let mut visited = HashSet::new();
     find_eldest_ancestor_recursive(session_id, parent_map, &mut visited)
@@ -803,6 +823,25 @@ mod tests {
     #[test]
     fn select_status_match_returns_none_for_empty_results() {
         assert!(select_status_match(Vec::new(), None).is_none());
+    }
+
+    #[test]
+    fn status_matches_exclude_sessions_rejected_by_exact_directory_matching() {
+        let records = vec![SessionRecord {
+            session_id: "frontier".to_string(),
+            directory: "/home/cc/frontier".to_string(),
+            title: None,
+            parent_session_id: None,
+        }];
+        let statuses = vec![
+            status_match("frontier", None),
+            status_match("frontier-abc", None),
+        ];
+
+        let matches = status_matches_for_session_records(statuses, &records);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].session_id, "frontier");
     }
 
     #[test]
