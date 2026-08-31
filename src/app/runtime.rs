@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::git::{
-    git_check_branch_up_to_date, git_create_worktree, git_detect_default_branch, git_fetch,
-    git_is_valid_repo, git_remove_worktree, git_resolve_remote_ref, git_set_upstream,
+    git_check_branch_up_to_date, git_create_worktree, git_create_worktree_from_existing_branch,
+    git_detect_default_branch, git_fetch, git_is_valid_repo, git_local_branch_exists,
+    git_remove_worktree, git_resolve_remote_ref, git_set_upstream,
 };
 use crate::process::command;
 use crate::tmux::{
@@ -120,6 +121,7 @@ pub trait CreateTaskRuntime {
     fn git_fetch(&self, repo_path: &Path) -> Result<()>;
     fn git_resolve_remote_ref(&self, repo_path: &Path, source: &str) -> Result<String>;
     fn git_validate_branch(&self, repo_path: &Path, branch_name: &str) -> Result<()>;
+    fn git_local_branch_exists(&self, repo_path: &Path, branch_name: &str) -> bool;
     fn git_check_branch_up_to_date(&self, repo_path: &Path, base_ref: &str) -> Result<()>;
     fn git_create_worktree(
         &self,
@@ -127,6 +129,12 @@ pub trait CreateTaskRuntime {
         worktree_path: &Path,
         branch_name: &str,
         base_ref: &str,
+    ) -> Result<()>;
+    fn git_create_worktree_from_existing_branch(
+        &self,
+        repo_path: &Path,
+        worktree_path: &Path,
+        branch_name: &str,
     ) -> Result<()>;
     fn git_set_upstream(&self, repo_path: &Path, branch: &str, remote_source: &str) -> Result<()>;
     fn git_remove_worktree(&self, repo_path: &Path, worktree_path: &Path) -> Result<()>;
@@ -238,6 +246,10 @@ impl CreateTaskRuntime for RealCreateTaskRuntime {
         git_check_branch_up_to_date(repo_path, base_ref)
     }
 
+    fn git_local_branch_exists(&self, repo_path: &Path, branch_name: &str) -> bool {
+        git_local_branch_exists(repo_path, branch_name)
+    }
+
     fn git_create_worktree(
         &self,
         repo_path: &Path,
@@ -246,6 +258,15 @@ impl CreateTaskRuntime for RealCreateTaskRuntime {
         base_ref: &str,
     ) -> Result<()> {
         git_create_worktree(repo_path, worktree_path, branch_name, base_ref)
+    }
+
+    fn git_create_worktree_from_existing_branch(
+        &self,
+        repo_path: &Path,
+        worktree_path: &Path,
+        branch_name: &str,
+    ) -> Result<()> {
+        git_create_worktree_from_existing_branch(repo_path, worktree_path, branch_name)
     }
 
     fn git_remove_worktree(&self, repo_path: &Path, worktree_path: &Path) -> Result<()> {

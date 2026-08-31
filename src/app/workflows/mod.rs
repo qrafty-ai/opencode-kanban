@@ -14,6 +14,4 @@ pub(crate) use create_task::{
     repo_match_candidates, repo_selection_command_id, resolve_repo_for_creation,
 };
 pub(crate) use errors::create_task_error_dialog_state;
-#[cfg(test)]
-pub(crate) use errors::parse_existing_branch_name;
 pub(crate) use recovery::reconcile_startup_tasks;
