@@ -115,30 +115,8 @@ pub(crate) fn create_task_pipeline_with_runtime(
             .git_validate_branch(&repo_path, &branch)
             .context("branch validation failed")?;
 
-        let mut base_ref = if state.base_input.trim().is_empty() {
-            runtime.git_detect_default_branch(&repo_path)
-        } else {
-            state.base_input.trim().to_string()
-        };
-
-        if state.base_is_remote {
-            runtime
-                .git_fetch(&repo_path)
-                .context("failed to fetch origin; no task was created")?;
-            base_ref = runtime
-                .git_resolve_remote_ref(&repo_path, &base_ref)
-                .context("selected origin branch is no longer available; no task was created")?;
-        } else if let Err(err) = runtime.git_fetch(&repo_path) {
-            let message = format!("fetch from origin failed, continuing offline: {err:#}");
-            tracing::warn!("{message}");
-            warning = Some(message);
-        }
-
-        if state.ensure_base_up_to_date {
-            runtime
-                .git_check_branch_up_to_date(&repo_path, &base_ref)
-                .context("base branch check failed")?;
-        }
+        let reuse_existing_branch = !state.branch_input.trim().is_empty()
+            && runtime.git_local_branch_exists(&repo_path, &branch);
 
         let worktrees_root = worktrees_root_for_repo(&repo_path);
         fs::create_dir_all(&worktrees_root).with_context(|| {
@@ -149,16 +127,54 @@ pub(crate) fn create_task_pipeline_with_runtime(
         })?;
         let derived_worktree_path = derive_worktree_path(&worktrees_root, &repo_path, &branch);
 
-        runtime
-            .git_create_worktree(&repo_path, &derived_worktree_path, &branch, &base_ref)
-            .context("worktree creation failed")?;
+        if reuse_existing_branch {
+            runtime
+                .git_create_worktree_from_existing_branch(
+                    &repo_path,
+                    &derived_worktree_path,
+                    &branch,
+                )
+                .context("worktree creation failed")?;
+        } else {
+            let mut base_ref = if state.base_input.trim().is_empty() {
+                runtime.git_detect_default_branch(&repo_path)
+            } else {
+                state.base_input.trim().to_string()
+            };
 
-        if state.base_is_remote
-            && let Err(error) = runtime.git_set_upstream(&derived_worktree_path, &branch, &base_ref)
-        {
-            let _ = runtime.git_remove_worktree(&repo_path, &derived_worktree_path);
-            return Err(error)
-                .context("worktree was created but upstream tracking could not be configured");
+            if state.base_is_remote {
+                runtime
+                    .git_fetch(&repo_path)
+                    .context("failed to fetch origin; no task was created")?;
+                base_ref = runtime
+                    .git_resolve_remote_ref(&repo_path, &base_ref)
+                    .context(
+                        "selected origin branch is no longer available; no task was created",
+                    )?;
+            } else if let Err(err) = runtime.git_fetch(&repo_path) {
+                let message = format!("fetch from origin failed, continuing offline: {err:#}");
+                tracing::warn!("{message}");
+                warning = Some(message);
+            }
+
+            if state.ensure_base_up_to_date {
+                runtime
+                    .git_check_branch_up_to_date(&repo_path, &base_ref)
+                    .context("base branch check failed")?;
+            }
+
+            runtime
+                .git_create_worktree(&repo_path, &derived_worktree_path, &branch, &base_ref)
+                .context("worktree creation failed")?;
+
+            if state.base_is_remote
+                && let Err(error) =
+                    runtime.git_set_upstream(&derived_worktree_path, &branch, &base_ref)
+            {
+                let _ = runtime.git_remove_worktree(&repo_path, &derived_worktree_path);
+                return Err(error)
+                    .context("worktree was created but upstream tracking could not be configured");
+            }
         }
 
         (repo, branch, repo_path, derived_worktree_path, true)
@@ -507,7 +523,7 @@ mod tests {
     use crate::db::Database;
     use crate::types::Repo;
     use anyhow::Result;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -516,8 +532,12 @@ mod tests {
     struct FakeCreateRuntime {
         fetch_error: Option<String>,
         resolve_error: Option<String>,
+        existing_branch: Cell<bool>,
+        reuse_error: Cell<bool>,
         fetched: RefCell<bool>,
         created: RefCell<bool>,
+        reused: RefCell<bool>,
+        session_created: Cell<bool>,
         upstream: RefCell<Vec<String>>,
     }
 
@@ -526,8 +546,12 @@ mod tests {
             Self {
                 fetch_error: fetch_error.map(str::to_string),
                 resolve_error: resolve_error.map(str::to_string),
+                existing_branch: Cell::new(false),
+                reuse_error: Cell::new(false),
                 fetched: RefCell::new(false),
                 created: RefCell::new(false),
+                reused: RefCell::new(false),
+                session_created: Cell::new(false),
                 upstream: RefCell::new(Vec::new()),
             }
         }
@@ -562,11 +586,27 @@ mod tests {
         fn git_validate_branch(&self, _: &Path, _: &str) -> Result<()> {
             Ok(())
         }
+        fn git_local_branch_exists(&self, _: &Path, _: &str) -> bool {
+            self.existing_branch.get()
+        }
         fn git_check_branch_up_to_date(&self, _: &Path, _: &str) -> Result<()> {
             Ok(())
         }
         fn git_create_worktree(&self, _: &Path, _: &Path, _: &str, _: &str) -> Result<()> {
             *self.created.borrow_mut() = true;
+            Ok(())
+        }
+        fn git_create_worktree_from_existing_branch(
+            &self,
+            _: &Path,
+            _: &Path,
+            _: &str,
+        ) -> Result<()> {
+            *self.created.borrow_mut() = true;
+            *self.reused.borrow_mut() = true;
+            if self.reuse_error.get() {
+                anyhow::bail!("branch is already checked out");
+            }
             Ok(())
         }
         fn git_set_upstream(&self, _: &Path, branch: &str, source: &str) -> Result<()> {
@@ -582,6 +622,7 @@ mod tests {
             false
         }
         fn tmux_create_session(&self, _: &str, _: &Path, _: Option<&str>) -> Result<()> {
+            self.session_created.set(true);
             Ok(())
         }
         fn tmux_apply_task_status_bar(
@@ -703,6 +744,53 @@ mod tests {
         )
         .expect("local task");
         assert!(local_runtime.upstream.borrow().is_empty());
+    }
+
+    #[test]
+    fn existing_local_branch_skips_base_and_upstream_handling() {
+        let (_temp, db, repo) = pipeline_fixture();
+        let category = db.list_categories().expect("categories")[0].id;
+        let runtime = FakeCreateRuntime::new(Some("fetch must not run"), None);
+        runtime.existing_branch.set(true);
+
+        create_task_pipeline_with_runtime(
+            &db,
+            &mut vec![repo.clone()],
+            category,
+            &pipeline_state(Path::new(&repo.path), true),
+            None,
+            &runtime,
+        )
+        .expect("existing branch task");
+
+        assert!(*runtime.created.borrow());
+        assert!(*runtime.reused.borrow());
+        assert!(!*runtime.fetched.borrow());
+        assert!(runtime.upstream.borrow().is_empty());
+        assert_eq!(db.list_tasks().expect("tasks").len(), 1);
+    }
+
+    #[test]
+    fn existing_local_branch_failure_stops_before_session_and_task_creation() {
+        let (_temp, db, repo) = pipeline_fixture();
+        let category = db.list_categories().expect("categories")[0].id;
+        let runtime = FakeCreateRuntime::new(None, None);
+        runtime.existing_branch.set(true);
+        runtime.reuse_error.set(true);
+
+        let error = create_task_pipeline_with_runtime(
+            &db,
+            &mut vec![repo.clone()],
+            category,
+            &pipeline_state(Path::new(&repo.path), false),
+            None,
+            &runtime,
+        )
+        .expect_err("checked-out branch should fail");
+
+        assert!(error.to_string().contains("worktree creation failed"));
+        assert!(!runtime.session_created.get());
+        assert_eq!(db.list_tasks().expect("tasks").len(), 0);
     }
 
     #[test]

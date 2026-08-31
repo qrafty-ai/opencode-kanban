@@ -182,23 +182,7 @@ pub fn git_create_worktree(
     branch_name: &str,
     base_ref: &str,
 ) -> Result<()> {
-    let check_output = run_git_output(repo_path, ["check-ref-format", "--branch", branch_name])
-        .with_context(|| format!("failed to validate branch name `{branch_name}`"))?;
-    if !check_output.status.success() {
-        let stdout = String::from_utf8_lossy(&check_output.stdout)
-            .trim()
-            .to_string();
-        let stderr = String::from_utf8_lossy(&check_output.stderr)
-            .trim()
-            .to_string();
-        bail!("invalid branch name `{branch_name}`\nstdout: {stdout}\nstderr: {stderr}");
-    }
-
-    if worktree_path.exists() {
-        bail!("worktree path already exists: {}", worktree_path.display());
-    }
-
-    let worktree_path_str = worktree_path.to_string_lossy().to_string();
+    let worktree_path_str = validate_worktree_request(repo_path, worktree_path, branch_name)?;
     run_git(
         repo_path,
         [
@@ -216,6 +200,48 @@ pub fn git_create_worktree(
             worktree_path.display()
         )
     })
+}
+
+pub fn git_create_worktree_from_existing_branch(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+) -> Result<()> {
+    let worktree_path_str = validate_worktree_request(repo_path, worktree_path, branch_name)?;
+    run_git(
+        repo_path,
+        ["worktree", "add", &worktree_path_str, branch_name],
+    )
+    .with_context(|| {
+        format!(
+            "failed to create worktree `{}` from existing branch `{branch_name}`",
+            worktree_path.display()
+        )
+    })
+}
+
+fn validate_worktree_request(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+) -> Result<String> {
+    let check_output = run_git_output(repo_path, ["check-ref-format", "--branch", branch_name])
+        .with_context(|| format!("failed to validate branch name `{branch_name}`"))?;
+    if !check_output.status.success() {
+        let stdout = String::from_utf8_lossy(&check_output.stdout)
+            .trim()
+            .to_string();
+        let stderr = String::from_utf8_lossy(&check_output.stderr)
+            .trim()
+            .to_string();
+        bail!("invalid branch name `{branch_name}`\nstdout: {stdout}\nstderr: {stderr}");
+    }
+
+    if worktree_path.exists() {
+        bail!("worktree path already exists: {}", worktree_path.display());
+    }
+
+    Ok(worktree_path.to_string_lossy().to_string())
 }
 
 pub fn git_remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<()> {
@@ -415,7 +441,7 @@ fn sanitize_slug(input: &str, fallback: &str) -> String {
     }
 }
 
-fn branch_exists(repo_path: &Path, branch_name: &str) -> bool {
+pub fn git_local_branch_exists(repo_path: &Path, branch_name: &str) -> bool {
     run_git_output(
         repo_path,
         [
@@ -426,6 +452,10 @@ fn branch_exists(repo_path: &Path, branch_name: &str) -> bool {
         ],
     )
     .is_ok()
+}
+
+fn branch_exists(repo_path: &Path, branch_name: &str) -> bool {
+    git_local_branch_exists(repo_path, branch_name)
         || run_git_output(
             repo_path,
             [
@@ -547,6 +577,37 @@ mod tests {
             .git_stdout(["worktree", "list"])
             .expect("worktree list should work");
         assert!(worktrees.contains(worktree.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn test_create_worktree_from_existing_local_branch() {
+        let repo =
+            TestRepo::new_with_origin_main("existing-worktree").expect("repo should be created");
+        repo.git(["branch", "feature/existing"])
+            .expect("branch should be created");
+        let worktree = repo.temp.path().join("wt-existing");
+
+        assert!(git_local_branch_exists(repo.path(), "feature/existing"));
+        git_create_worktree_from_existing_branch(repo.path(), &worktree, "feature/existing")
+            .expect("worktree should reuse existing branch");
+
+        assert!(worktree.exists());
+        let branch = run_git_stdout(&worktree, ["branch", "--show-current"])
+            .expect("worktree branch should be readable");
+        assert_eq!(branch.trim(), "feature/existing");
+    }
+
+    #[test]
+    fn test_existing_branch_already_checked_out_does_not_create_worktree() {
+        let repo =
+            TestRepo::new_with_origin_main("occupied-worktree").expect("repo should be created");
+        let worktree = repo.temp.path().join("wt-occupied");
+
+        let error = git_create_worktree_from_existing_branch(repo.path(), &worktree, "main")
+            .expect_err("occupied branch should fail");
+
+        assert!(error.to_string().contains("existing branch `main`"));
+        assert!(!worktree.exists());
     }
 
     #[test]

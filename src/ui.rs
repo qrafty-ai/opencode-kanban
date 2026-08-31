@@ -1663,7 +1663,7 @@ fn render_new_task_dialog(
             &state.branch_input,
             state.focused_field == NewTaskField::Branch,
             theme,
-            Some("auto-generated if empty"),
+            Some("reuses a local branch; generated if empty"),
         );
         app.interaction_map.register_click(
             InteractionLayer::Dialog,

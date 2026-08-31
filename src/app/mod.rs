@@ -852,9 +852,9 @@ mod tests {
         selected_task_from_side_panel_rows, side_panel_rows_from, sorted_categories_with_indexes,
     };
     use super::workflows::{
-        build_attach_popup_lines, parse_existing_branch_name, popup_style_from_theme,
-        reconcile_startup_tasks, repo_match_candidates, repo_selection_command_id,
-        repo_selection_usage_map, resolve_repo_for_creation, tmux_hex_color,
+        build_attach_popup_lines, popup_style_from_theme, reconcile_startup_tasks,
+        repo_match_candidates, repo_selection_command_id, repo_selection_usage_map,
+        resolve_repo_for_creation, tmux_hex_color,
     };
     use super::*;
 
@@ -1170,25 +1170,6 @@ mod tests {
 
         let ranked = rank_repos_for_query("", &repos, &usage);
         assert_eq!(ranked.first().copied(), Some(1));
-    }
-
-    #[test]
-    fn parse_existing_branch_name_detects_git_branch_collision() {
-        let detail =
-            "stderr: Preparing worktree (new branch 'c')\nfatal: a branch named 'c' already exists";
-        assert_eq!(parse_existing_branch_name(detail), Some("c".to_string()));
-    }
-
-    #[test]
-    fn create_task_error_dialog_state_branch_collision_is_concise() {
-        let err = anyhow::anyhow!(
-            "worktree creation failed: failed to create worktree `/home/cc/.opencode-kanban-worktrees/test/c-2` for branch `c` from `main`: git command failed in /home/cc/codes/playgrounds/test: git worktree add -b c /home/cc/.opencode-kanban-worktrees/test/c-2 main\nstdout:\nstderr: Preparing worktree (new branch 'c')\nfatal: a branch named 'c' already exists"
-        );
-
-        let dialog = create_task_error_dialog_state(&err);
-        assert_eq!(dialog.title, "Branch already exists");
-        assert!(dialog.detail.contains("Branch `c` already exists"));
-        assert!(!dialog.detail.contains("git worktree add -b"));
     }
 
     #[test]
